@@ -14,7 +14,7 @@ Scope owner: Command Argument Passing System (`caps`)
 | Language    | C (C11)                                         |
 | Platform    | Linux / POSIX-like Unix                         |
 | Build       | Make                                            |
-| Compiler    | GCC                                             |
+| Compiler    | `cc` (Makefile `CC`; e.g. GCC or Clang)         |
 | Not         | a Bash replacement                              |
 
 ---
@@ -181,7 +181,9 @@ cleanly with status `0`. No crash, no infinite loop.
 | exit 0              | quiet (success) in normal mode  |
 | non-zero exit       | `caps: 'cmd' exited with status N` |
 | terminated by signal| `caps: 'cmd' terminated by signal N` |
-| `execvp()` failure  | `caps: command not found: cmd` (with errno detail) |
+| `execvp()` failure  | `caps: command not found: cmd` (if `errno == ENOENT`) |
+|                     | `caps: cmd: permission denied` (if `errno == EACCES`)  |
+|                     | `caps: cmd: <strerror(errno)>` (otherwise)             |
 
 Diagnostics go to stderr. Normal mode output stays quiet and tidy.
 

@@ -171,7 +171,12 @@ Documented limitations (single space rule aside):
 - no escapes — backslash is literal;
 - no glob expansion — `*.c` is passed literally;
 - no environment or tilde expansion — `$HOME`, `~` stay literal;
-- no pipes, redirection, background `&`, `&&`, `||`.
+- no pipes, background `&`, `&&`, `||`.
+
+Redirection is the one extra-token feature the parser does handle:
+`parser_split_redirections()` (see `docs/redirection.md`) recognizes
+`<`, `>`, and `>>` as whole tokens in the interactive REPL and removes
+them from the argv handed to `execvp()`.
 
 Each limitation is intentional and keeps the argument-passing story
 clear. A future tokenizer may add quoting; the module boundary makes
