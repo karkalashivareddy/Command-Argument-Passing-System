@@ -14,7 +14,7 @@ compiled, tested, reviewed, and committed.
 | ----- | ------------------------------------------ | ------- | --------- |
 | 0     | Research + specification                   | Complete | `b0a4859` |
 | 1     | Project foundation (build skeleton)        | Complete | `2eb5241` |
-| 2     | Minimal fork/execvp/waitpid execution      | Planned | —         |
+| 2     | Minimal fork/execvp/waitpid execution      | Complete | `657a8c3` |
 | 3     | Argument vector handling                   | Planned | —         |
 | 4     | Interactive REPL                          | Planned | —         |
 | 5     | Built-ins + robust error handling          | Planned | —         |

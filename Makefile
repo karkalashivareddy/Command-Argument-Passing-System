@@ -1,5 +1,5 @@
 CC      := cc
-CPPFLAGS := -Iinclude
+CPPFLAGS := -Iinclude -D_POSIX_C_SOURCE=200809L
 CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -g
 LDFLAGS :=
 LDLIBS  :=
