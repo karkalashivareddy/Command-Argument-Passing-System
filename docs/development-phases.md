@@ -20,7 +20,7 @@ compiled, tested, reviewed, and committed.
 | 5     | Built-ins + robust error handling          | Complete | `e6729af` |
 | 6     | Automated testing                         | Complete | `d258be7` |
 | 7     | Basic signal handling                     | Complete | `5789864` |
-| 8a    | Redirection (>, >>, <)                    | Complete | `imminent` |
+| 8a    | Redirection (>, >>, <)                    | Complete | `11cf4ba` |
 | 8b    | Pipeline (pipe)                           | Skipped — not implemented, documented as planned |
 | 9     | Final documentation                       | Planned | —         |
 | 10    | CI + final engineering review             | Planned | —         |
