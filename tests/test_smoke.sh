@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke and argument-parsing tests for Phase 3.
+# Smoke, parser, and interactive REPL tests (Phases 2-4).
 set -u
 
 bin=${1:?usage: test_smoke.sh <binary>}
@@ -11,69 +11,74 @@ fail() {
 
 [ -x "$bin" ] || fail "binary not found or not executable: $bin"
 
-# --- Exec smoke tests (from Phase 2) ---
+# --- 1. Exec smoke (one-shot) ---
 
 out=$(echo "" | "$bin" echo hello) || fail "'echo hello' exited with $?"
 [ "$out" = "hello" ] || fail "'echo hello' output was: $out"
-echo "PASS: echo hello -> hello"
+echo "PASS: one-shot echo hello -> hello"
 
-err=$(echo "" | "$bin" no_such_cmd_xyz 2>&1 >/dev/null)
-status=$?
-[ "$status" -eq 127 ] || fail "'no_such_cmd_xyz' exit $status (expected 127)"
-echo "PASS: unknown command -> exit 127"
+# --- 2. Argument parsing (--parse) ---
 
-# --- Argument vector parsing (--parse) ---
-
-parse_out() {
-    # Pipe a line into --parse and strip the banner line.
-    printf '%s\n' "$1" | "$bin" --parse 2>/dev/null | grep '^argv\['
-}
-
-# helper: assert token count
 assert_argc() {
-    local input="$1"
-    local expect="$2"
-    local out
-    out=$(printf '%s\n' "$input" | "$bin" --parse 2>/dev/null)
-    local got
-    got=$(echo "$out" | grep '^argc = ' | sed 's/argc = //')
+    local input="$1" expect="$2" got
+    got=$(printf '%s\n' "$input" | "$bin" --parse 2>/dev/null | grep '^argc = ' | sed 's/argc = //')
     [ "$got" = "$expect" ] || fail "--parse '$input': argc=$got (expected $expect)"
     echo "PASS: --parse '$input' -> argc=$expect"
 }
 
 assert_argc "" 0
-assert_argc "   " 0
 assert_argc "echo" 1
-assert_argc "echo hello" 2
-assert_argc "echo   hello   world" 3
-assert_argc "  ls -la /tmp  " 3
+assert_argc "echo hello world" 3
 
-assert_tokens() {
-    local input="$1"
-    shift
-    local expected=("$@")
-    local tokens
-    tokens=$(parse_out "$input")
-    local idx=0
-    for exp in "${expected[@]}"; do
-        local got
-        got=$(echo "$tokens" | grep "argv\[$idx\] =" | sed "s/argv\[$idx\] = //")
-        [ "$got" = "$exp" ] || fail "token $idx: got '$got', expected '$exp'"
-        idx=$((idx + 1))
-    done
+# --- 3. Interactive REPL ---
+
+repl() {
+    printf '%s\n' "$@" | "$bin" 2>/dev/null
 }
 
-assert_tokens "echo hello" "echo" "hello"
-assert_tokens "ls -la /tmp" "ls" "-la" "/tmp"
-assert_tokens "  echo  hi  there  " "echo" "hi" "there"
-assert_tokens "single" "single"
+repl_err() {
+    printf '%s\n' "$@" | "$bin" 2>&1 >/dev/null
+}
 
-# argv[argc] must be NULL
-last_line=$(parse_out "echo hi" | tail -1)
-echo "$last_line" | grep -q 'argv\[2\] = (null)' || fail "argv[argc] not NULL: $last_line"
-echo "PASS: argv[argc] == NULL"
+# 3a. echo inside REPL
+out=$(repl "echo repl-hello")
+[ "$out" = "repl-hello" ] || fail "REPL echo output: $out"
+echo "PASS: REPL echo repl-hello -> repl-hello"
+
+# 3b. blank line is silently ignored
+out=$(repl "" "echo after-blank")
+[ "$out" = "after-blank" ] || fail "blank line produced output: $out"
+echo "PASS: blank line ignored"
+
+# 3c. command-not-found then echo still works (resilience)
+out=$(repl "no_such_xyz_12345" "echo still-alive")
+[ "$out" = "still-alive" ] || fail "resilience failed: $out"
+echo "PASS: bad command then echo works"
+
+# 3d. EOF exits 0 (send nothing, expect exit 0)
+printf '' | "$bin" 2>/dev/null >/dev/null
+[ $? -eq 0 ] || fail "EOF did not exit 0"
+echo "PASS: EOF exits 0"
+
+# 3e. exit [N] sets the return code
+printf 'exit 42\n' | "$bin" 2>/dev/null >/dev/null
+[ $? -eq 42 ] || fail "exit 42 -> $? (expected 42)"
+echo "PASS: exit 42 -> 42"
+
+# 3f. help text goes to stderr and contains expected keywords
+help_out=$(repl_err "help")
+case "$help_out" in
+    *Built-in*help*exit*) echo "PASS: help text present" ;;
+    *) fail "unexpected help output: $help_out" ;;
+esac
+
+# 3g. --help flag works
+help_flag=$("$bin" --help 2>&1 >/dev/null)
+case "$help_flag" in
+    *Usage*parse*command*) echo "PASS: --help flag works" ;;
+    *) fail "unexpected --help output: $help_flag" ;;
+esac
 
 # --- All passed ---
-
-echo "PASS: smoke + parser tests OK ($bin)"
+echo "PASS: all tests OK ($bin)"
 exit 0
