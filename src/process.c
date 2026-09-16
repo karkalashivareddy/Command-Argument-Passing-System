@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -20,10 +21,14 @@
  * write() and strlen() are in the POSIX async-signal-safe set; this
  * is the minimal, correct child-side failure path.
  */
-static void child_fatal_printf(const char *fmt, const char *detail)
+static void child_fatal_printf(const char *fmt, ...)
 {
     char buf[256];
-    int n = snprintf(buf, sizeof buf, fmt, detail);
+    va_list ap;
+
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
 
     if (n > 0) {
         size_t len = (size_t)n;
@@ -39,8 +44,10 @@ static void child_exec_failure(const char *command)
         child_fatal_printf("caps: command not found: %s\n", command);
     else if (errno == EACCES)
         child_fatal_printf("caps: %s: permission denied\n", command);
-    else
-        child_fatal_printf("caps: %s: %s\n", strerror(errno) ? command : command);
+    else {
+        const char *e = strerror(errno);
+        child_fatal_printf("caps: %s: %s\n", command, e ? e : "unknown error");
+    }
 }
 
 static int open_redirections(redirection_t *redirs, int nredirs)
