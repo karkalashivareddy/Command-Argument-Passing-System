@@ -76,8 +76,11 @@ static int interactive_loop(void)
             parser_free_argv(argv);
             break;
         }
-        if (res == CAPS_NOT_BUILTIN)
-            status = process_exec(argv);
+        if (res == CAPS_NOT_BUILTIN) {
+            int raw_status = 0;
+            status = process_exec(argv, &raw_status);
+            process_report_status(argv[0], raw_status);
+        }
 
         last_status = status;
         parser_free_argv(argv);
@@ -118,7 +121,7 @@ int main(int argc, char *argv[])
     }
 
     if (argc >= 2)
-        return process_exec(&argv[1]);
+        return process_exec(&argv[1], NULL);
 
     return interactive_loop();
 }

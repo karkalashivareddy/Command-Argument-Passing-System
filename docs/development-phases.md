@@ -17,7 +17,7 @@ compiled, tested, reviewed, and committed.
 | 2     | Minimal fork/execvp/waitpid execution      | Complete | `657a8c3` |
 | 3     | Argument vector handling                   | Complete | `3e26022` |
 | 4     | Interactive REPL                          | Complete | `9eb97cd` |
-| 5     | Built-ins + robust error handling          | Planned | —         |
+| 5     | Built-ins + robust error handling          | Complete | `e6729af` |
 | 6     | Automated testing                         | Planned | —         |
 | 7     | Basic signal handling                     | Planned | —         |
 | 8     | Optional IPC extensions (pipes/redirection)| Planned | —         |

@@ -39,10 +39,13 @@ static void child_exec_failure(const char *command)
     }
 }
 
-int process_exec(char *const argv[])
+int process_exec(char *const argv[], int *raw_status)
 {
     pid_t pid;
     int status;
+
+    if (raw_status != NULL)
+        *raw_status = 0;
 
     if (argv == NULL || argv[0] == NULL) {
         caps_error("no command provided");
@@ -74,11 +77,17 @@ int process_exec(char *const argv[])
         return EXIT_FAILURE;
     }
 
-    if (WIFEXITED(status))
+    if (WIFEXITED(status)) {
+        if (raw_status != NULL)
+            *raw_status = status;
         return WEXITSTATUS(status);
+    }
 
-    if (WIFSIGNALED(status))
+    if (WIFSIGNALED(status)) {
+        if (raw_status != NULL)
+            *raw_status = status;
         return 128 + WTERMSIG(status);
+    }
 
     return EXIT_FAILURE;
 }

@@ -7,6 +7,11 @@
  * argv must be NULL-terminated (argv[argc] == NULL) and argv[0] must
  * be the command name.
  *
+ * If raw_status is not NULL it receives the raw wait() status as
+ * returned by waitpid(), suitable for WIFEXITED/WEXITSTATUS and
+ * WIFSIGNALED/WTERMSIG.  This lets the interactive REPL report the
+ * child's outcome without repeating the decoding logic.
+ *
  * Returns the child's outcome following shell conventions:
  *   - child exited with code N            -> N
  *   - child terminated by signal S        -> 128 + S
@@ -17,7 +22,7 @@
  * The child never returns into the caller: after a failed execvp()
  * it reports the error on stderr and terminates with _exit().
  */
-int process_exec(char *const argv[]);
+int process_exec(char *const argv[], int *raw_status);
 
 /* Print a human-readable summary of a raw wait() status (per WIFEXITED
  * / WIFSIGNALED) to stderr, naming the command that produced it. */
