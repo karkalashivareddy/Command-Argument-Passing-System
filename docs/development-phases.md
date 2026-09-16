@@ -13,7 +13,7 @@ compiled, tested, reviewed, and committed.
 | Phase | Title                                      | State   | Commit(s) |
 | ----- | ------------------------------------------ | ------- | --------- |
 | 0     | Research + specification                   | Complete | `b0a4859` |
-| 1     | Project foundation (build skeleton)        | Planned | —         |
+| 1     | Project foundation (build skeleton)        | Complete | `2eb5241` |
 | 2     | Minimal fork/execvp/waitpid execution      | Planned | —         |
 | 3     | Argument vector handling                   | Planned | —         |
 | 4     | Interactive REPL                          | Planned | —         |
