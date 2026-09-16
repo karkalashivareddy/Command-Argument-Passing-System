@@ -82,25 +82,22 @@ The project must demonstrate:
 | Area             | Detail                                                              |
 | ---------------- | ------------------------------------------------------------------- |
 | Interactive CLI  | `caps>` prompt, one command per line                                |
-| One-shot mode    | `caps command [arg ...]` (Phase 2/3)                                |
+| One-shot mode    | `caps command [arg ...]`                                            |
 | Parsing          | whitespace-separated tokens; `argv[argc] == NULL`                   |
 | Process model    | `fork()` in parent, `execvp()` in child, `waitpid()` in parent      |
-| Built-ins        | `help`, `exit`                                                      |
+| Built-ins        | `help`, `exit`, `cd`                                                |
+| Redirection      | `>` (truncate), `>>` (append), `<` (input) in interactive REPL      |
 | Error handling   | empty input, unknown command, `fork`/`exec`/`waitpid` failures, EOF |
 | Status handling  | normal exit, non-zero exit, signal termination                      |
 | Build            | `make`, `make clean`, `make test`, `make run`                       |
-| Tests            | parser, execution, exit status, signal termination, resilience      |
+| Tests            | parser, execution, exit status, signal termination, redirection, resilience |
 
 ### 4.2 In scope (must document, implementation optional)
 
-- Signal model and its limitations (Phase 7).
-- Pipes / redirection / background jobs as clearly-marked extensions
-  (Phase 8), only if the core is stable.
+- Pipes / background jobs as clearly-marked extensions (future phase),
+  only if the core is stable.
 
 ### 4.3 Out of scope (explicitly excluded)
-
-- Full shell grammar / AST-based parsing.
-- Quoting and escaping rules.
 - Wildcard/glob expansion.
 - Environment-variable and tilde expansion.
 - Command substitution.
@@ -188,6 +185,39 @@ cleanly with status `0`. No crash, no infinite loop.
 
 Diagnostics go to stderr. Normal mode output stays quiet and tidy.
 
+### 6.6 Redirection (interactive REPL)
+
+```text
+caps> echo Hello > /tmp/caps_out.txt
+caps> cat /tmp/caps_out.txt
+Hello
+
+caps> cat < /tmp/caps_out.txt
+Hello
+```
+
+Operator tokens:
+
+| Token | Meaning                       |
+| ----- | ----------------------------- |
+| `>`   | truncate output to file       |
+| `>>`  | append output to file         |
+| `<`   | read input from file          |
+
+Contract:
+
+- a redirection operator consumes the following token as the file name;
+- operators may appear before, after, or interleaved with arguments;
+- `> f` alone (no command) is a syntax error;
+- `echo >` (missing file) is a syntax error;
+- a missing input file aborts the command and reports the error;
+- an unwritable output path aborts the command and reports the error;
+- the REPL is never killed by a redirection failure;
+- redirection is **not** supported for built-in commands (`help`,
+  `exit`, `cd`); attempting it is reported as an error.
+- one-shot mode does **not** interpret redirection tokens; `./caps echo
+  > file` passes `>` and `file` literally to `echo`.
+
 ---
 
 ## 7. Error model
@@ -198,6 +228,9 @@ Every important system call must have its return value checked:
 fork()      -> parent: -1 = failure (no child created)
 execvp()    -> only returns on failure (errno set)
 waitpid()   -> -1 = failure (errno set)
+open()      -> -1 = failure (errno set; redirection aborts the command)
+dup2()      -> -1 = failure (errno set; child terminates)
+close()     -> -1 = failure (errno set)  [best-effort reported]
 getline()   -> -1 = EOF or error (ferror() disambiguates)
 malloc()    -> NULL = allocation failure
 ```
@@ -254,6 +287,8 @@ rest of the Phase 0 documentation:
   `WIFSIGNALED`, `WTERMSIG`)
 - `getline(3)` — Linux man-pages 6.18 (man7.org)
 - `exec(3p)` — POSIX Programmer's Manual (man7.org)
+- `open(2)` / `dup2(2)` / `close(2)` — POSIX file-descriptor interfaces
+  used by the redirection feature (Phase 8)
 
 ---
 

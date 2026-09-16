@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,7 +11,7 @@
 #include "utils.h"
 
 /*
- * Report an exec failure from inside the child process.
+ * Report an exec/dup2 failure from inside the child process.
  *
  * After fork() the child shares a copy of the parent's stdio buffers.
  * Using fprintf()/exit() here could flush duplicated buffers and tear
@@ -19,18 +20,10 @@
  * write() and strlen() are in the POSIX async-signal-safe set; this
  * is the minimal, correct child-side failure path.
  */
-static void child_exec_failure(const char *command)
+static void child_fatal_printf(const char *fmt, const char *detail)
 {
     char buf[256];
-    int n;
-
-    if (errno == ENOENT)
-        n = snprintf(buf, sizeof buf, "caps: command not found: %s\n", command);
-    else if (errno == EACCES)
-        n = snprintf(buf, sizeof buf, "caps: %s: permission denied\n", command);
-    else
-        n = snprintf(buf, sizeof buf, "caps: %s: %s\n", command,
-                     strerror(errno));
+    int n = snprintf(buf, sizeof buf, fmt, detail);
 
     if (n > 0) {
         size_t len = (size_t)n;
@@ -40,7 +33,72 @@ static void child_exec_failure(const char *command)
     }
 }
 
-int process_exec(char *const argv[], int *raw_status)
+static void child_exec_failure(const char *command)
+{
+    if (errno == ENOENT)
+        child_fatal_printf("caps: command not found: %s\n", command);
+    else if (errno == EACCES)
+        child_fatal_printf("caps: %s: permission denied\n", command);
+    else
+        child_fatal_printf("caps: %s: %s\n", strerror(errno) ? command : command);
+}
+
+static int open_redirections(redirection_t *redirs, int nredirs)
+{
+    for (int i = 0; i < nredirs; i++) {
+        int flags;
+
+        switch (redirs[i].type) {
+        case CAPS_REDIR_IN:
+            flags = O_RDONLY;
+            break;
+        case CAPS_REDIR_APPEND:
+            flags = O_WRONLY | O_CREAT | O_APPEND;
+            break;
+        default:
+            flags = O_WRONLY | O_CREAT | O_TRUNC;
+            break;
+        }
+
+        redirs[i].fd = open(redirs[i].path, flags, 0644);
+        if (redirs[i].fd < 0) {
+            caps_error("%s: %s", redirs[i].path, strerror(errno));
+            for (int j = 0; j < i; j++)
+                close(redirs[j].fd);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static void close_redirections(redirection_t *redirs, int nredirs)
+{
+    for (int i = 0; i < nredirs; i++) {
+        if (redirs[i].fd >= 0)
+            close(redirs[i].fd);
+    }
+}
+
+/*
+ * Called in the child, after fork() and before execvp(): wire the
+ * already-open redirection descriptors onto stdin/stdout.
+ * Never returns on failure.
+ */
+static void apply_redirections(redirection_t *redirs, int nredirs)
+{
+    for (int i = 0; i < nredirs; i++) {
+        int target = (redirs[i].type == CAPS_REDIR_IN) ? STDIN_FILENO
+                                                       : STDOUT_FILENO;
+        if (dup2(redirs[i].fd, target) < 0) {
+            child_fatal_printf("caps: dup2: %s\n", strerror(errno));
+            _exit(1);
+        }
+        close(redirs[i].fd);
+    }
+}
+
+int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
+                 int *raw_status)
 {
     pid_t pid;
     int status;
@@ -53,20 +111,27 @@ int process_exec(char *const argv[], int *raw_status)
         return EXIT_FAILURE;
     }
 
+    if (open_redirections(redirs, nredirs) < 0)
+        return EXIT_FAILURE;
+
     pid = fork();
     if (pid < 0) {
         caps_error("fork: %s", strerror(errno));
+        close_redirections(redirs, nredirs);
         return EXIT_FAILURE;
     }
 
     if (pid == 0) {
         signals_child_reset();
+        apply_redirections(redirs, nredirs);
         execvp(argv[0], argv);
         child_exec_failure(argv[0]);
         if (errno == EACCES)
             _exit(126);
         _exit(127);
     }
+
+    close_redirections(redirs, nredirs);
 
     for (;;) {
         pid_t done = waitpid(pid, &status, 0);

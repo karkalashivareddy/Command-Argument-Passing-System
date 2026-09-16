@@ -33,12 +33,13 @@ Command-Argument-Passing-System/
 
 ```text
 src/main.c        main() — banner, REPL loop, dispatch
-src/parser.c      tokenization of a command line into argv
-src/executor.c    run one argv[]: builtin check + external launch
-src/process.c     raw fork()/execvp()/waitpid() lifecycle
-src/builtin.c     help, exit (later: cd)
-src/signals.c     parent SIGINT/child dispositions (Phase 7)
-src/utils.c       shared helpers (error reporting, strdup, freeing)
+src/parser.c      tokenization of a command line into argv;
+                  extraction of redirection tokens (> >> <)
+src/process.c     fork()/execvp()/waitpid() lifecycle;
+                  redirection open()/dup2()/close()
+src/builtin.c     help, exit, cd (run in the parent process)
+src/signals.c     parent SIGINT/child dispositions
+src/utils.c       shared helpers (caps-prefixed error printing, freeing)
 ```
 
 Each module has a matching header in `include/`.
@@ -54,32 +55,42 @@ Dependency direction is strict: `main -> executor -> process`,
 flowchart TD
     U[User types a line] --> R[getline - dynamic buffer]
     R --> T[parser: whitespace tokenization]
-    T --> A["argv[]  (argv[argc] == NULL)"]
+    T --> RF[parser: split redirection tokens]
+    RF --> A["argv[]  (redirection free, argv[argc] == NULL)"]
+    RF --> RD["redir list: type + file"]
     A --> B{builtin?}
-    B -->|help/exit| BI[run in parent process]
-    B -->|external| P[fork]
+    B -->|help/exit/cd| BI[run in parent process]
+    B -->|external| O[parent opens redirection files]
+    O --> P[fork]
     P --> C[child]
     P --> PA[parent]
-    C --> E[execvp argv0, argv]
+    C --> D[child: dup2 onto stdin/stdout, close]
+    D --> E[execvp argv0, argv]
     E -->|success| TG[target program main argc, argv]
     TG --> S[exit status or signal]
     S --> W[waitpid reaps status]
     PA --> W
-    W --> D[interpret WIFEXITED / WIFSIGNALED]
-    D --> R2[back to prompt]
+    W --> D2[interpret WIFEXITED / WIFSIGNALED]
+    D2 --> R2[back to prompt]
 ```
 
 Read in words:
 
 1. **Read** a whole line with `getline()` (dynamic, no fixed buffer).
 2. **Parse** into tokens: `["cmd", "arg1", ..., NULL]`.
-3. **Dispatch**: built-ins run in the parent; everything else is
+3. **Split redirection**: a token that is exactly `<`, `>` or `>>`
+   consumes the following token as its file; both move into a
+   redirection list that travels beside `argv[]`.
+4. **Dispatch**: built-ins run in the parent; everything else is
    launched as an external process.
-4. **External command**: the parent `fork()`s. The child calls
+5. **External command**: the parent opens every redirection file first
+   (a failure — missing input, unwritable target — aborts the command
+   before any process is created), then `fork()`s. The child `dup2()`s
+   the descriptors onto stdin/stdout, closes the originals, and calls
    `execvp()`, which replaces the child's memory image with the target
-   program. The parent calls `waitpid()` and blocks until the child
-   exits.
-5. **Status**: the parent interprets the raw wait status and reports
+   program. The parent closes its copies and calls `waitpid()`, blocking
+   until the child exits.
+6. **Status**: the parent interprets the raw wait status and reports
    only what is useful; then the prompt returns.
 
 ---
@@ -135,18 +146,32 @@ Guarantees:
 
 Limitations (documented, not hidden):
 
-- no quotes, escapes, globs, vars, pipes, redirection (initial parser).
+- no quotes, escapes, globs, vars, or pipes;
+- redirection supported in the interactive REPL only (`>`, `>>`, `<`
+  as whole tokens); one-shot mode treats `>` as a literal argument.
 
-### 5.2 executor
+Redirection split contract: validation happens before any token is
+removed, so a malformed line (a redirection that is the last token)
+leaves the original argv untouched and is reported as a syntax error.
+The file token's ownership is *transferred* into the redirection list;
+operator tokens are freed; `argv[argc] == NULL` is re-established.
 
-Takes a parsed `argv[]`, decides built-in vs external, runs it,
-reports results, and frees parsed memory.
+### 5.2 process
 
-### 5.3 process
+The only module that calls `fork()`, `execvp()`, and `waitpid()`, and
+the only module that manipulates file descriptors for redirection
+(`open()`, `dup2()`, `close()`). Keeps the unsafe low-level lifecycle
+in one place so the rest of the code cannot mishandle child processes.
 
-The only module that calls `fork()`, `execvp()`, and `waitpid()`.
-Keeps the unsafe low-level lifecycle in one place so the rest of the
-code cannot mishandle child processes.
+Redirection lifecycle (all inside process_exec):
+
+1. parent opens each file (`O_RDONLY | O_WRONLY|O_CREAT|O_TRUNC |
+   O_WRONLY|O_CREAT|O_APPEND`); on any failure the command is aborted
+   and the REPL continues;
+2. `fork()`;
+3. child: `dup2()` each fd onto stdin/stdout, close original, exec;
+4. parent: close its copies (open files are inherited by the child,
+   not shared state after fork), then `waitpid()`.
 
 Child contract:
 
@@ -165,8 +190,13 @@ Implemented in the parent process only.
 
 - `help` — prints supported commands.
 - `exit` — signals termination of the REPL.
-- (later) `cd` — would call `chdir()` in the parent, because the child
-  process cannot change the parent's working directory.
+- `cd` — calls `chdir()` in the parent; a child process cannot change
+  the parent's working directory.
+
+Redirection does not apply to built-ins: a built-in paired with a
+redirection token is rejected with an error. (Redirecting a built-in's
+output would require dup2() around the parent-side call, out of the
+current scope.)
 
 ### 5.5 utils
 
@@ -181,6 +211,10 @@ duplication, freeing an `argv[]`.
 | --------------------- | ---------- | -------------------------------------------- | --------------- |
 | empty/whitespace line | main/parser| ignored silently                              | yes             |
 | unknown command       | process    | `caps: command not found: <cmd>`              | yes             |
+| redirection, bad args | parser     | `caps: syntax error: '<op>' requires a file name` | yes        |
+| redirection, no cmd   | main       | `caps: syntax error: no command to redirect`  | yes             |
+| redirection open() -1 | process    | `caps: <file>: <strerror(errno)>`; command aborted | yes      |
+| redirection w/ builtin| main       | `caps: redirection is not supported for built-in commands` | yes |
 | `fork()` -1           | process    | `caps: fork: <strerror(errno)>`               | yes             |
 | `execvp()` fails      | process    | `caps: <cmd>: <strerror(errno)>` then `_exit()`| parent: yes    |
 | `waitpid()` -1        | process    | `caps: waitpid: <strerror(errno)>`            | yes             |
@@ -206,8 +240,8 @@ Targets:
 | `caps`       | default; linked from `src/*.c`             |
 | `clean`      | remove objects and binary                  |
 | `test`       | run `tests/` suite against fresh build     |
+| `test-asan`  | run the suite against the ASan/UBSan build |
 | `run`        | launch `./caps`                            |
-| `debug`      | build with sanitizer-enabled flags (Phase 1) |
 
 No third-party build tools; plain GNU Make.
 
@@ -218,10 +252,14 @@ No third-party build tools; plain GNU Make.
 `tests/` contains POSIX-shell scripts, each testing one concern:
 
 ```text
+test_smoke.sh        combined sanity: echo, help, cd, errors, signals
 test_parser.sh       tokenizer behavior (empty, whitespace, args)
 test_execution.sh    valid commands + arguments + options
 test_errors.sh       unknown command, fork/exec/wait failure paths
 test_exit_status.sh  exit 0, non-zero, signal termination
+test_signals.sh      SIGINT/child-SIG_DFL, REPL survives child signals
+test_redirection.sh  > >> <, combined <>, operator position, syntax errors,
+                     missing files, unwritable targets, built-in rejection
 ```
 
 Rationale: the app is an interactive REPL, so behavioral tests pipe
@@ -243,7 +281,7 @@ the checked-in tree stays clean.
 caps> <line>
 ```
 
-### One-shot (Phase 2/3)
+### One-shot
 
 ```text
 caps <command> [arg ...]
@@ -254,12 +292,15 @@ propagating child status to `caps`' own exit status.
 
 ### Debug mode
 
-`caps --debug` prints per-step traces:
+`caps --parse <line>` parses a single line and prints the resulting
+argv (used by the parser tests):
 
 ```text
-[parent] forked child pid=12345
-[child] execvp echo
-[parent] child 12345 exited with status 0
+argc = 3
+argv[0] = echo
+argv[1] = Hello
+argv[2] = World
+argv[3] = (null)
 ```
 
 Normal mode stays quiet.
