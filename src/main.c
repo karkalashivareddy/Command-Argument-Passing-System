@@ -6,6 +6,7 @@
 #include "builtin.h"
 #include "parser.h"
 #include "process.h"
+#include "signals.h"
 #include "utils.h"
 
 #define CAPS_VERSION "0.1.0"
@@ -92,6 +93,8 @@ static int interactive_loop(void)
 
 int main(int argc, char *argv[])
 {
+    signals_parent_init();
+
     if (argc == 2 && strcmp(argv[1], "--parse") == 0) {
         fprintf(stderr, "Command Argument Passing System %s (--parse mode)\n",
                 CAPS_VERSION);

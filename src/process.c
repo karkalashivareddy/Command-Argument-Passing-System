@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include "process.h"
+#include "signals.h"
 #include "utils.h"
 
 /*
@@ -59,6 +60,7 @@ int process_exec(char *const argv[], int *raw_status)
     }
 
     if (pid == 0) {
+        signals_child_reset();
         execvp(argv[0], argv);
         child_exec_failure(argv[0]);
         if (errno == EACCES)

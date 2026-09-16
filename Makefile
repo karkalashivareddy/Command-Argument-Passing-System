@@ -16,7 +16,8 @@ TESTS   := tests/test_smoke.sh \
            tests/test_parser.sh \
            tests/test_execution.sh \
            tests/test_errors.sh \
-           tests/test_exit_status.sh
+           tests/test_exit_status.sh \
+           tests/test_signals.sh
 HELPER  := $(BUILD)/status_probe
 
 # Sanitizer build (AddressSanitizer + UndefinedBehaviorSanitizer)
@@ -44,7 +45,7 @@ test: $(TARGET) $(HELPER)
 	@set -e; for t in $(TESTS); do \
 		echo "== $$t =="; \
 		case "$$t" in \
-			*execution*|*exit_status*) ./$$t ./$(TARGET) ./$(HELPER);; \
+			*execution*|*exit_status*|*signals*) ./$$t ./$(TARGET) ./$(HELPER);; \
 			*) ./$$t ./$(TARGET);; \
 		esac; \
 	done; \
@@ -58,7 +59,7 @@ test-asan: $(SAN_TARGET) $(HELPER)
 	@set -e; for t in $(TESTS); do \
 		echo "== $$t (asan) =="; \
 		case "$$t" in \
-			*execution*|*exit_status*) ASAN_OPTIONS=detect_leaks=1 ./$$t ./$(SAN_TARGET) ./$(HELPER);; \
+			*execution*|*exit_status*|*signals*) ASAN_OPTIONS=detect_leaks=1 ./$$t ./$(SAN_TARGET) ./$(HELPER);; \
 			*) ASAN_OPTIONS=detect_leaks=1 ./$$t ./$(SAN_TARGET);; \
 		esac; \
 	done; \

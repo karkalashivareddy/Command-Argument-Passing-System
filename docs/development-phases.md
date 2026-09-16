@@ -18,7 +18,7 @@ compiled, tested, reviewed, and committed.
 | 3     | Argument vector handling                   | Complete | `3e26022` |
 | 4     | Interactive REPL                          | Complete | `9eb97cd` |
 | 5     | Built-ins + robust error handling          | Complete | `e6729af` |
-| 6     | Automated testing                         | Planned | —         |
+| 6     | Automated testing                         | Complete | `d258be7` |
 | 7     | Basic signal handling                     | Planned | —         |
 | 8     | Optional IPC extensions (pipes/redirection)| Planned | —         |
 | 9     | Final documentation                       | Planned | —         |
