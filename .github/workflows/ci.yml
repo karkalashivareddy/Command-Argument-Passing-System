@@ -1,0 +1,35 @@
+name: build-and-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: make + make test (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify compilers and make
+        run: |
+          cc --version | head -n 1
+          make --version | head -n 1
+          sh --version | head -n 1
+
+      - name: Clean build
+        run: make clean && make
+
+      - name: Test suite
+        run: make test
+
+      - name: Sanitizer test suite (ASan + UBSan, leak detection)
+        run: make test-asan
+
+      - name: Working-tree hygiene (no artifacts committed)
+        run: |
+          git status --porcelain
+          test -z "$(git status --porcelain)"
