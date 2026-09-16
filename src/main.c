@@ -1,9 +1,21 @@
 #include <stdio.h>
+#include <stdlib.h>
 
-#define CAPS_VERSION "0.1.0"
+#include "process.h"
 
-int main(void)
+static void usage(FILE *stream)
 {
-    printf("Command Argument Passing System %s\n", CAPS_VERSION);
-    return 0;
+    fprintf(stream,
+            "Usage: caps <command> [argument ...]\n"
+            "       caps                     (interactive mode, later phase)\n");
+}
+
+int main(int argc, char *argv[])
+{
+    if (argc < 2) {
+        usage(stderr);
+        return EXIT_FAILURE;
+    }
+
+    return process_exec(&argv[1]);
 }
