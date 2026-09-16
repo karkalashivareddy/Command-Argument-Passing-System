@@ -70,21 +70,40 @@ static int interactive_loop(void)
             continue;
         }
 
+        redirection_t *redirs = NULL;
+        int nredirs = 0;
+        if (parser_split_redirections(argv, &argc, &redirs, &nredirs) < 0) {
+            parser_free_argv(argv);
+            continue;
+        }
+        if (argc == 0) {
+            caps_error("syntax error: no command to redirect");
+            parser_free_argv(argv);
+            parser_free_redirections(redirs, nredirs);
+            continue;
+        }
+
         int status = 0;
         builtin_result_t res = builtin_run(argc, argv, last_status, &status);
         if (res == CAPS_BUILTIN_EXIT) {
             last_status = status;
             parser_free_argv(argv);
+            parser_free_redirections(redirs, nredirs);
             break;
+        }
+        if (res == CAPS_BUILTIN_HANDLED && nredirs > 0) {
+            caps_error("redirection is not supported for built-in commands");
+            status = 1;
         }
         if (res == CAPS_NOT_BUILTIN) {
             int raw_status = 0;
-            status = process_exec(argv, &raw_status);
+            status = process_exec(argv, redirs, nredirs, &raw_status);
             process_report_status(argv[0], raw_status);
         }
 
         last_status = status;
         parser_free_argv(argv);
+        parser_free_redirections(redirs, nredirs);
     }
 
     free(line);
@@ -124,7 +143,7 @@ int main(int argc, char *argv[])
     }
 
     if (argc >= 2)
-        return process_exec(&argv[1], NULL);
+        return process_exec(&argv[1], NULL, 0, NULL);
 
     return interactive_loop();
 }

@@ -19,8 +19,9 @@ compiled, tested, reviewed, and committed.
 | 4     | Interactive REPL                          | Complete | `9eb97cd` |
 | 5     | Built-ins + robust error handling          | Complete | `e6729af` |
 | 6     | Automated testing                         | Complete | `d258be7` |
-| 7     | Basic signal handling                     | Planned | —         |
-| 8     | Optional IPC extensions (pipes/redirection)| Planned | —         |
+| 7     | Basic signal handling                     | Complete | `5789864` |
+| 8a    | Redirection (>, >>, <)                    | Complete | `imminent` |
+| 8b    | Pipeline (pipe)                           | Skipped — not implemented, documented as planned |
 | 9     | Final documentation                       | Planned | —         |
 | 10    | CI + final engineering review             | Planned | —         |
 
@@ -172,16 +173,38 @@ reporting verified. Commit `feat: add basic child signal handling`.
 
 ---
 
-## Phase 8 — Optional IPC extensions
+## Phase 8a — Redirection
 
-**Goal.** Only if core is stable. Pipes then redirection, each in its
-own phase/commit with tests and docs:
+**Goal.** Add `>`/`>>`/`<` redirection to the interactive REPL, chosen
+over pipelines as the Phase 8 extension (scope decision, recorded in
+the review of Phase 7).
 
-- pipeline: `cmd1 | cmd2` via `pipe()` + two `fork()`s + `dup2()`;
-- redirection: `>`/`>>`/`<` via `open()`/`dup2()`/`close()`.
+Deliverables:
 
-**Gate:** each feature documented, tested, committed separately. If
-skipped, state is marked "not implemented — documented as planned".
+- parser: `parser_split_redirections()` — validate-first extraction of
+  redirection tokens, transferring file tokens into a redirection list
+  and freeing operator tokens, keeping `argv[argc] == NULL`;
+- process: fds opened in the parent before `fork()`; `dup2()` +
+  `close()` in the child before `execvp()`; parent closes its copies
+  before `waitpid()`;
+- REPL: redirections pair with external commands; built-ins reject
+  them; syntax failures and open() failures never kill the prompt;
+- `tests/test_redirection.sh` (truncate, append, input, combined,
+  operator position, syntax errors, missing/unwritable targets,
+  built-in rejection);
+- `docs/redirection.md`; `docs/architecture.md` and
+  `docs/requirements.md` updated to match.
+
+**Gate:** `make clean && make` zero warnings; `make test` and
+`make test-asan` green (leak detection on). Commit
+`feat: add basic output redirection`.
+
+---
+
+## Phase 8b — Pipeline (not implemented)
+
+`cmd1 | cmd2` via `pipe()` + two `fork()`s + `dup2()` remains planned
+and is documented as such; it is not implemented.
 
 ---
 

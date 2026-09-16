@@ -17,7 +17,8 @@ TESTS   := tests/test_smoke.sh \
            tests/test_execution.sh \
            tests/test_errors.sh \
            tests/test_exit_status.sh \
-           tests/test_signals.sh
+           tests/test_signals.sh \
+           tests/test_redirection.sh
 HELPER  := $(BUILD)/status_probe
 
 # Sanitizer build (AddressSanitizer + UndefinedBehaviorSanitizer)
