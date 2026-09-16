@@ -1,0 +1,22 @@
+# Build artifacts
+/build/
+caps
+
+# Object and dependency files
+*.o
+*.d
+
+# Core dumps and crash artifacts
+core
+core.*
+vgcore.*
+
+# Editor / IDE metadata
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS noise
+.DS_Store
+Thumbs.db

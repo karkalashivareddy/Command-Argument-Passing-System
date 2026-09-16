@@ -1,0 +1,5 @@
+# Normalize line endings to LF on checkout for all text files.
+* text=auto eol=lf
+
+# Binary files are never touched by Git's text handling.
+*.docx binary
