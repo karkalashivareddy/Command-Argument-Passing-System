@@ -102,7 +102,7 @@ Deliverables:
 - tests for the parser boundary.
 
 **Gate:** `./caps echo Hello World` constructs
-`{"echo","Hello","World",NULL}` (visible via `--debug`). Commit
+`{"echo","Hello","World",NULL}` (visible via `caps --parse`). Commit
 `feat: implement command argument vector handling`.
 
 ---

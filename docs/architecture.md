@@ -1,10 +1,10 @@
 # Architecture
 
-Status: **Approved baseline** (Phase 0)
+Status: **Approved baseline** (Phase 0), updated through **Phase 8a**
 
-This document describes the intended module layout, the data flow
-through the system, and the build/test structure of the Command
-Argument Passing System (`caps`).
+This document describes the module layout, the data flow through the
+system, and the build/test structure of the Command Argument Passing
+System (`caps`) as implemented.
 
 ---
 
@@ -16,20 +16,21 @@ Command-Argument-Passing-System/
 ├── include/      public headers for the modules
 ├── tests/        automated test scripts
 ├── docs/         design documentation (this directory)
-├── examples/     sample sessions and expected outputs
 ├── Makefile      build, clean, test, run targets
 ├── .gitignore    build artifacts and junk exclusions
+├── .gitattributes LF normalization for text files
 ├── LICENSE
 ├── README.md
 └── ABSTRACT.docx
 ```
 
-> This is the *target* structure. Files appear only when the
-> corresponding functionality is introduced.
+> All entries above exist in the current checkout. An `examples/`
+> directory is not created; sample sessions are documented in
+> `README.md` instead.
 
 ---
 
-## 2. Module map (target)
+## 2. Module map
 
 ```text
 src/main.c        main() — banner, REPL loop, dispatch
@@ -39,13 +40,13 @@ src/process.c     fork()/execvp()/waitpid() lifecycle;
                   redirection open()/dup2()/close()
 src/builtin.c     help, exit, cd (run in the parent process)
 src/signals.c     parent SIGINT/child dispositions
-src/utils.c       shared helpers (caps-prefixed error printing, freeing)
+src/utils.c       caps-prefixed stderr error reporting (caps_error)
 ```
 
 Each module has a matching header in `include/`.
 
-Dependency direction is strict: `main -> executor -> process`,
-`main -> parser`, `main -> builtin`. Lower layers never call the REPL.
+Dependency direction is strict: `main -> process`, `main -> parser`,
+`main -> builtin`, `main -> signals`. Lower layers never call the REPL.
 
 ---
 
@@ -200,8 +201,8 @@ current scope.)
 
 ### 5.5 utils
 
-Shared helpers: prefix error printing (`caps: ...`), safe string
-duplication, freeing an `argv[]`.
+Shared helper: `caps_error()` — `caps:`-prefixed stderr reporting, used
+consistently across modules.
 
 ---
 
@@ -216,9 +217,9 @@ duplication, freeing an `argv[]`.
 | redirection open() -1 | process    | `caps: <file>: <strerror(errno)>`; command aborted | yes      |
 | redirection w/ builtin| main       | `caps: redirection is not supported for built-in commands` | yes |
 | `fork()` -1           | process    | `caps: fork: <strerror(errno)>`               | yes             |
-| `execvp()` fails      | process    | `caps: <cmd>: <strerror(errno)>` then `_exit()`| parent: yes    |
+| `execvp()` fails      | process    | `caps: command not found: <cmd>` / `caps: <cmd>: permission denied` / `caps: <cmd>: <strerror(errno)>` then `_exit()` | parent: yes    |
 | `waitpid()` -1        | process    | `caps: waitpid: <strerror(errno)>`            | yes             |
-| EOF at prompt         | main       | newline + clean exit 0                        | ends            |
+| EOF at prompt         | main       | newline + clean exit with last status         | ends            |
 
 Rule: only `help`/`exit`/EOF end the REPL; no single command failure
 may kill the runner.
@@ -273,7 +274,7 @@ the checked-in tree stays clean.
 
 ---
 
-## 9. Invocation contracts (target)
+## 9. Invocation contracts
 
 ### Interactive
 
@@ -290,12 +291,15 @@ caps <command> [arg ...]
 executes once in `fork`/`execvp`/`waitpid` fashion and exits,
 propagating child status to `caps`' own exit status.
 
-### Debug mode
+### Parse debug mode
 
-`caps --parse <line>` parses a single line and prints the resulting
+`caps --parse` reads one line from stdin and prints the resulting
 argv (used by the parser tests):
 
 ```text
+$ ./caps --parse
+Command Argument Passing System 0.1.0 (--parse mode)
+Enter a command line: echo Hello World
 argc = 3
 argv[0] = echo
 argv[1] = Hello

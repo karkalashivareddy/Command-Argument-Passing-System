@@ -243,18 +243,24 @@ either becomes the requested program or dies.
 
 ---
 
-## 8. Signals (behavioral baseline; extended in Phase 7)
+## 8. Signals (current behavior, Phase 7+)
 
-Baseline contract:
+How `caps` behaves today (see `docs/signals.md` for the full model):
 
 - A signal delivered to the child process (e.g. SIGKILL, SIGSEGV)
   is reported by the parent as `terminated by signal N` via
   `WIFSIGNALED`/`WTERMSIG`. This is *status reporting*, not signal
   handling.
-- SIGINT at the prompt: default disposition (process terminates).
-  Phase 7 refines this so Ctrl+C does not kill the runner and,
-  notably, does not get delivered to the parent while a child is in
-  the foreground.
+- SIGINT: the parent ignores it for its lifetime
+  (`SIG_IGN` set in `signals_parent_init()`), so Ctrl+C never kills
+  the prompt. The kernel still *delivers* the signal to the parent
+  (both are in the same foreground terminal session), but the `SIG_IGN`
+  disposition discards it.
+- The child resets SIGINT to `SIG_DFL` immediately after `fork()`
+  (`signals_child_reset()`), because POSIX `exec` *preserves* `SIG_IGN`
+  dispositions — without the reset a foreground child such as
+  `sleep 5` would ignore Ctrl+C too. A child that dies on SIGINT is
+  reported as `terminated by signal 2` with status `130`.
 
 Limitation (documented honestly): `caps` does **not** implement job
 control — no process groups, no foreground/background assignment, no
