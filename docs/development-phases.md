@@ -22,7 +22,7 @@ compiled, tested, reviewed, and committed.
 | 7     | Basic signal handling                     | Complete | `5789864` |
 | 8a    | Redirection (>, >>, <)                    | Complete | `11cf4ba` |
 | 8b    | Pipeline (pipe)                           | Skipped — not implemented, documented as planned |
-| 9     | Final documentation                       | Planned | —         |
+| 9     | Final documentation                       | Complete | `c649b16` |
 | 10    | CI + final engineering review             | Planned | —         |
 
 ---
