@@ -6,6 +6,38 @@
 #include <unistd.h>
 
 #include "process.h"
+#include "utils.h"
+
+/*
+ * Report an exec failure from inside the child process.
+ *
+ * After fork() the child shares a copy of the parent's stdio buffers.
+ * Using fprintf()/exit() here could flush duplicated buffers and tear
+ * the parent's pending output.  We therefore format into a small
+ * stack buffer and write(2) directly to stderr, then _exit().
+ * write() and strlen() are in the POSIX async-signal-safe set; this
+ * is the minimal, correct child-side failure path.
+ */
+static void child_exec_failure(const char *command)
+{
+    char buf[256];
+    int n;
+
+    if (errno == ENOENT)
+        n = snprintf(buf, sizeof buf, "caps: command not found: %s\n", command);
+    else if (errno == EACCES)
+        n = snprintf(buf, sizeof buf, "caps: %s: permission denied\n", command);
+    else
+        n = snprintf(buf, sizeof buf, "caps: %s: %s\n", command,
+                     strerror(errno));
+
+    if (n > 0) {
+        size_t len = (size_t)n;
+        if (len > sizeof buf - 1)
+            len = sizeof buf - 1;
+        (void)write(STDERR_FILENO, buf, len);
+    }
+}
 
 int process_exec(char *const argv[])
 {
@@ -13,24 +45,19 @@ int process_exec(char *const argv[])
     int status;
 
     if (argv == NULL || argv[0] == NULL) {
-        fprintf(stderr, "caps: no command to execute\n");
+        caps_error("no command provided");
         return EXIT_FAILURE;
     }
 
     pid = fork();
     if (pid < 0) {
-        fprintf(stderr, "caps: fork: %s\n", strerror(errno));
+        caps_error("fork: %s", strerror(errno));
         return EXIT_FAILURE;
     }
 
     if (pid == 0) {
         execvp(argv[0], argv);
-
-        if (errno == ENOENT)
-            fprintf(stderr, "caps: command not found: %s\n", argv[0]);
-        else
-            fprintf(stderr, "caps: %s: %s\n", argv[0], strerror(errno));
-
+        child_exec_failure(argv[0]);
         if (errno == EACCES)
             _exit(126);
         _exit(127);
@@ -43,7 +70,7 @@ int process_exec(char *const argv[])
             break;
         if (done < 0 && errno == EINTR)
             continue;
-        fprintf(stderr, "caps: waitpid: %s\n", strerror(errno));
+        caps_error("waitpid: %s", strerror(errno));
         return EXIT_FAILURE;
     }
 
@@ -60,10 +87,9 @@ void process_report_status(const char *command, int status)
 {
     if (WIFEXITED(status)) {
         if (WEXITSTATUS(status) != 0)
-            fprintf(stderr, "caps: '%s' exited with status %d\n",
-                    command, WEXITSTATUS(status));
+            caps_error("'%s' exited with status %d", command,
+                       WEXITSTATUS(status));
     } else if (WIFSIGNALED(status)) {
-        fprintf(stderr, "caps: '%s' terminated by signal %d\n",
-                command, WTERMSIG(status));
+        caps_error("'%s' terminated by signal %d", command, WTERMSIG(status));
     }
 }

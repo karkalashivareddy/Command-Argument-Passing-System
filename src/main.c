@@ -3,17 +3,20 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "builtin.h"
 #include "parser.h"
 #include "process.h"
+#include "utils.h"
 
 #define CAPS_VERSION "0.1.0"
 
 static void usage(FILE *stream)
 {
     fprintf(stream,
-            "Usage: caps --parse <line>            (show argv for debugging)\n"
+            "Usage: caps                            (interactive mode)\n"
             "       caps <command> [argument ...]  (execute a command once)\n"
-            "       caps                           (interactive mode)\n");
+            "       caps --parse <line>            (show argv for debugging)\n"
+            "       caps --help | --version\n");
 }
 
 static void parse_and_print(const char *line)
@@ -22,7 +25,7 @@ static void parse_and_print(const char *line)
     int argc = 0;
 
     if (parser_parse(line, &argv, &argc) < 0) {
-        fprintf(stderr, "caps: memory allocation failure\n");
+        caps_error("memory allocation failure");
         return;
     }
 
@@ -31,29 +34,6 @@ static void parse_and_print(const char *line)
         printf("argv[%d] = %s\n", i, argv[i] ? argv[i] : "(null)");
 
     parser_free_argv(argv);
-}
-
-static int run_builtin(int argc, char **argv, int *exit_flag, int *status)
-{
-    if (strcmp(argv[0], "exit") == 0) {
-        *exit_flag = 1;
-        *status = (argc >= 2) ? atoi(argv[1]) : 0;
-        return 1;
-    }
-
-    if (strcmp(argv[0], "help") == 0) {
-        fprintf(stderr,
-                "Built-in commands:\n"
-                "  help   show this message\n"
-                "  exit   exit the shell (exit [N])\n");
-        fprintf(stderr,
-                "\nExternal commands are executed via fork() + execvp().\n"
-                "Type any external command name followed by its arguments.\n");
-        *status = 0;
-        return 1;
-    }
-
-    return 0;
 }
 
 static int interactive_loop(void)
@@ -65,7 +45,7 @@ static int interactive_loop(void)
 
     char *line = NULL;
     size_t len = 0;
-    int status = 0;
+    int last_status = 0;
 
     for (;;) {
         fprintf(stderr, "caps> ");
@@ -81,7 +61,7 @@ static int interactive_loop(void)
         char **argv = NULL;
         int argc = 0;
         if (parser_parse(line, &argv, &argc) < 0) {
-            fprintf(stderr, "caps: memory allocation failure\n");
+            caps_error("memory allocation failure");
             continue;
         }
         if (argc == 0) {
@@ -89,20 +69,22 @@ static int interactive_loop(void)
             continue;
         }
 
-        int exit_flag = 0;
-        int is_builtin = run_builtin(argc, argv, &exit_flag, &status);
-        if (exit_flag) {
+        int status = 0;
+        builtin_result_t res = builtin_run(argc, argv, last_status, &status);
+        if (res == CAPS_BUILTIN_EXIT) {
+            last_status = status;
             parser_free_argv(argv);
             break;
         }
-        if (!is_builtin)
+        if (res == CAPS_NOT_BUILTIN)
             status = process_exec(argv);
 
+        last_status = status;
         parser_free_argv(argv);
     }
 
     free(line);
-    return status;
+    return last_status;
 }
 
 int main(int argc, char *argv[])
@@ -135,9 +117,8 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    if (argc >= 2) {
+    if (argc >= 2)
         return process_exec(&argv[1]);
-    }
 
     return interactive_loop();
 }
