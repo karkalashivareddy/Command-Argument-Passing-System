@@ -50,7 +50,8 @@ echo "PASS: exit inherits last status"
 
 echo "Status: one-shot signal-terminated process still reports status"
 err=$(echo '' | "$bin" "$helper" signal 9 2>&1 >/dev/null)
-[ $? -eq 137 ] || failmsg "signal 9 one-shot status $?"
+status=$?
+[ "$status" -eq 137 ] || failmsg "signal 9 one-shot status $status (want 137)"
 [ -z "$err" ] || failmsg "one-shot signal produced unexpected stderr: '$err'"
 echo "PASS: one-shot propagates 137 without noise"
 

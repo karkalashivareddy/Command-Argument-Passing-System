@@ -19,7 +19,8 @@ echo "Signals: child restores SIGINT default before exec"
 # ignored and the probe would exit 0.  With the reset, it terminates by
 # SIGINT -> caps exits 130.
 echo '' | "$bin" "$helper" signal 2 2>/dev/null >/dev/null
-[ $? -eq 130 ] || failmsg "SIGINT-terminated child status=$? (want 130)"
+status=$?
+[ "$status" -eq 130 ] || failmsg "SIGINT-terminated child status=$status (want 130)"
 echo "PASS: child died from SIGINT (130)"
 
 echo "Signals: REPL reports SIGINT termination"
