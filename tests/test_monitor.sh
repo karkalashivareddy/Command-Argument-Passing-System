@@ -132,6 +132,26 @@ case "$bad" in
     *) echo "PASS: no prompt in JSON stream" ;;
 esac
 
+echo "Monitor: long command label is bounded, execution is not"
+# The event label is built in a fixed-size buffer (see caps_join_argv), but
+# the real argv handed to exec is never truncated by that limit.
+long=$(head -c 2000 /dev/zero | tr '\0' 'x')
+"$bin" --monitor --json "$helper" print "$long" >"$tmp/long.out" 2>"$tmp/long.ev"
+[ "$(cat "$tmp/long.out")" = "$long" ] ||
+    failmsg "long argument was truncated for execution"
+grep -qF '"event":"PROCESS_EXITED"' "$tmp/long.ev" ||
+    failmsg "no PROCESS_EXITED for long command"
+while IFS= read -r line; do
+    case "$line" in
+        "{"*"}") ;;
+        *) failmsg "malformed JSON with long command: $line" ;;
+    esac
+done < "$tmp/long.ev"
+maxlen=$(awk '{ if (length > m) m = length } END { print m + 0 }' "$tmp/long.ev")
+[ "$maxlen" -lt 600 ] ||
+    failmsg "monitor label not bounded (longest line $maxlen chars)"
+echo "PASS: long command executes fully and label stays bounded"
+
 [ "$fail" -eq 0 ] || exit 1
 echo "PASS: test_monitor.sh ($bin)"
 exit 0
