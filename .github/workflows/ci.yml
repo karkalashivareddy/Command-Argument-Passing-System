@@ -48,3 +48,17 @@ jobs:
         run: |
           git status --porcelain
           test -z "$(git status --porcelain)"
+
+      - name: Text files end with a newline
+        run: |
+          rc=0
+          for f in $(git ls-files); do
+            [ -f "$f" ] || continue
+            [ -s "$f" ] || continue
+            if git check-attr binary -- "$f" | grep -q 'binary: set'; then continue; fi
+            if [ "$(tail -c1 "$f" | wc -l)" -ne 1 ]; then
+              echo "missing trailing newline: $f"
+              rc=1
+            fi
+          done
+          exit $rc
