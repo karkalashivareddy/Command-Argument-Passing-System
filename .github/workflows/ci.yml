@@ -6,28 +6,43 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
-    name: make + make test (Ubuntu)
+    name: make + make test (${{ matrix.cc }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify compilers and make
+      - name: Verify toolchain
         run: |
-          cc --version | head -n 1
+          ${{ matrix.cc }} --version | head -n 1
           make --version | head -n 1
-          sh --version | head -n 1
+          echo "sh: $(command -v sh) -> $(readlink -f "$(command -v sh)")"
+          echo "jq: $(jq --version 2>/dev/null || echo 'not installed (JSON test falls back)')"
+
+      - name: Strict warnings build (-Werror)
+        run: |
+          make clean
+          make CC="${{ matrix.cc }}" \
+            CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -g"
 
       - name: Clean build
-        run: make clean && make
+        run: make clean && make CC="${{ matrix.cc }}"
 
       - name: Test suite
-        run: make test
+        run: make test CC="${{ matrix.cc }}"
 
-      - name: Sanitizer test suite (ASan + UBSan, leak detection)
-        run: make test-asan
+      - name: Sanitizer suite (ASan + UBSan, leak detection)
+        run: make test-asan CC="${{ matrix.cc }}"
 
       - name: Working-tree hygiene (no artifacts committed)
         run: |
