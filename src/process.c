@@ -80,27 +80,43 @@ static int open_redirections(redirection_t *redirs, int nredirs)
 
 static void close_redirections(redirection_t *redirs, int nredirs)
 {
+    /*
+     * Best-effort cleanup: by the time these descriptors are closed the
+     * primary operation (fork or child launch) has either succeeded or
+     * already failed, so a close() error is not actionable.
+     */
     for (int i = 0; i < nredirs; i++) {
         if (redirs[i].fd >= 0)
-            close(redirs[i].fd);
+            (void)close(redirs[i].fd);
     }
 }
 
 /*
  * Called in the child, after fork() and before execvp(): wire the
  * already-open redirection descriptors onto stdin/stdout.
- * Never returns on failure.
+ *
+ * Descriptor ownership rule: a descriptor is closed only when it is NOT
+ * already the destination.  If fd == target, dup2(fd, fd) is a no-op and
+ * the follow-up close(fd) would close the very descriptor just
+ * installed — the destructive pattern that breaks redirection when a
+ * standard descriptor (0/1/2) was already closed and open() reused its
+ * slot.  Never returns on failure.
  */
 static void apply_redirections(redirection_t *redirs, int nredirs)
 {
     for (int i = 0; i < nredirs; i++) {
+        int fd = redirs[i].fd;
         int target = (redirs[i].type == CAPS_REDIR_IN) ? STDIN_FILENO
                                                        : STDOUT_FILENO;
-        if (dup2(redirs[i].fd, target) < 0) {
+
+        if (fd == target)
+            continue; /* keep the descriptor; it already is the target */
+
+        if (dup2(fd, target) < 0) {
             child_fatal_printf("caps: dup2: %s\n", strerror(errno));
             _exit(1);
         }
-        close(redirs[i].fd);
+        close(fd);
     }
 }
 
