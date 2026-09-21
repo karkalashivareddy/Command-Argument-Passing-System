@@ -91,6 +91,41 @@ Three rules make this safe:
    so no stray descriptors leak into the target program (and the parent
    drops its own copies as soon as the child is forked).
 
+### The closed-standard-fd edge case (`fd == target`)
+
+`open()` always returns the *lowest* free descriptor. If stdout was
+already closed before the command ran, `open("> f")` can legitimately
+return `1`. A naive child then does:
+
+```c
+dup2(1, 1);   /* no-op: fd 1 already is fd 1 */
+close(1);     /* BUG: closes the file we just installed */
+```
+
+The program that runs next writes to a closed stdout; the file ends up
+empty and the write fails. `caps` avoids this by skipping any
+descriptor whose value already equals its destination:
+
+```c
+if (fd == target)
+    continue;             /* already the target; keep it open */
+dup2(fd, target);
+close(fd);
+```
+
+`tests/test_fd_edge.sh` reproduces this by running a command with fd 0
+or fd 1 closed and checking that the redirected file receives the
+output.
+
+### `close()` policy
+
+Closing the parent's copies is best-effort: the parent calls
+`close(fd)` and ignores its return value. At that point `fork()` has
+succeeded and the child owns the files, so a `close()` error is not
+actionable and is deliberately not reported. `open()` errors, by
+contrast, are actionable and are reported before any process is
+created.
+
 ---
 
 ## 4. Why dup2 and not "just set fd 1"?
@@ -126,6 +161,35 @@ Redirection only works on whole tokens: `echo 2>` writes `2>` to stdout
 as a literal argument; there is no fd-number syntax (`2>`) and no
 `&>`; a redirection operator cannot be embedded in a word (`x>`).
 
+### 5.1 Grammar: whitespace is required
+
+The operator is recognized **only** as a token equal to exactly `>`,
+`>>` or `<`, separated from its neighbours by whitespace. The tokenizer
+never splits inside a word, so:
+
+| Input          | Interpretation                                   |
+| -------------- | ------------------------------------------------ |
+| `echo hi > f`  | redirect stdout to `f` (operator is token `>`)   |
+| `echo hi >f`   | literal arguments `hi` and `>f`; **no** redirect |
+| `echo hi> f`   | literal arguments `hi>` and `f`; **no** redirect  |
+
+This mirrors the project's "dumb tokenizer, explicit grammar" rule:
+there is no operator merging and no re-tokenization.
+
+### 5.2 Multiple redirections
+
+A line may contain more than one redirection operator. All of them are
+extracted; the command's argv keeps only non-redirection tokens:
+`cat < in > out` becomes argv `["cat", NULL]` plus two entries:
+`(<, "in")` and `(>, "out")`.
+
+The child applies them in the order the file tokens appeared on the
+line. Because each operator targets a fixed slot (`<` → fd 0, `>`/`>>`
+→ fd 1), a repeated target means **last one wins**: `echo hi > a > b`
+writes only to `b` (`a` is still created/truncated, since the parent
+opens every file first, but fd 1 ends up pointing at `b`). This is a
+deliberately simple, documented rule; it is not an error.
+
 ---
 
 ## 6. Not supported (documented limitations)
@@ -158,5 +222,10 @@ caller. Each is a clean teaching boundary, not an accident.
 - unwritable target (command aborted, error reported, REPL alive);
 - syntax errors (`>`, `echo >`, and a redirection with no command);
 - built-in + redirection rejection.
+
+`tests/test_fd_edge.sh` additionally covers the closed-standard-fd case
+(`fd == target`): a `>` or `>>` command run with fd 1 closed must still
+write its output to the target file, and a `<` command run with fd 0
+closed must still read input.
 
 Run with the rest of the suite: `make test` and `make test-asan`.

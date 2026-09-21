@@ -17,6 +17,24 @@ A small, deliberate model — **not** job control:
 | SIGTERM, SIGQUIT, SIGSEGV, ... | default dispositions (a SIGTERM still terminates caps) |
 | SIGCHLD | default; caps reaps synchronously with `waitpid()`, so no SIGCHLD handler is needed |
 
+### Setup failures are reported, not ignored
+
+`signals_parent_init()` and `signals_child_reset()` both return `int`
+(0 on success, -1 if `sigaction()` fails):
+
+- **Parent setup fails:** `caps` prints
+  `caps: warning: SIGINT setup failed; Ctrl+C may terminate the shell`
+  and keeps running. The REPL remains usable; only the Ctrl+C
+  protection is degraded, and the user is told so.
+- **Child reset fails:** the child prints
+  `caps: warning: failed to reset SIGINT in child; the executed program
+  may ignore Ctrl+C` (via `write(2)`, before `exec`), then proceeds to
+  `execvp()`. The launched program may therefore ignore Ctrl+C, which
+  is exactly the condition being warned about.
+
+Reporting the degradation is preferable to silently pretending signal
+handling succeeded.
+
 ---
 
 ## 2. Why the child must reset SIGINT itself

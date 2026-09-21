@@ -24,6 +24,7 @@ compiled, tested, reviewed, and committed.
 | 8b    | Pipeline (pipe)                           | Skipped — not implemented, documented as planned |
 | 9     | Final documentation                       | Complete | `c649b16` |
 | 10    | CI + final engineering review             | Complete | `35b532f`, `68ed348` |
+| 11    | Hardening + real-time execution monitoring | Complete | `0047170`, `6dc7f94`, `c9e9cff`, `ed63649`, `11fad6b`, `7c251e7`, `c84f1f0` |
 
 ---
 
@@ -235,6 +236,52 @@ Deliverables:
 
 **Gate:** clean clone -> `make` -> `make test` green in CI; review
 checklist satisfied. Commit `ci: add Linux build and test workflow`.
+
+---
+
+## Phase 11 — Hardening + real-time execution monitoring
+
+**Goal.** Fix two confirmed correctness bugs, make documented claims
+match the code, strengthen regression tests, and add an observational
+real-time event stream — without changing the architecture or faking
+capability.
+
+Deliverables:
+
+- **Redirection descriptor ownership fix** (`src/process.c`): skip
+  `dup2`/`close` when `open()` returned the destination fd itself
+  (`fd == target`), so redirecting while a standard descriptor is
+  closed no longer produces an empty file. Regression:
+  `tests/test_fd_edge.sh`.
+- **Built-in `exit` argument validation** (`src/builtin.c`): replace
+  `atoi()` with a `strtol()`-based parser that rejects non-numeric,
+  partially-numeric, out-of-range, and overflow inputs, reporting
+  `exit: invalid status: '<arg>' (expected an integer in the range
+  0..255)` and continuing the REPL. Regression:
+  `tests/test_exit_parse.sh`.
+- **Signal setup error handling** (`src/signals.c`): `sigaction`
+  failures are reported instead of ignored (parent warns and
+  continues; child warns and proceeds to `exec`).
+- **Documentation accuracy:** the post-`fork()` child is no longer
+  described as an async-signal-safe/signal-handler context; the
+  whitespace-required redirection grammar and multiple-redirection
+  (last-one-wins per slot) semantics are documented.
+- **Test-diagnostic hardening:** shell tests capture `$?` immediately
+  instead of reading it after a `[ ]` test, so failure messages report
+  the real status.
+- **Real-time execution monitoring** (`src/monitor.c`,
+  `include/monitor.h`, `--monitor [--json]`): event-driven emissions at
+  `COMMAND_RECEIVED`, `PARSED`, `REDIRECTION_OPENED/FAILED`,
+  `PROCESS_STARTED`, `PROCESS_EXITED`, `SIGNAL_RECEIVED`, `EXEC_ERROR`,
+  plus a `SESSION_SUMMARY`. Text and one-JSON-object-per-line modes;
+  optional `jq` validation. No threads, no polling, no sleeps.
+  Regression: `tests/test_monitor.sh`.
+
+**Gate:** `make clean && make` zero warnings; `make test`,
+`make test-asan` (ASan + UBSan + leak detection) all green; the two
+bugs are reproduced-then-fixed. Committed as `0047170` (redirection fd
+ownership), `6dc7f94` (sigaction failures), `c9e9cff` (exit parsing),
+`ed63649` (monitor), `11fad6b` (tests), `7c251e7` (executable bit), `c84f1f0` (CI).
 
 ---
 

@@ -114,9 +114,9 @@ child-side only needs failure handling after the call:
 ```c
 execvp(argv[0], argv);
 
-/* survives only on failure */
-fprintf(stderr, "caps: %s: %s\n", argv[0], strerror(errno));
-_exit(127);
+/* survives only on failure: report with write(2), never buffered stdio */
+write(STDERR_FILENO, msg, len);
+_exit(errno == EACCES ? 126 : 127);
 ```
 
 ### `exec` fails — process-level consequences
@@ -129,8 +129,11 @@ itself, and it must use `_exit()` rather than `exit()`:
 - `exit()` would flush those buffers, corrupting the parent's pending
   output;
 - `_exit()` performs the kernel exit immediately, skipping stdio
-  cleanup — it is async-signal-safe and appropriate inside the branch
-  after `fork()`.
+  cleanup — it avoids flushing the child's inherited copy of the
+  parent's buffers. The post-`fork()` child is **not** running in a
+  signal handler, so this is a buffer-safety choice, not an
+  async-signal-safety requirement (although `_exit()` is in fact
+  async-signal-safe).
 
 ---
 
