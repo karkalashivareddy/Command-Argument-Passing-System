@@ -54,6 +54,19 @@ typedef struct {
 int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
                  int *raw_status, caps_monitor_t *mon);
 
+/*
+ * Wait for one specific child to change state and store its raw wait()
+ * status in *status.
+ *
+ * Returns 0 on success, -1 on a terminal waitpid() failure.  EINTR is
+ * retried because the wait was interrupted, not the child; any other
+ * errno is permanent -- ECHILD means the child was already reaped, and
+ * options == 0 with a valid status pointer rules out EINVAL/EFAULT.  On
+ * a terminal failure the outcome is unknown and the caller must not use
+ * *status.
+ */
+int process_wait_child(pid_t pid, int *status);
+
 /* Print a human-readable summary of a raw wait() status (per WIFEXITED
  * / WIFSIGNALED) to stderr, naming the command that produced it. */
 void process_report_status(const char *command, int status);

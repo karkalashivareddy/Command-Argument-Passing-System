@@ -21,14 +21,26 @@ struct caps_monitor {
  * Display-only wall-clock timestamp "HH:MM:SS.mmm" taken from the realtime
  * clock.  This is presentation time, deliberately distinct from the
  * monotonic duration_ms carried by events.
+ *
+ * Failure policy: if the realtime clock or its local-time conversion
+ * cannot be read, the field is replaced by a fixed placeholder.  The
+ * event is still emitted, so a failing clock degrades a display field
+ * rather than producing an uninitialised value or invalid JSON.
  */
 static void format_wall_time(char *buf, size_t size)
 {
     struct timespec ts;
     struct tm tm;
 
-    clock_gettime(CLOCK_REALTIME, &ts);
-    localtime_r(&ts.tv_sec, &tm);
+    if (size == 0)
+        return;
+
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0 ||
+        localtime_r(&ts.tv_sec, &tm) == NULL) {
+        snprintf(buf, size, "??:??:??.???");
+        return;
+    }
+
     snprintf(buf, size, "%02d:%02d:%02d.%03d", tm.tm_hour, tm.tm_min,
              tm.tm_sec, (int)(ts.tv_nsec / 1000000));
 }

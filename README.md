@@ -309,10 +309,11 @@ redirection. See [`docs/redirection.md`](docs/redirection.md).
   (`caps: 'cmd' terminated by signal N`) and folded into the last
   status as `128 + N`. See [`docs/signals.md`](docs/signals.md).
 
-`sigaction()` failures are not ignored: `signals_parent_init()` warns
-(`SIGINT setup failed; Ctrl+C may terminate the shell`) and the REPL
-continues, and `signals_child_reset()` warns in the child before
-executing.
+`sigaction()` failures are not ignored: `signals_parent_init()` reports
+the failed syscall itself (`sigaction(SIGINT, SIG_IGN): <errno>`) and the
+REPL continues in a degraded
+mode, and `signals_child_reset()` warns in the child before executing.
+`main` does not repeat the parent's diagnostic.
 
 ---
 
@@ -368,9 +369,10 @@ Every command failure is per-command and must never kill the REPL.
 | redirection, no command | `caps: syntax error: no command to redirect` |
 | redirection `open()` fails | `caps: <file>: <strerror(errno)>`; command aborted |
 | `fork()` fails | `caps: fork: <strerror(errno)>` |
-| `waitpid()` fails | `caps: waitpid: <strerror(errno)>` |
+| `waitpid()` fails | `caps: waitpid: <strerror(errno)>`; `EINTR` is retried, other errnos end the command |
 | invalid `exit` argument | `caps: exit: invalid status: '<arg>' (expected an integer in the range 0..255)`; REPL continues, last status 1 |
-| `sigaction()` fails | `caps: warning: SIGINT setup failed; Ctrl+C may terminate the shell`; REPL continues |
+| `sigaction()` fails | `caps: sigaction(SIGINT, SIG_IGN): <strerror(errno)>`; REPL continues in a degraded mode |
+| monitor setup fails | `caps: monitor setup failed`; startup aborts (explicit `--monitor` cannot run without events) |
 | EOF at prompt | newline + clean exit with last status |
 
 Diagnostics go to **stderr**; successful commands are quiet.
@@ -379,10 +381,11 @@ Diagnostics go to **stderr**; successful commands are quiet.
 
 ## Testing
 
-`make test` runs ten POSIX-shell test scripts that pipe scripted input
-into a fresh `./caps` build and assert on stdout/stderr. A small C
-helper (`tests/helpers/status_probe.c`) is compiled by the harness so
-exit codes and signals can be tested deterministically.
+`make test` runs eleven POSIX-shell test scripts that pipe scripted input
+into a fresh `./caps` build and assert on stdout/stderr. Two small C
+helpers are compiled by the harness: `tests/helpers/status_probe.c`
+(deterministic exit codes and signals) and `tests/helpers/wait_probe.c`
+(exercises the `waitpid()` failure policy directly).
 
 | Script | Coverage |
 | ------ | -------- |
@@ -395,7 +398,8 @@ exit codes and signals can be tested deterministically.
 | `test_redirection.sh` | `>`/`>>`/`<`, combined, syntax errors, built-in rejection |
 | `test_exit_parse.sh` | `exit` argument validation: range, junk, overflow, REPL continuation |
 | `test_fd_edge.sh` | redirection while a standard descriptor is closed (`fd == target`) |
-| `test_monitor.sh` | monitor event ordering, JSON shape, session summary |
+| `test_monitor.sh` | monitor event ordering, JSON shape, session summary, bounded label |
+| `test_waitpolicy.sh` | `EINTR` retry vs terminal `waitpid()` failure (`ECHILD`) |
 
 `make test-asan` is the same suite rebuilt with AddressSanitizer and
 UndefinedBehaviorSanitizer (leak detection enabled).

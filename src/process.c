@@ -53,13 +53,42 @@ static void child_exec_failure(const char *command)
     }
 }
 
-/* Elapsed time on the monotonic clock; never displayed as wall-clock. */
-static long long monotonic_ms(void)
+/*
+ * Sample the monotonic clock.  Returns 0 and stores whole milliseconds
+ * in *out on success, -1 if the clock cannot be read.  CLOCK_MONOTONIC
+ * does not fail for a valid clock id, but checking the result keeps the
+ * failure explicit instead of returning an uninitialised timespec.
+ */
+static int monotonic_ms(long long *out)
 {
     struct timespec ts;
 
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000 + (long long)ts.tv_nsec / 1000000;
+    if (out == NULL)
+        return -1;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return -1;
+
+    *out = (long long)ts.tv_sec * 1000 + (long long)ts.tv_nsec / 1000000;
+    return 0;
+}
+
+/*
+ * Elapsed milliseconds between a start sample and now.
+ *
+ * Duration policy: when either the start sample (start_ok == 0) or the
+ * end sample is unavailable, the elapsed time is unknown and reported
+ * as 0.  A real measurement is always >= 0 because the monotonic clock
+ * cannot run backwards; the clamp is defensive only.
+ */
+static long long elapsed_ms(long long start_ms, int start_ok)
+{
+    long long now;
+
+    if (!start_ok || monotonic_ms(&now) != 0)
+        return 0;
+    if (now < start_ms)
+        return 0;
+    return now - start_ms;
 }
 
 static void emit_event(caps_monitor_t *mon, caps_event_type_t type, pid_t pid,
@@ -157,12 +186,46 @@ static void apply_redirections(redirection_t *redirs, int nredirs)
     }
 }
 
+/*
+ * Wait for one specific child and store its raw wait() status.
+ *
+ * Failure policy (deliberate, not a blind retry loop):
+ *   - EINTR is the only retryable outcome: the wait was interrupted by a
+ *     signal, the child's state is unchanged, and retrying cannot spin
+ *     because the child must eventually change state.
+ *   - Every other errno is terminal and reported exactly once.  The only
+ *     reachable case is ECHILD -- the pid is not (or is no longer) our
+ *     child, which means it was already reaped elsewhere and there is
+ *     nothing left to wait for; retrying could never succeed.  EINVAL and
+ *     EFAULT cannot occur with options == 0 and a valid status pointer,
+ *     and would be equally permanent if they did.
+ *
+ * Returns 0 when *status was filled in, -1 on the terminal path (the
+ * caller must then treat the child's outcome as unknown rather than
+ * guessing a status).
+ */
+int process_wait_child(pid_t pid, int *status)
+{
+    for (;;) {
+        pid_t done = waitpid(pid, status, 0);
+
+        if (done == pid)
+            return 0;
+        if (done < 0 && errno == EINTR)
+            continue;
+
+        caps_error("waitpid: %s", strerror(errno));
+        return -1;
+    }
+}
+
 int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
                  int *raw_status, caps_monitor_t *mon)
 {
     pid_t pid;
     int status;
     long long start_ms = 0;
+    int start_ok = 0;
 
     if (raw_status != NULL)
         *raw_status = 0;
@@ -179,7 +242,7 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
     if (nredirs > 0)
         emit_event(mon, CAPS_EVENT_REDIRECTION_OPENED, 0, 0, 0, argv);
 
-    start_ms = monotonic_ms();
+    start_ok = (monotonic_ms(&start_ms) == 0);
     pid = fork();
     if (pid < 0) {
         caps_error("fork: %s", strerror(errno));
@@ -203,16 +266,8 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
     emit_event(mon, CAPS_EVENT_PROCESS_STARTED, pid, 0, 0, argv);
     close_redirections(redirs, nredirs);
 
-    for (;;) {
-        pid_t done = waitpid(pid, &status, 0);
-
-        if (done == pid)
-            break;
-        if (done < 0 && errno == EINTR)
-            continue;
-        caps_error("waitpid: %s", strerror(errno));
+    if (process_wait_child(pid, &status) != 0)
         return EXIT_FAILURE;
-    }
 
     if (WIFEXITED(status)) {
         int code = WEXITSTATUS(status);
@@ -220,10 +275,10 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
 
         if (code == 127 || code == 126)
             emit_event(mon, CAPS_EVENT_EXEC_ERROR, pid, code,
-                       monotonic_ms() - start_ms, argv);
+                       elapsed_ms(start_ms, start_ok), argv);
         else
             emit_event(mon, CAPS_EVENT_PROCESS_EXITED, pid, code,
-                       monotonic_ms() - start_ms, argv);
+                       elapsed_ms(start_ms, start_ok), argv);
         if (raw_status != NULL)
             *raw_status = st;
         return code;
@@ -234,7 +289,7 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
 
         emit_event(mon, CAPS_EVENT_SIGNAL_RECEIVED, pid, sig, 0, argv);
         emit_event(mon, CAPS_EVENT_PROCESS_EXITED, pid, 128 + sig,
-                   monotonic_ms() - start_ms, argv);
+                   elapsed_ms(start_ms, start_ok), argv);
         if (raw_status != NULL)
             *raw_status = status;
         return 128 + sig;
