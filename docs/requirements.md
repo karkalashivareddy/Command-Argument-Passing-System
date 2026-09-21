@@ -89,8 +89,9 @@ The project must demonstrate:
 | Redirection      | `>` (truncate), `>>` (append), `<` (input) in interactive REPL      |
 | Error handling   | empty input, unknown command, `fork`/`exec`/`waitpid` failures, EOF |
 | Status handling  | normal exit, non-zero exit, signal termination                      |
+| Monitoring       | optional real-time lifecycle events: `--monitor [--json]`           |
 | Build            | `make`, `make clean`, `make test`, `make run`                       |
-| Tests            | parser, execution, exit status, signal termination, redirection, resilience |
+| Tests            | parser, execution, exit status, signal termination, redirection, exit-argument validation, closed-fd redirection, monitoring, resilience |
 
 ### 4.2 In scope (must document, implementation optional)
 
@@ -219,6 +220,25 @@ Contract:
   `exit`, `cd`); attempting it is reported as an error.
 - one-shot mode does **not** interpret redirection tokens; `./caps echo
   > file` passes `>` and `file` literally to `echo`.
+- an operator must be a whitespace-separated token equal to exactly
+  `<`, `>` or `>>` (`echo hi >f` does not redirect);
+- multiple redirections are allowed and are applied in order; because
+  each operator targets a fixed slot, a repeated target means last one
+  wins (`echo hi > a > b` writes to `b`).
+
+### 6.7 Built-in `exit` argument
+
+`exit` with no argument exits with the last command's status. `exit N`
+exits with `N`, where `N` must be a full integer in `0..255`. A
+non-integer, partially numeric, negative, or out-of-range argument is
+rejected with:
+
+```text
+caps: exit: invalid status: '<arg>' (expected an integer in the range 0..255)
+```
+
+and the REPL continues (last status becomes 1). The value is parsed
+with `strtol()` and range/errno checks — no `atoi()` partial parsing.
 
 ---
 
@@ -291,6 +311,9 @@ rest of the Phase 0 documentation:
 - `exec(3p)` — POSIX Programmer's Manual (man7.org)
 - `open(2)` / `dup2(2)` / `close(2)` — POSIX file-descriptor interfaces
   used by the redirection feature (Phase 8)
+- `sigaction(2)` — POSIX signal disposition interface (Phase 7/11)
+- `clock_gettime(2)` — `CLOCK_MONOTONIC` durations and `CLOCK_REALTIME`
+  display stamps for the monitor (Phase 11)
 
 ---
 
