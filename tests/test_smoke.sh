@@ -51,12 +51,14 @@ echo "PASS: EOF exits 0"
 
 # exit [N]
 printf 'exit 42\n' | "$bin" 2>/dev/null >/dev/null
-[ $? -eq 42 ] || fail "exit 42 -> $? (expected 42)"
+status=$?
+[ "$status" -eq 42 ] || fail "exit 42 -> $status (expected 42)"
 echo "PASS: exit 42 -> 42"
 
 # exit without N uses last command status (false -> 1)
 printf 'false\nexit\n' | "$bin" 2>/dev/null >/dev/null
-[ $? -eq 1 ] || fail "false;exit -> $? (expected 1)"
+status=$?
+[ "$status" -eq 1 ] || fail "false;exit -> $status (expected 1)"
 echo "PASS: exit uses last status"
 
 # help text
@@ -90,12 +92,14 @@ notexec=$(mktemp) || fail "mktemp failed"
 trap 'rm -f "$notexec"; rm -rf "$tmpdir"' EXIT
 chmod 644 "$notexec"
 "$bin" "$notexec" 2>/dev/null >/dev/null
-[ $? -eq 126 ] || fail "EACCES exit $? (expected 126)"
+status=$?
+[ "$status" -eq 126 ] || fail "EACCES exit $status (expected 126)"
 echo "PASS: permission denied -> 126"
 
 # unknown command -> 127
 "$bin" no_such_cmd_xyz 2>/dev/null >/dev/null
-[ $? -eq 127 ] || fail "ENOENT exit $? (expected 127)"
+status=$?
+[ "$status" -eq 127 ] || fail "ENOENT exit $status (expected 127)"
 echo "PASS: not found -> 127"
 
 # --- All passed ---

@@ -22,7 +22,8 @@ esac
 
 echo "Errors: unknown command with a path"
 err=$(echo '' | "$bin" /no/such/dir/file 2>&1 >/dev/null)
-[ $? -eq 127 ] || failmsg "path ENOENT status $?"
+status=$?
+[ "$status" -eq 127 ] || failmsg "path ENOENT status $status (want 127)"
 echo "PASS: path ENOENT -> 127"
 
 echo "Errors: non-executable file"
@@ -30,7 +31,8 @@ tmpf=$(mktemp)
 trap 'rm -f "$tmpf"' EXIT
 chmod 644 "$tmpf"
 err=$(echo '' | "$bin" "$tmpf" 2>&1 >/dev/null)
-[ $? -eq 126 ] || failmsg "EACCES status $? (want 126)"
+status=$?
+[ "$status" -eq 126 ] || failmsg "EACCES status $status (want 126)"
 case "$err" in
     *"caps: $tmpf: permission denied"*) echo "PASS: EACCES message" ;;
     *) failmsg "EACCES message: '$err'" ;;

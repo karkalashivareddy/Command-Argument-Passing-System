@@ -18,8 +18,14 @@ TESTS   := tests/test_smoke.sh \
            tests/test_errors.sh \
            tests/test_exit_status.sh \
            tests/test_signals.sh \
-           tests/test_redirection.sh
+           tests/test_redirection.sh \
+           tests/test_exit_parse.sh \
+           tests/test_fd_edge.sh \
+           tests/test_monitor.sh
 HELPER  := $(BUILD)/status_probe
+
+# Tests that need the status_probe helper binary
+HELPER_TESTS := *execution*|*exit_status*|*signals*|*monitor*
 
 # Sanitizer build (AddressSanitizer + UndefinedBehaviorSanitizer)
 SAN_TARGET := caps-asan
@@ -46,7 +52,7 @@ test: $(TARGET) $(HELPER)
 	@set -e; for t in $(TESTS); do \
 		echo "== $$t =="; \
 		case "$$t" in \
-			*execution*|*exit_status*|*signals*) ./$$t ./$(TARGET) ./$(HELPER);; \
+			$(HELPER_TESTS)) ./$$t ./$(TARGET) ./$(HELPER);; \
 			*) ./$$t ./$(TARGET);; \
 		esac; \
 	done; \
@@ -60,7 +66,7 @@ test-asan: $(SAN_TARGET) $(HELPER)
 	@set -e; for t in $(TESTS); do \
 		echo "== $$t (asan) =="; \
 		case "$$t" in \
-			*execution*|*exit_status*|*signals*) ASAN_OPTIONS=detect_leaks=1 ./$$t ./$(SAN_TARGET) ./$(HELPER);; \
+			$(HELPER_TESTS)) ASAN_OPTIONS=detect_leaks=1 ./$$t ./$(SAN_TARGET) ./$(HELPER);; \
 			*) ASAN_OPTIONS=detect_leaks=1 ./$$t ./$(SAN_TARGET);; \
 		esac; \
 	done; \
