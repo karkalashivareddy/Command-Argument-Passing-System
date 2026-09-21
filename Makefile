@@ -21,11 +21,16 @@ TESTS   := tests/test_smoke.sh \
            tests/test_redirection.sh \
            tests/test_exit_parse.sh \
            tests/test_fd_edge.sh \
-           tests/test_monitor.sh
+           tests/test_monitor.sh \
+           tests/test_waitpolicy.sh
 HELPER  := $(BUILD)/status_probe
 
 # Tests that need the status_probe helper binary
 HELPER_TESTS := *execution*|*exit_status*|*signals*|*monitor*
+
+# waitpid() failure-policy probe (links the non-main objects directly)
+WAIT_HELPER := $(BUILD)/wait_probe
+WAIT_TESTS  := *waitpolicy*
 
 # Sanitizer build (AddressSanitizer + UndefinedBehaviorSanitizer)
 SAN_TARGET := caps-asan
@@ -42,16 +47,24 @@ $(BUILD)/%.o: src/%.c | $(BUILD)
 $(HELPER): tests/helpers/status_probe.c | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
 
+# Links the execution objects (minus main) so the probe can call
+# process_wait_child() directly.
+WAIT_OBJS := $(filter-out $(BUILD)/main.o,$(OBJS))
+
+$(WAIT_HELPER): tests/helpers/wait_probe.c $(WAIT_OBJS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/helpers/wait_probe.c $(WAIT_OBJS)
+
 $(BUILD):
 	mkdir -p $(BUILD)
 
 run: $(TARGET)
 	./$(TARGET)
 
-test: $(TARGET) $(HELPER)
+test: $(TARGET) $(HELPER) $(WAIT_HELPER)
 	@set -e; for t in $(TESTS); do \
 		echo "== $$t =="; \
 		case "$$t" in \
+			$(WAIT_TESTS)) ./$$t ./$(WAIT_HELPER);; \
 			$(HELPER_TESTS)) ./$$t ./$(TARGET) ./$(HELPER);; \
 			*) ./$$t ./$(TARGET);; \
 		esac; \
@@ -62,10 +75,11 @@ test: $(TARGET) $(HELPER)
 $(SAN_TARGET): $(SRCS) include/*.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN_FLAGS) -o $@ $(SRCS)
 
-test-asan: $(SAN_TARGET) $(HELPER)
+test-asan: $(SAN_TARGET) $(HELPER) $(WAIT_HELPER)
 	@set -e; for t in $(TESTS); do \
 		echo "== $$t (asan) =="; \
 		case "$$t" in \
+			$(WAIT_TESTS)) ASAN_OPTIONS=detect_leaks=1 ./$$t ./$(WAIT_HELPER);; \
 			$(HELPER_TESTS)) ASAN_OPTIONS=detect_leaks=1 ./$$t ./$(SAN_TARGET) ./$(HELPER);; \
 			*) ASAN_OPTIONS=detect_leaks=1 ./$$t ./$(SAN_TARGET);; \
 		esac; \
