@@ -7,10 +7,50 @@
 #include "builtin.h"
 #include "utils.h"
 
+/*
+ * Parse an exit-status argument with strtol() and full validation.
+ *
+ * Rejects: empty strings, non-numeric strings, partially numeric strings
+ * ("12abc"), overflow/underflow (ERANGE), and values outside the range a
+ * process can exit with (0..255).  Nothing is silently interpreted: invalid
+ * input yields -1 and the caller reports a diagnostic.
+ */
+static int parse_exit_status(const char *s, int *out)
+{
+    char *end = NULL;
+    long v;
+
+    if (s == NULL || *s == '\0')
+        return -1;
+
+    errno = 0;
+    v = strtol(s, &end, 10);
+    if (errno == ERANGE || end == s || *end != '\0')
+        return -1;
+    if (v < 0 || v > 255)
+        return -1;
+
+    *out = (int)v;
+    return 0;
+}
+
 static builtin_result_t builtin_exit(int argc, char *const argv[],
                                      int last_status, int *status)
 {
-    *status = (argc >= 2) ? atoi(argv[1]) : last_status;
+    if (argc >= 2) {
+        int value;
+
+        if (parse_exit_status(argv[1], &value) != 0) {
+            caps_error("exit: invalid status: '%s' (expected an integer "
+                       "in the range 0..255)", argv[1]);
+            *status = 1;
+            return CAPS_BUILTIN_HANDLED;
+        }
+        *status = value;
+        return CAPS_BUILTIN_EXIT;
+    }
+
+    *status = last_status;
     return CAPS_BUILTIN_EXIT;
 }
 
