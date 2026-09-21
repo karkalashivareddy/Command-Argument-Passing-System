@@ -11,4 +11,11 @@
  */
 void caps_error(const char *fmt, ...);
 
+/*
+ * Join a NULL-terminated argv into "tok1 tok2 ... tokN", truncated to
+ * fit dst[size].  Always NUL-terminates dst.  Used to label monitor
+ * events and error messages with the command that produced them.
+ */
+void caps_join_argv(char *const argv[], char *dst, size_t size);
+
 #endif /* CAPS_UTILS_H */
