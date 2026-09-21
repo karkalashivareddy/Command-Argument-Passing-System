@@ -1,6 +1,10 @@
 #ifndef CAPS_PROCESS_H
 #define CAPS_PROCESS_H
 
+#include <sys/types.h>
+
+#include "monitor.h"
+
 /*
  * I/O redirection for an external command.
  *
@@ -29,6 +33,10 @@ typedef struct {
  * be the command name.  redirs/nredirs describe optional std-io
  * redirection applied to the child before exec (may be NULL/0).
  *
+ * mon may be NULL; when non-NULL, process_exec() emits the observable
+ * lifecycle events (redirection opened/failed, process started, process
+ * exited, signal received, exec error) into the monitor as they occur.
+ *
  * If raw_status is not NULL it receives the raw wait() status as
  * returned by waitpid(), suitable for WIFEXITED/WEXITSTATUS and
  * WIFSIGNALED/WTERMSIG.
@@ -44,7 +52,7 @@ typedef struct {
  * reports the error on stderr and terminates with _exit().
  */
 int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
-                 int *raw_status);
+                 int *raw_status, caps_monitor_t *mon);
 
 /* Print a human-readable summary of a raw wait() status (per WIFEXITED
  * / WIFSIGNALED) to stderr, naming the command that produced it. */

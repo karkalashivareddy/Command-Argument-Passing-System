@@ -5,21 +5,24 @@
 #include <string.h>
 #include <stdarg.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
+#include "monitor.h"
 #include "process.h"
 #include "signals.h"
 #include "utils.h"
 
 /*
- * Report an exec/dup2 failure from inside the child process.
+ * Report an exec/dup2/signal failure from inside the child process.
  *
- * After fork() the child shares a copy of the parent's stdio buffers.
- * Using fprintf()/exit() here could flush duplicated buffers and tear
- * the parent's pending output.  We therefore format into a small
- * stack buffer and write(2) directly to stderr, then _exit().
- * write() and strlen() are in the POSIX async-signal-safe set; this
- * is the minimal, correct child-side failure path.
+ * Note: this is NOT a signal-handler context and is NOT claimed to be
+ * async-signal-safe — vsnprintf()/strerror() are fine here for that
+ * reason.  The real constraint is different: after fork() the child
+ * shares a copy of the parent's stdio buffers, so fprintf()/exit()
+ * would flush duplicated buffers and garble the parent's pending
+ * output.  We therefore write(2) directly to stderr and _exit(), never
+ * touching buffered stdio.
  */
 static void child_fatal_printf(const char *fmt, ...)
 {
@@ -48,6 +51,40 @@ static void child_exec_failure(const char *command)
         const char *e = strerror(errno);
         child_fatal_printf("caps: %s: %s\n", command, e ? e : "unknown error");
     }
+}
+
+/* Elapsed time on the monotonic clock; never displayed as wall-clock. */
+static long long monotonic_ms(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + (long long)ts.tv_nsec / 1000000;
+}
+
+static void emit_event(caps_monitor_t *mon, caps_event_type_t type, pid_t pid,
+                       int status, long long duration_ms, char *const argv[])
+{
+    caps_event_t ev;
+    char cmd[256];
+
+    if (mon == NULL)
+        return;
+
+    memset(&ev, 0, sizeof ev);
+    ev.type = type;
+    ev.pid = pid;
+    ev.status = status;
+    ev.duration_ms = duration_ms;
+
+    if (argv != NULL) {
+        caps_join_argv(argv, cmd, sizeof cmd);
+        ev.command = cmd;
+    } else {
+        ev.command = NULL;
+    }
+
+    caps_monitor_emit(mon, &ev);
 }
 
 static int open_redirections(redirection_t *redirs, int nredirs)
@@ -121,10 +158,11 @@ static void apply_redirections(redirection_t *redirs, int nredirs)
 }
 
 int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
-                 int *raw_status)
+                 int *raw_status, caps_monitor_t *mon)
 {
     pid_t pid;
     int status;
+    long long start_ms = 0;
 
     if (raw_status != NULL)
         *raw_status = 0;
@@ -134,9 +172,14 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
         return EXIT_FAILURE;
     }
 
-    if (open_redirections(redirs, nredirs) < 0)
+    if (open_redirections(redirs, nredirs) < 0) {
+        emit_event(mon, CAPS_EVENT_REDIRECTION_FAILED, 0, 0, 0, argv);
         return EXIT_FAILURE;
+    }
+    if (nredirs > 0)
+        emit_event(mon, CAPS_EVENT_REDIRECTION_OPENED, 0, 0, 0, argv);
 
+    start_ms = monotonic_ms();
     pid = fork();
     if (pid < 0) {
         caps_error("fork: %s", strerror(errno));
@@ -145,7 +188,10 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
     }
 
     if (pid == 0) {
-        signals_child_reset();
+        if (signals_child_reset() != 0)
+            child_fatal_printf("caps: warning: failed to reset SIGINT in "
+                               "child; the executed program may ignore "
+                               "Ctrl+C\n");
         apply_redirections(redirs, nredirs);
         execvp(argv[0], argv);
         child_exec_failure(argv[0]);
@@ -154,6 +200,7 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
         _exit(127);
     }
 
+    emit_event(mon, CAPS_EVENT_PROCESS_STARTED, pid, 0, 0, argv);
     close_redirections(redirs, nredirs);
 
     for (;;) {
@@ -168,15 +215,29 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
     }
 
     if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        int st = status;
+
+        if (code == 127 || code == 126)
+            emit_event(mon, CAPS_EVENT_EXEC_ERROR, pid, code,
+                       monotonic_ms() - start_ms, argv);
+        else
+            emit_event(mon, CAPS_EVENT_PROCESS_EXITED, pid, code,
+                       monotonic_ms() - start_ms, argv);
         if (raw_status != NULL)
-            *raw_status = status;
-        return WEXITSTATUS(status);
+            *raw_status = st;
+        return code;
     }
 
     if (WIFSIGNALED(status)) {
+        int sig = WTERMSIG(status);
+
+        emit_event(mon, CAPS_EVENT_SIGNAL_RECEIVED, pid, sig, 0, argv);
+        emit_event(mon, CAPS_EVENT_PROCESS_EXITED, pid, 128 + sig,
+                   monotonic_ms() - start_ms, argv);
         if (raw_status != NULL)
             *raw_status = status;
-        return 128 + WTERMSIG(status);
+        return 128 + sig;
     }
 
     return EXIT_FAILURE;
