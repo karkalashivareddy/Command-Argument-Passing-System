@@ -22,10 +22,12 @@ A small, deliberate model — **not** job control:
 `signals_parent_init()` and `signals_child_reset()` both return `int`
 (0 on success, -1 if `sigaction()` fails):
 
-- **Parent setup fails:** `caps` prints
-  `caps: warning: SIGINT setup failed; Ctrl+C may terminate the shell`
-  and keeps running. The REPL remains usable; only the Ctrl+C
-  protection is degraded, and the user is told so.
+- **Parent setup fails:** `signals_parent_init()` prints
+  `caps: sigaction(SIGINT, SIG_IGN): <strerror(errno)>` — the actual
+  syscall failure, reported once by the function that owns the syscall —
+  and `main` keeps running. The REPL remains usable; only the Ctrl+C
+  protection is degraded, and the user is told so. `main` deliberately
+  does not print a second, redundant warning for the same failure.
 - **Child reset fails:** the child prints
   `caps: warning: failed to reset SIGINT in child; the executed program
   may ignore Ctrl+C` (via `write(2)`, before `exec`), then proceeds to

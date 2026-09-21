@@ -210,9 +210,13 @@ static int parse_debug_mode(void)
 
 int main(int argc, char *argv[])
 {
-    if (signals_parent_init() != 0)
-        caps_error("warning: SIGINT setup failed; Ctrl+C may terminate "
-                   "the shell");
+    /*
+     * signals_parent_init() reports its own sigaction() failure.  The
+     * shell then continues in the documented degraded mode (Ctrl+C may
+     * also terminate the parent while a child runs), so the return value
+     * is intentionally not acted on and the failure is not re-reported.
+     */
+    (void)signals_parent_init();
 
     if (argc == 2 && strcmp(argv[1], "--parse") == 0)
         return parse_debug_mode();
@@ -245,8 +249,15 @@ int main(int argc, char *argv[])
         caps_monitor_t *mon = caps_monitor_create(stderr, json);
         int rc;
 
-        if (mon == NULL)
-            caps_error("monitor setup failed; continuing without events");
+        if (mon == NULL) {
+            /*
+             * The user explicitly asked for monitoring; running without
+             * it would silently ignore the requested mode.  Fail startup
+             * instead of continuing as a normal shell.
+             */
+            caps_error("monitor setup failed");
+            return EXIT_FAILURE;
+        }
 
         if (i < argc)
             rc = monitor_one_shot(mon, &argv[i]);

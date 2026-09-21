@@ -219,8 +219,10 @@ Child contract:
 Parent contract:
 
 - checks `fork()` return; reports `-1` as a fatal-per-command error;
-- `waitpid(pid, &status, 0)` returns the PID on success, `-1` (with
-  errno) on failure.
+- `process_wait_child(pid, &status)`: retries only `EINTR`; any other
+  `waitpid()` errno (reachably `ECHILD`, i.e. already reaped) is terminal,
+  reported once, and yields a per-command failure rather than an endless
+  retry or a guessed status.
 
 ### 5.4 builtin
 
@@ -279,9 +281,10 @@ Elapsed time is measured with `clock_gettime(CLOCK_MONOTONIC)` in
 | redirection w/ builtin| main       | `caps: redirection is not supported for built-in commands` | yes |
 | `fork()` -1           | process    | `caps: fork: <strerror(errno)>`               | yes             |
 | `execvp()` fails      | process    | `caps: command not found: <cmd>` / `caps: <cmd>: permission denied` / `caps: <cmd>: <strerror(errno)>` then `_exit()` | parent: yes    |
-| `waitpid()` -1        | process    | `caps: waitpid: <strerror(errno)>`            | yes             |
-| `signals_parent_init()` fails | signals | `caps: warning: SIGINT setup failed; Ctrl+C may terminate the shell` | yes     |
+| `waitpid()` -1        | process    | `caps: waitpid: <strerror(errno)>`; only `EINTR` is retried, other errnos are terminal | yes |
+| `signals_parent_init()` fails | signals | `caps: sigaction(SIGINT, SIG_IGN): <strerror(errno)>`; shell continues in a degraded mode | yes     |
 | `signals_child_reset()` fails | process (child) | `caps: warning: failed to reset SIGINT in child; the executed program may ignore Ctrl+C` then continues to `exec` | n/a |
+| `caps_monitor_create()` fails | main | `caps: monitor setup failed`; startup aborts with `EXIT_FAILURE` | no |
 | invalid `exit` argument | builtin   | `caps: exit: invalid status: '<arg>' (expected an integer in the range 0..255)`; last status set to 1 | yes |
 | EOF at prompt         | main       | newline + clean exit with last status         | ends            |
 

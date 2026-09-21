@@ -167,14 +167,30 @@ What it does (`wait(2)`):
 - `waitpid()` is the only rendezvous: it blocks the parent until the
   child finishes, then harvests the status.
 
-```c
-pid_t done = waitpid(child_pid, &status, 0);
+caps reaps through `process_wait_child()` and retries only the
+retryable outcome:
 
-if (done == -1) {
-    perror("caps: waitpid");
-    /* continue the REPL */
+```c
+for (;;) {
+    pid_t done = waitpid(child_pid, &status, 0);
+
+    if (done == child_pid)
+        break;                 /* *status is valid */
+    if (done < 0 && errno == EINTR)
+        continue;              /* interrupted, not the child: retry */
+    caps_error("waitpid: %s", strerror(errno));
+    break;                     /* terminal: outcome unknown */
 }
 ```
+
+`EINTR` means a signal interrupted the wait; the child's state is
+unchanged, so retrying is correct and cannot spin. Every other errno is
+**terminal and reported once**. The reachable case is `ECHILD` — the pid
+is not (or is no longer) our child because it was already reaped, so
+there is nothing left to wait for and retrying could never succeed.
+`EINVAL`/`EFAULT` cannot occur with `options == 0` and a valid status
+pointer. On a terminal failure the status is left unset and the command
+is treated as failed; the code never guesses a status or loops forever.
 
 ---
 

@@ -35,6 +35,11 @@ In `--json` REPL mode the banner and the `caps>` prompt are suppressed
 so that every stderr line is a JSON object. In text mode the banner and
 prompt are shown as usual.
 
+Requesting `--monitor` is explicit, so a monitor that cannot be created
+is a startup failure: caps prints `caps: monitor setup failed` and exits
+non-zero instead of silently running without the requested event stream.
+Normal (non-monitor) execution is unaffected.
+
 ---
 
 ## 2. Why it is genuinely real time
@@ -115,10 +120,20 @@ One object per line (the `SESSION_SUMMARY` object carries no `time`):
 Field notes:
 
 - `time` is a display-only wall-clock stamp from `CLOCK_REALTIME`
-  (`HH:MM:SS.mmm`).
+  (`HH:MM:SS.mmm`). If the realtime clock or its `localtime_r()`
+  conversion cannot be read, the field is the fixed placeholder
+  `??:??:??.???` — the event is still emitted, so a failing clock
+  degrades a display field instead of corrupting the JSON.
 - `duration_ms` is real elapsed time from `CLOCK_MONOTONIC`, measured in
   `process.c` between `fork()` and reap. It is not the wall-clock
-  difference.
+  difference. If the monotonic clock cannot be sampled at either end,
+  the elapsed time is unknown and reported as `0`; a real measurement is
+  always `>= 0`.
+- `command` is a **bounded** label: the event builder joins `argv` into a
+  fixed 256-byte buffer (`caps_join_argv`), so a command line longer than
+  that is truncated **in the label only**. Execution always receives the
+  complete, untruncated `argv`. The label cap keeps every JSON line
+  well-formed and finite.
 - Command strings are JSON-escaped (quotes, backslashes, control
   characters), preserving the one-object-per-line guarantee.
 - On `SIGNAL_RECEIVED`, `signal` is the signal number; the following
@@ -154,6 +169,8 @@ against the deterministic `status_probe` helper and asserts:
   counters;
 - every JSON line parses as an object (validated with `jq` when
   available; otherwise a shape check and the absence of interleaved
-  non-JSON lines).
+  non-JSON lines);
+- a 2000-character argument reaches the program intact while the event
+  label stays bounded, proving the display cap never truncates `argv`.
 
 `make test` and `make test-asan` both run it.
