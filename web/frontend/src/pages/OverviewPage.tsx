@@ -1,4 +1,3 @@
-import { motion } from "motion/react";
 import { ArrowRight, Cpu, History, RadioTower, Timer, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
@@ -30,7 +29,7 @@ export default function OverviewPage() {
   const [analytics, setAnalytics] = useState<AnalyticsOverview | null>(null);
   const [processes, setProcesses] = useState<{ processes: ProcessInfo[]; capacity: number } | null>(null);
   const [booted, setBooted] = useState(false);
-  const { events, connected } = useGlobalFeed(40);
+  const { events, connected, connection } = useGlobalFeed(40);
 
   useEffect(() => {
     let stop = false;
@@ -75,9 +74,8 @@ export default function OverviewPage() {
             />
           </div>
           <p className="mt-1.5 max-w-2xl text-[13px] leading-relaxed text-[var(--fg-2)]">
-            A command is parsed, its arguments become a vector, a child process is forked and replaces itself with the
-            requested program, runs, and reports an exit status. CAPS observes every step with real POSIX telemetry and
-            turns it into a visual flight recorder.
+            CAPS records the argument vector, child PID, termination signal, and wait status reported by its POSIX
+            monitor. The recorder distinguishes direct events from stages the current event protocol cannot observe.
           </p>
 
           <form
@@ -103,25 +101,14 @@ export default function OverviewPage() {
           </form>
         </div>
 
-        {/* Mini live execution path — mirrors the FLIGHT RECORDER main pipeline */}
-        <div className="flex items-center justify-center gap-0 px-6 py-3.5">
-          {["INPUT", "PARSE", "ARGV", "FORK", "EXEC", "RUN", "WAIT", "RESULT"].map((s, i, arr) => (
-            <div key={s} className="flex items-center">
-              <span className="text-[10px] font-bold tracking-[0.14em] text-[var(--fg-3)]">{s}</span>
-              {i < arr.length - 1 ? (
-                <span className="mx-1.5 h-0.5 w-4 overflow-hidden rounded bg-[var(--line-1)]">
-                  <motion.span
-                    className="block h-full bg-[var(--accent)]"
-                    initial={{ x: -16, opacity: 0 }}
-                    animate={{ x: [ -16, 16, 16 ], opacity: [0, 1, 0] }}
-                    transition={{ duration: 2.4, repeat: Infinity, ease: "easeInOut", delay: i * 0.3 }}
-                  />
-                </span>
-              ) : null}
-            </div>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-6 py-3.5" aria-label="Observed command lifecycle stages">
+          {["INPUT", "ARGV", "FORK", "EXEC", "RUN", "WAIT", "RESULT"].map((stage, i, stages) => (
+            <span key={stage} className="flex items-center gap-2 font-mono text-[10px] font-bold tracking-[0.12em] text-[var(--fg-3)]">
+              {stage}{i < stages.length - 1 ? <span aria-hidden="true" className="text-[var(--line-2)]">→</span> : null}
+            </span>
           ))}
-          <span className="ml-3 hidden rounded-[var(--r-sm)] border border-[var(--line-1)] px-1.5 py-0.5 font-mono text-[9.5px] text-[var(--fg-3)] sm:block">
-            {engineState === "online" ? "monitor · --json · --monitor" : "channel off"}
+          <span className="ml-auto rounded-[var(--r-sm)] border border-[var(--line-1)] px-1.5 py-0.5 font-mono text-[9.5px] text-[var(--fg-3)]">
+            {connection === "connected" ? "SSE · CONNECTED" : connection === "reconnecting" ? "SSE · RECONNECTING" : "SSE · CONNECTING"}
           </span>
         </div>
       </section>
@@ -150,7 +137,7 @@ export default function OverviewPage() {
               <EmptyState
                 icon={<History className="h-5 w-5" />}
                 title="No executions recorded yet"
-                body="Run your first command from the box above — the flight recorder will capture the whole fork→exec→wait story."
+                body="Run your first command from the box above. The flight recorder records the events CAPS reports and marks unavailable stages explicitly."
               />
             ) : (
               <div className="space-y-1">
@@ -183,7 +170,7 @@ export default function OverviewPage() {
           <Card
             title="Live event stream"
             subtitle="Real monitor events as they arrive (SSE /api/live/stream)"
-            actions={<Badge tone={connected ? "success" : "neutral"}>{connected ? "connected" : "disconnected"}</Badge>}
+            actions={<Badge tone={connected ? "success" : connection === "reconnecting" ? "warn" : "neutral"}>{connection}</Badge>}
           >
             {events.length === 0 ? (
               <EmptyState icon={<RadioTower className="h-5 w-5" />} title="No events yet" body="Fire an execution and every event it produces will appear here instantly." />

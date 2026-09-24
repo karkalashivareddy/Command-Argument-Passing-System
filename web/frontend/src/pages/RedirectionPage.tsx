@@ -43,8 +43,7 @@ export default function RedirectionPage() {
         <div className="flex items-center gap-2 text-[10.5px] font-semibold uppercase tracking-[0.14em] text-[var(--fg-3)]">Redirection</div>
         <h1 className="mt-1 text-xl font-semibold tracking-tight text-[var(--fg-0)]">Where the descriptors go</h1>
         <p className="mt-1 max-w-2xl text-[13px] text-[var(--fg-2)]">
-          <Code>echo … &gt; file</Code> opens the workspace file with <Code>O_CREAT | O_TRUNC</Code> and <Code>dup2</Code>s it onto
-          fd&nbsp;1. The diagrams below are generated from the real redirection events CAPS reports.
+          <Code>echo … &gt; file</Code> requests stdout redirection into a workspace file. CAPS reports whether redirection setup succeeded; its current events do not expose individual <Code>open()</Code>, <Code>dup2()</Code>, or <Code>close()</Code> calls. Those steps are POSIX explanation, not individual observed events.
         </p>
       </div>
 
@@ -78,7 +77,7 @@ export default function RedirectionPage() {
           </p>
         </div>
       ) : (
-        <Card title="digram area" subtitle="empty until you run a redirection">
+        <Card title="Diagram area" subtitle="empty until you run a redirection">
           <div className="flex items-center justify-center rounded-[var(--r-md)] border border-dashed border-[var(--line-1)] py-10 text-[12.5px] text-[var(--fg-3)]">
             <Rows3 className="mr-2 h-4 w-4" />
             Run a redirection above to see the fd diagram.

@@ -47,6 +47,7 @@ export function migrate(db: DatabaseSync): void {
 
     CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, sequence);
     CREATE INDEX IF NOT EXISTS idx_events_session_asc ON events(id);
+    CREATE INDEX IF NOT EXISTS idx_events_type_session ON events(type, session_id, sequence);
 
     CREATE TABLE IF NOT EXISTS processes (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,

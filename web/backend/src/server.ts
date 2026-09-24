@@ -30,6 +30,8 @@ export async function buildServer(overrides: { config?: Partial<ReturnType<typeo
     bodyLimit: 256 * 1024,
   });
 
+  app.addHook("onClose", async () => runner.close());
+
   app.addHook("onRequest", async (req, reply) => {
     reply.header("x-caps-observatory", "CAPS Process Execution Observatory");
     reply.header("Cache-Control", "no-store");
@@ -102,7 +104,7 @@ export async function startServer(): Promise<void> {
   void runner;
 }
 
-const isMain = process.argv[1] && /server\.ts$/.test(process.argv[1].replace(/\\/g, "/"));
+const isMain = process.argv[1] && /server\.(?:ts|js)$/.test(process.argv[1].replace(/\\/g, "/"));
 if (isMain || process.env.CAPS_START === "1") {
   startServer().catch((err) => {
     console.error(err);

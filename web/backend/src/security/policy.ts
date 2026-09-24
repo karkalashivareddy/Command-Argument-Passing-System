@@ -1,5 +1,5 @@
-import { existsSync, realpathSync } from "node:fs";
-import { isAbsolute, resolve, sep } from "node:path";
+import { existsSync, lstatSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import type { CapsConfig } from "../config/env.js";
 import { repoRoot } from "../config/env.js";
@@ -12,7 +12,9 @@ import { repoRoot } from "../config/env.js";
  * entries (the test status_probe helper) are resolved to their absolute
  * path at startup. The gateway NEVER interpolates anything into a shell.
  */
-const PATH_CMDS: string[] = ["echo", "printf", "sleep", "true", "false", "pwd", "cat", "uname", "sh"];
+// Do not allow shells here: `sh -c` would turn an argv allowlist into an
+// arbitrary command execution interface even though spawn() uses shell:false.
+const PATH_CMDS: string[] = ["echo", "printf", "sleep", "true", "false", "pwd", "cat", "uname"];
 const REPO_HELPERS: Record<string, string> = {
   status_probe: resolve(repoRoot, "build", "status_probe"),
 };
@@ -70,16 +72,55 @@ export function assertTargetInWorkspace(config: CapsConfig, target: string): voi
   if (!existsSync(config.workspace)) {
     throw new RedirectionPolicyError("workspace does not exist");
   }
-  // The file does not exist yet, so compare normalized strings rather than
-  // realpath()-ing a candidate that would throw ENOENT. isSafeRedirTarget
-  // already forbids ".."/absolute/empty segments, so resolution is provably
-  // contained; this is defense in depth.
+  // Walk every existing component. A lexically safe name can still escape
+  // through a workspace symlink (including a symlink in a parent directory).
   const base = realpathSync(config.workspace);
-  const baseNorm = base.toLowerCase();
-  const candidate = resolve(config.workspace, target);
-  const candNorm = candidate.toLowerCase();
-  if (candNorm !== baseNorm && !candNorm.startsWith(baseNorm + sep)) {
+  const contained = (candidate: string): boolean => {
+    const rel = relative(base, candidate);
+    return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+  };
+  let current = base;
+  for (const part of target.split(/[\\/]/)) {
+    current = resolve(current, part);
+    try {
+      const info = lstatSync(current);
+      if (info.isSymbolicLink()) {
+        throw new RedirectionPolicyError("redirection target may not traverse a symbolic link");
+      }
+      const actual = realpathSync(current);
+      if (!contained(actual)) {
+        throw new RedirectionPolicyError("redirection target escapes the workspace");
+      }
+      current = actual;
+    } catch (err) {
+      if (err instanceof RedirectionPolicyError) throw err;
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") break;
+      throw new RedirectionPolicyError("redirection target could not be verified");
+    }
+  }
+  if (!contained(current)) {
     throw new RedirectionPolicyError("redirection target escapes the workspace");
+  }
+}
+
+/** Allow the web-facing `cat` helper to read only regular files in workspace. */
+export function assertReadableFileInWorkspace(config: CapsConfig, target: string): void {
+  if (!isSafeRedirTarget(target) || target.startsWith("-")) {
+    throw new RedirectionPolicyError("file argument rejected by workspace policy");
+  }
+  try {
+    const base = realpathSync(config.workspace).toLowerCase();
+    const resolved = realpathSync(resolve(config.workspace, target));
+    const normalized = resolved.toLowerCase();
+    if (normalized !== base && !normalized.startsWith(base + sep)) {
+      throw new RedirectionPolicyError("file argument escapes the workspace");
+    }
+    if (!statSync(resolved).isFile()) {
+      throw new RedirectionPolicyError("file argument must name a regular file");
+    }
+  } catch (err) {
+    if (err instanceof RedirectionPolicyError) throw err;
+    throw new RedirectionPolicyError("file argument must be an existing workspace file");
   }
 }
 

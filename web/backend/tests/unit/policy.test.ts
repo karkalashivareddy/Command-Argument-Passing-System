@@ -1,9 +1,12 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { repoRoot } from "../../src/config/env.js";
 import {
   assertTargetInWorkspace,
+  assertReadableFileInWorkspace,
   isCommandAllowed,
   isSafeRedirTarget,
   RedirectionPolicyError,
@@ -13,13 +16,13 @@ import {
 
 describe("allowlist", () => {
   it("allows known commands", () => {
-    for (const c of ["echo", "sleep", "true", "false", "pwd", "cat", "uname", "sh", "printf"]) {
+    for (const c of ["echo", "sleep", "true", "false", "pwd", "cat", "uname", "printf"]) {
       expect(isCommandAllowed(c)).toBe(true);
     }
   });
 
   it("rejects arbitrary commands", () => {
-    for (const c of ["rm", "curl", "bash", "python3", "node", "systemctl", "sudo"]) {
+    for (const c of ["rm", "curl", "bash", "sh", "python3", "node", "systemctl", "sudo"]) {
       expect(isCommandAllowed(c)).toBe(false);
     }
   });
@@ -35,7 +38,7 @@ describe("allowlist", () => {
   it("resolves the status_probe helper to the repo build dir", () => {
     const resolved = resolveAllowedExecutable("status_probe");
     if (resolved !== null) {
-      expect(resolved).toBe(`${repoRoot}/build/status_probe`);
+      expect(resolved).toBe(join(repoRoot, "build", "status_probe"));
     }
   });
 });
@@ -64,6 +67,23 @@ describe("assertTargetInWorkspace", () => {
       workspace: ws,
     };
     expect(() => assertTargetInWorkspace(config as Parameters<typeof assertTargetInWorkspace>[0], "out.txt")).not.toThrow();
+  });
+});
+
+describe("assertReadableFileInWorkspace", () => {
+  it("allows an existing regular file inside the workspace", () => {
+    const ws = mkdtempSync(join(tmpdir(), "caps-cat-work-"));
+    writeFileSync(join(ws, "read.txt"), "CAPS\n");
+    const config = { capsExecutable: "caps", databasePath: "db", workspace: ws };
+    expect(() => assertReadableFileInWorkspace(config as Parameters<typeof assertReadableFileInWorkspace>[0], "read.txt")).not.toThrow();
+  });
+
+  it("rejects traversal, options, and missing files", () => {
+    const ws = mkdtempSync(join(tmpdir(), "caps-cat-work-"));
+    const config = { capsExecutable: "caps", databasePath: "db", workspace: ws };
+    for (const path of ["../outside.txt", "-n", "missing.txt"]) {
+      expect(() => assertReadableFileInWorkspace(config as Parameters<typeof assertReadableFileInWorkspace>[0], path)).toThrow(RedirectionPolicyError);
+    }
   });
 });
 

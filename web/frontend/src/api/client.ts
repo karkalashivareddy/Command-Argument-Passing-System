@@ -1,11 +1,13 @@
 import type {
   AnalyticsOverview,
   CapabilitiesResponse,
+  CommandProfile,
   CreateSessionRequest,
   CreateSessionResponse,
   HealthResponse,
   ProcessInfo,
   ReplayResponse,
+  SessionComparison,
   SessionRecord,
 } from "../types/observability";
 
@@ -32,6 +34,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(res.status, body?.error?.code ?? "HTTP_ERROR", body?.error?.message ?? `Request failed (${res.status})`);
   }
   return body as T;
+}
+
+async function raw(path: string): Promise<string> {
+  const res = await fetch(`${BASE}${path}`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: { code: string; message: string } } | null;
+    throw new ApiError(res.status, body?.error?.code ?? "HTTP_ERROR", body?.error?.message ?? `Request failed (${res.status})`);
+  }
+  return res.text();
 }
 
 export const api = {
@@ -71,9 +82,16 @@ export const api = {
 
   processes: () => request<{ processes: ProcessInfo[]; capacity: number }>("/api/processes"),
   analytics: () => request<AnalyticsOverview>("/api/analytics/overview"),
+  commandProfiles: () => request<{ commands: CommandProfile[]; totalCommandRuns: number }>("/api/analytics/commands"),
+  compare: (left: string, right: string) =>
+    request<SessionComparison>(`/api/analytics/compare?ids=${encodeURIComponent(left)},${encodeURIComponent(right)}`),
+
+  exportJson: (id: string) => raw(`/api/sessions/${encodeURIComponent(id)}/export?format=json`),
+  exportCsv: (id: string) => raw(`/api/sessions/${encodeURIComponent(id)}/export?format=csv`),
+  report: (id: string) => raw(`/api/sessions/${encodeURIComponent(id)}/report`),
 
   examples: () =>
-    request<Array<{ id: string; title: string; category: string; command: string; args: string[]; redirections?: Record<string, string>; explanation: string }>>(
+    request<{ examples: Array<{ id: string; title: string; category: string; command: string; args: string[]; redirections?: Record<string, string>; explanation: string }> }>(
       "/api/playground/examples",
     ),
 };

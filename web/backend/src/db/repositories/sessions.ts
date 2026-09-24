@@ -206,4 +206,10 @@ export class SessionRepository {
       .prepare("SELECT slot, target FROM redirections ORDER BY session_id, id")
       .all() as unknown as Array<{ slot: string; target: string }>;
   }
+
+  listProcessSnapshots(): Array<{ session_id: string; payload: string }> {
+    return this.db
+      .prepare("SELECT session_id, payload FROM events WHERE type='process.snapshot' ORDER BY session_id, sequence")
+      .all() as unknown as Array<{ session_id: string; payload: string }>;
+  }
 }

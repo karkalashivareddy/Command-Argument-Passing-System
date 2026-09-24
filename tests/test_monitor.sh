@@ -73,6 +73,15 @@ case "$err" in
     *) failmsg "missing not-found diagnostic: '$err'" ;;
 esac
 
+echo "Monitor: an application exit 127 is not an exec failure"
+events=$(json_events "$helper" exit 127)
+assert_sequence "application-127 order" "$events" \
+    "COMMAND_RECEIVED PARSED PROCESS_STARTED PROCESS_EXITED SESSION_SUMMARY"
+printf '%s\n' "$events" | grep -F '"event":"PROCESS_EXITED"' | grep -qF '"exit_code":127' ||
+    failmsg "application exit 127 was not preserved"
+printf '%s\n' "$events" | grep -Fq '"event":"EXEC_ERROR"' &&
+    failmsg "application exit 127 was mislabeled as an exec failure"
+
 echo "Monitor: signal lifecycle (child killed by SIGKILL)"
 events=$(json_events "$helper" signal 9)
 assert_sequence "signal order" "$events" \

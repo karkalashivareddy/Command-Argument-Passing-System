@@ -35,11 +35,12 @@ single source of truth for the argument vector.
 ```json
 {
   "platform": "linux",
-  "allowlist": ["echo","printf","sleep","true","false","pwd","cat","status_probe","sh"],
+  "allowlist": ["echo","printf","sleep","true","false","pwd","cat","status_probe"],
   "limits": { "maxConcurrent": 4, "defaultTimeoutMs": 30000, "maxTimeoutMs": 120000 },
   "workspace": "/path/to/data/work",
   "redirection": { "supported": true, "modes": ["in","out","append"] },
-  "signals": { "supported": true }
+  "signals": { "supported": true },
+  "telemetry": { "enabled": true, "intervalMs": 500, "source": "/proc/<tracked-pid>" }
 }
 ```
 
@@ -57,6 +58,9 @@ Body (Zod-validated):
 ```
 
 - `command` is required and must be on the allowlist.
+- `cat` accepts only existing regular files whose resolved paths remain
+  inside the configured workspace. It does not accept command-line options
+  through the gateway.
 - `redirections` is optional; each slot takes exactly one file name.
   File names must be relative, within the safe workspace, no `..`.
 - Returns `202` immediately; execution proceeds in the background:
@@ -159,6 +163,12 @@ Captured program stdout/stderr as the execution ran:
 
 Stored event timeline for the replay engine:
 
+The timeline includes `process.snapshot` events when the backend collected procfs data. Snapshot event payload metrics carry `value`, `provenance`, `source`, and, when unavailable, a `reason`. Replay returns only persisted event data; it does not inspect procfs or restart the command.
+
+### `GET /api/processes`
+
+Lists only active executions tracked in the gateway registry. Each row contains the CAPS execution ID, the CAPS-reported child PID, and the latest procfs snapshot for that same execution when available. No arbitrary PID can be supplied to this endpoint.
+
 ```json
 {
   "sessionId": "exec_…",
@@ -220,14 +230,69 @@ Computed from stored sessions only:
 }
 ```
 
+### `GET /api/analytics/commands`
+
+Per-command baselines from stored sessions:
+
+```json
+{
+  "totalCommandRuns": 42,
+  "commands": [{
+    "command": "echo", "runs": 20, "successful": 20, "failed": 0,
+    "signalled": 0, "successRate": 100.0,
+    "avgDurationMs": 1.2, "medianDurationMs": 1.0, "p95DurationMs": 3.0,
+    "minDurationMs": 0.4, "maxDurationMs": 6.0,
+    "rssSamples": 10, "medianRssBytes": 1204296, "peakRssBytes": 1409024,
+    "lastRunAt": "…"
+  }]
+}
+```
+
+`null` fields mean insufficient observations, never fabricated zeros. The
+frontend renders `—` for those cells.
+
+### `GET /api/analytics/compare?ids=<left>,<right>`
+
+Side-by-side comparison of two stored sessions (no re-execution):
+
+```json
+{
+  "left":  { "sessionId": "exec_…", "command": "echo", "args": ["Hello"], "status": "COMPLETED", "exitCode": 0, "signal": null, "durationMs": 4, "eventCount": 12, "snapshotCount": 6, "peakRssBytes": 1260000, "medianRssBytes": 1220000, "peakCpuPercent": 8.2, "cpuTimeMs": 2 },
+  "right": { … },
+  "shared": { "sameCommand": true, "command": "echo", "sameExit": true, "sameSignal": true, "sameStatus": true },
+  "deltas": { "durationMs": 2, "eventDelta": 1, "snapshotDelta": 0, "peakRssDeltaBytes": 40000, "cpuTimeDeltaMs": 1 }
+}
+```
+
+Rejects sessions that do not exist, an empty query, or a self-comparison
+(`ids=a,a`) with a `400`.
+
+### `GET /api/sessions/:id/export?format=json|csv`
+
+Downloads the persisted event timeline.
+
+- `json` — the same canonical envelope array returned by replay.
+- `csv` — header `sequence,timestamp,type,payload_json`; string values are
+  RFC 4180 double-quote escaped; content disposition
+  `attachment; filename="<id>.<format>"`.
+
+### `GET /api/sessions/:id/report`
+
+Markdown observation report (`text/markdown; charset=utf-8`) with the
+command, outcome, exit/signal, duration, peaks & moments, snapshot summary,
+and per-event tallies. Generated from the stored event store; it never
+re-runs the command.
+
 ### `GET /api/playground/examples`
 
 Curated educational examples (static, safe list).
 
 ## Security rules
 
-- No `shell:true`, no `system()`, no `popen()`, no string-concatenated
-  command execution, ever.
+- No shell executable (`sh`, `bash`, etc.) is allowed through the gateway:
+  a request for `sh -c` would bypass the executable allowlist. No
+  `shell:true`, `system()`, `popen()`, or string-concatenated command
+  execution is used.
 - Allowlist enforced server-side; path traversal rejected; timeouts and
   output caps enforced server-side; default bind `127.0.0.1`.
 - This gateway executes OS processes — do **not** expose it to untrusted

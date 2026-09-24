@@ -94,8 +94,8 @@ export default function ExecutePage() {
         <div className="flex items-center gap-2 text-[10.5px] font-semibold uppercase tracking-[0.14em] text-[var(--fg-3)]">Execute</div>
         <h1 className="mt-1 text-xl font-semibold tracking-tight text-[var(--fg-0)]">Compose a command</h1>
         <p className="mt-1 max-w-2xl text-[13px] text-[var(--fg-2)]">
-          Type a command and its arguments. CAPS will parse it, build argv, fork a child, execvp the program, and report
-          every step live on the flight recorder.
+          Supply a program name and structured arguments. The browser sends an argv array, so shell-style command-line
+          tokenization is unavailable here. CAPS forks the child, calls execvp, and reports the events its monitor observes.
         </p>
       </div>
 

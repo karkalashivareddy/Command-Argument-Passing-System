@@ -23,10 +23,11 @@ The Observatory captures the complete lifecycle of a command execution:
 
 | Stage | What Happens | Visualized As |
 |-------|--------------|---------------|
-| **INPUT** | CAPS receives `(argc, argv)` directly | Pipeline node |
-| **PARSE** | Command line tokenized into argv | Pipeline node |
+| **INPUT** | Gateway receives the command and its arguments as separate fields | Pipeline node |
+| **ARGV** | The validated vector is passed directly to `execvp()` | Argument-vector inspector |
+| **PARSE** | Interactive CAPS supports whitespace tokenization; web requests arrive as structured argv | Unavailable in the web pipeline |
 | **FORK** | `fork()` clones the monitor as child | Process topology split |
-| **EXEC** | `execvp()` replaces child image (same PID) | Process topology transition |
+| **EXEC** | `execvp()` replaces child image (same PID); successful exec has no independent event | Derived only from an ordinary later process exit |
 | **RUN** | Program runs; parent blocked in `waitpid()` | Live PID + timer |
 | **WAIT** | Parent reaps child termination status | Pipeline node |
 | **RESULT** | Exit code / signal reported | Status banner + event stream |
@@ -65,9 +66,11 @@ The frontend proxies `/api/*` to the backend at `http://127.0.0.1:3000`.
 
 1. Open **Execute** (shortcut: `E`)
 2. Run `echo Hello Shiva` → opens the **Flight Recorder**
-3. Watch the pipeline animate: INPUT → PARSE → ARGV → FORK → EXEC → RUN → WAIT → RESULT
+3. Follow the event-backed pipeline; unavailable and inferred stages are labeled.
 4. Open **History** (`H`) to see all recorded sessions
 5. Open **Signals** → spawn `sleep 30` → deliver SIGINT → watch the signal flow diagram
+6. Open **Compare** → pick two sessions → baseline vs candidate metrics
+7. From an execution page, download **JSON / CSV** or open the **Report**
 
 ## Project Structure
 
@@ -117,16 +120,25 @@ caps-observatory/
 | `POST` | `/api/sessions/:id/terminate` | Send signal (`SIGINT`, `SIGTERM`, `SIGKILL`…) |
 | `GET` | `/api/processes` | Live process table |
 | `GET` | `/api/analytics/overview` | Counts, percentiles, exit/signal distributions |
+| `GET` | `/api/analytics/commands` | Per-command baselines (durations, RSS, rates) |
+| `GET` | `/api/analytics/compare` | Side-by-side comparison of two sessions |
+| `GET` | `/api/sessions/:id/export` | Download the timeline as JSON or CSV |
+| `GET` | `/api/sessions/:id/report` | Markdown observation report |
 
 ## Security
 
 - **No shell ever** — commands are spawned directly via `execvp` with `shell: false`
-- **Allowlist only** — `echo`, `printf`, `sleep`, `true`, `false`, `pwd`, `cat`, `uname`, `sh`, `status_probe`
+- **Allowlist only** — `echo`, `printf`, `sleep`, `true`, `false`, `pwd`, `cat`, `uname`, and the optional fixed `status_probe` test helper. Shells are excluded because `sh -c` would enable arbitrary command execution.
 - **Workspace confinement** — all paths resolved against a configured workspace root; `..`, `~`, absolute paths rejected
 - **Loopback-only** — gateway binds `127.0.0.1`; defense-in-depth hook rejects non-loopback peers
 - **Resource limits** — 4 concurrent, 30s default timeout (max 120s), 64KB output cap
 
 ## Development
+
+Observability facts, event timing, and current unavailable fields are described in
+[the observability model](docs/observability-model.md), [the real-time visualization contract](docs/realtime-visualization.md),
+[the visualization architecture](docs/visualization-architecture.md),
+[the process microscope](docs/process-microscope.md), and the [faculty demo guide](docs/faculty-demo.md).
 
 ```bash
 # Run C tests

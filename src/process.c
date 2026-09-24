@@ -73,6 +73,66 @@ static int monotonic_ms(long long *out)
 }
 
 /*
+ * Create a close-on-exec pipe whose descriptors cannot collide with stdin,
+ * stdout, or stderr. A failed execvp() reports its saved errno to the parent.
+ * EOF without an error is not emitted as a success event: a signal could
+ * also end the child before execvp().
+ */
+static int make_exec_status_pipe(int pipefd[2])
+{
+    int raw[2];
+
+    if (pipe(raw) != 0)
+        return -1;
+    for (int i = 0; i < 2; i++) {
+        int fd = raw[i];
+        if (fd <= STDERR_FILENO) {
+            fd = fcntl(fd, F_DUPFD, STDERR_FILENO + 1);
+            if (fd < 0) {
+                int saved = errno;
+                close(raw[0]);
+                close(raw[1]);
+                errno = saved;
+                return -1;
+            }
+            close(raw[i]);
+        }
+        if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
+            int saved = errno;
+            close(fd);
+            if (i == 0)
+                close(raw[1]);
+            else
+                close(pipefd[0]);
+            errno = saved;
+            return -1;
+        }
+        pipefd[i] = fd;
+    }
+    return 0;
+}
+
+static int read_exec_error(int fd, int *exec_errno)
+{
+    unsigned char *p = (unsigned char *)exec_errno;
+    size_t received = 0;
+
+    while (received < sizeof *exec_errno) {
+        ssize_t n = read(fd, p + received, sizeof *exec_errno - received);
+        if (n > 0) {
+            received += (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n == 0)
+            return received == 0 ? 0 : -1;
+        return -1;
+    }
+    return 1;
+}
+
+/*
  * Elapsed milliseconds between a start sample and now.
  *
  * Duration policy: when either the start sample (start_ok == 0) or the
@@ -224,6 +284,9 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
 {
     pid_t pid;
     int status;
+    int exec_pipe[2] = { -1, -1 };
+    int exec_errno = 0;
+    int exec_failed = 0;
     long long start_ms = 0;
     int start_ok = 0;
 
@@ -242,29 +305,45 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
     if (nredirs > 0)
         emit_event(mon, CAPS_EVENT_REDIRECTION_OPENED, 0, 0, 0, argv);
 
+    if (make_exec_status_pipe(exec_pipe) != 0) {
+        caps_error("exec status pipe: %s", strerror(errno));
+        close_redirections(redirs, nredirs);
+        return EXIT_FAILURE;
+    }
+
     start_ok = (monotonic_ms(&start_ms) == 0);
     pid = fork();
     if (pid < 0) {
         caps_error("fork: %s", strerror(errno));
+        close(exec_pipe[0]);
+        close(exec_pipe[1]);
         close_redirections(redirs, nredirs);
         return EXIT_FAILURE;
     }
 
     if (pid == 0) {
+        close(exec_pipe[0]);
         if (signals_child_reset() != 0)
             child_fatal_printf("caps: warning: failed to reset SIGINT in "
                                "child; the executed program may ignore "
                                "Ctrl+C\n");
         apply_redirections(redirs, nredirs);
         execvp(argv[0], argv);
+        exec_errno = errno;
+        (void)write(exec_pipe[1], &exec_errno, sizeof exec_errno);
+        errno = exec_errno;
         child_exec_failure(argv[0]);
-        if (errno == EACCES)
+        if (exec_errno == EACCES)
             _exit(126);
         _exit(127);
     }
 
+    close(exec_pipe[1]);
     emit_event(mon, CAPS_EVENT_PROCESS_STARTED, pid, 0, 0, argv);
     close_redirections(redirs, nredirs);
+
+    exec_failed = read_exec_error(exec_pipe[0], &exec_errno) == 1;
+    close(exec_pipe[0]);
 
     if (process_wait_child(pid, &status) != 0)
         return EXIT_FAILURE;
@@ -273,8 +352,9 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
         int code = WEXITSTATUS(status);
         int st = status;
 
-        if (code == 127 || code == 126)
-            emit_event(mon, CAPS_EVENT_EXEC_ERROR, pid, code,
+        if (exec_failed)
+            emit_event(mon, CAPS_EVENT_EXEC_ERROR, pid,
+                       exec_errno == EACCES ? 126 : 127,
                        elapsed_ms(start_ms, start_ok), argv);
         else
             emit_event(mon, CAPS_EVENT_PROCESS_EXITED, pid, code,
@@ -287,6 +367,10 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
     if (WIFSIGNALED(status)) {
         int sig = WTERMSIG(status);
 
+        if (exec_failed)
+            emit_event(mon, CAPS_EVENT_EXEC_ERROR, pid,
+                       exec_errno == EACCES ? 126 : 127,
+                       elapsed_ms(start_ms, start_ok), argv);
         emit_event(mon, CAPS_EVENT_SIGNAL_RECEIVED, pid, sig, 0, argv);
         emit_event(mon, CAPS_EVENT_PROCESS_EXITED, pid, 128 + sig,
                    elapsed_ms(start_ms, start_ok), argv);

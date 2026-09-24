@@ -35,9 +35,8 @@ engine remains the authoritative execution engine. No `shell: true`, no
   (whitespace tokenization, no quoting/pipelines/job control) and exists
   to make the POSIX process lifecycle legible.
 - CAPS Observatory is an **interactive operating-system laboratory**:
-  every animation corresponds to a real event, every metric comes from
-  real executions, every PID/exit/signal value comes from the operating
-  system.
+  event-backed state comes from real executions, and inferred or unavailable
+  values are identified rather than presented as direct kernel telemetry.
 - No fake telemetry, no fake PIDs, no fake CPU/memory, no fake AI.
 
 ## 4. Core differentiators
@@ -63,8 +62,9 @@ engine remains the authoritative execution engine. No `shell: true`, no
 1. Land on `/` (Overview), engine shows `ENGINE ONLINE`, stream
    `LIVE STREAM CONNECTED`.
 2. Type `echo Hello Shiva`, press `[ EXECUTE ]`.
-3. The Execution Pipeline animates: INPUT → PARSE → ARGV → FORK → EXEC →
-   WAIT → RESULT as real events arrive.
+3. The Execution Pipeline updates from events. Web argv is already
+   structured, tokenization is marked unavailable, and successful exec is
+   inferred only when the recorded outcome supports it.
 4. Open the argv inspector, see `argc = 3`, `argv[0]=echo`,
    `argv[1]=Hello`, `argv[2]=Shiva`, `argv[3]=NULL`.
 5. Open the execution detail, replay it, see it in history and analytics.

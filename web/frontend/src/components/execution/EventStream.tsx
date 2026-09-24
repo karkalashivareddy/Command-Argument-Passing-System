@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { ChevronDown, RadioTower } from "lucide-react";
+import { Check, ChevronDown, Copy, RadioTower } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { EVENT_LABELS } from "../../lib/stages";
@@ -21,6 +21,7 @@ interface EventRowProps {
 
 function EventRow({ ev, index }: EventRowProps) {
   const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
   const ll = open;
   const payload = ev.payload && Object.keys(ev.payload).length > 0 ? ev.payload : null;
 
@@ -45,18 +46,38 @@ function EventRow({ ev, index }: EventRowProps) {
         ) : (
           <span className="flex-1 text-[var(--fg-4)]">—</span>
         )}
-        {payload ? <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-[var(--fg-3)] transition-transform ${ll ? "rotate-180" : ""}`} /> : null}
+        <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-[var(--fg-3)] transition-transform ${ll ? "rotate-180" : ""}`} />
       </div>
       <AnimatePresence>
-        {ll && payload ? (
-          <motion.pre
+        {ll ? (
+          <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
-            className="mt-1.5 overflow-x-auto rounded-[var(--r-sm)] bg-[var(--bg-3)] p-2 font-mono text-[11px] leading-relaxed text-[var(--fg-1)]"
+            className="mt-2 overflow-hidden rounded-[var(--r-sm)] border border-[var(--line-1)] bg-[var(--bg-1)]"
           >
-            {JSON.stringify(payload, null, 2)}
-          </motion.pre>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 border-b border-[var(--line-0)] px-2.5 py-2 font-mono text-[10.5px] sm:grid-cols-4">
+              <span><b className="font-medium text-[var(--fg-3)]">source</b><br />{ev.source}</span>
+              <span><b className="font-medium text-[var(--fg-3)]">timestamp</b><br />{ev.timestamp}</span>
+              <span><b className="font-medium text-[var(--fg-3)]">session</b><br />{ev.sessionId}</span>
+              <span><b className="font-medium text-[var(--fg-3)]">PID</b><br />{ev.pid ?? "UNAVAILABLE"}</span>
+            </div>
+            <div className="flex items-center justify-between px-2.5 pt-2 text-[10px] uppercase tracking-wide text-[var(--fg-3)]">
+              <span>Normalized event envelope</span>
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[var(--fg-2)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]"
+                aria-label="Copy event JSON"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void navigator.clipboard.writeText(JSON.stringify(ev, null, 2)).then(() => setCopied(true));
+                }}
+              >
+                {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}{copied ? "Copied" : "Copy JSON"}
+              </button>
+            </div>
+            <pre className="max-h-64 overflow-auto px-2.5 pb-2.5 font-mono text-[10.5px] leading-relaxed text-[var(--fg-1)]">{JSON.stringify(ev, null, 2)}</pre>
+          </motion.div>
         ) : null}
       </AnimatePresence>
     </motion.li>
@@ -81,6 +102,13 @@ export function EventStream({
   const stickEl = useRef<HTMLDivElement>(null);
   const [stick, setStick] = useState(true);
   const [tick, setTick] = useState(Date.now());
+  const [filter, setFilter] = useState<CanonicalEvent["type"] | "ALL">("ALL");
+
+  const filteredEvents = useMemo(() => (filter === "ALL" ? events : events.filter((e) => e.type === filter)), [events, filter]);
+
+  useEffect(() => {
+    if (filter !== "ALL" && !events.some((e) => e.type === filter)) setFilter("ALL");
+  }, [events, filter]);
 
   useEffect(() => {
     const t = window.setInterval(() => setTick(Date.now()), 1000);
@@ -102,7 +130,7 @@ export function EventStream({
     <div className="flex flex-col">
       <div className="flex items-center justify-between border-b border-[var(--line-0)] px-2 py-1">
         <span className="text-[10.5px] uppercase tracking-[0.12em] text-[var(--fg-3)]">
-          {live ? "live sequence" : "sequence"} · {events.length} events
+          {live ? "live sequence" : "sequence"} · {filteredEvents.length}{filter !== "ALL" ? ` / ${events.length} of ` : " "}{events.length} event{events.length === 1 ? "" : "s"}{filter !== "ALL" ? ` · filtered to ${filter}` : ""}
         </span>
         <button
           onClick={() => setStick(!stick)}
@@ -113,10 +141,22 @@ export function EventStream({
       </div>
       {Object.keys(counts).length > 0 ? (
         <div className="flex flex-wrap gap-1 border-b border-[var(--line-0)] px-2 py-1.5">
+          <button
+            onClick={() => setFilter("ALL")}
+            className={`rounded-[var(--r-xs)] px-1.5 py-0.5 font-mono text-[10.5px] transition-colors ${filter === "ALL" ? "bg-[var(--accent-soft)] text-[var(--accent)]" : "bg-[var(--bg-2)] text-[var(--fg-3)] hover:text-[var(--fg-1)]"}`}
+            aria-pressed={filter === "ALL"}
+          >
+            ALL ×{events.length}
+          </button>
           {[...counts.entries()].map(([type, n]) => (
-            <span key={type} className={`rounded-[var(--r-xs)] bg-[var(--bg-2)] px-1.5 py-0.5 font-mono text-[10.5px] ${eventTone(type as CanonicalEvent["type"])}`}>
+            <button
+              key={type}
+              onClick={() => setFilter(filter === type ? "ALL" : (type as CanonicalEvent["type"]))}
+              aria-pressed={filter === type}
+              className={`rounded-[var(--r-xs)] px-1.5 py-0.5 font-mono text-[10.5px] transition-colors ${filter === type ? "bg-[var(--accent-soft)] text-[var(--accent)]" : "bg-[var(--bg-2)] text-[var(--fg-3)] hover:text-[var(--fg-1)]"} ${eventTone(type as CanonicalEvent["type"])}`}
+            >
               {(EVENT_LABELS as Record<string, string>)[type] ?? type} ×{n}
-            </span>
+            </button>
           ))}
         </div>
       ) : null}
@@ -128,7 +168,7 @@ export function EventStream({
         </div>
       ) : (
         <ul className="max-h-[420px] overflow-y-auto" onScroll={() => setStick(true)}>
-          {events.map((ev, i) => (
+          {filteredEvents.map((ev, i) => (
             <EventRow key={`${ev.sequence}-${ev.type}`} ev={ev} index={i} />
           ))}
           <div ref={stickEl} />

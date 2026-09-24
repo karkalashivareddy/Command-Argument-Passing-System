@@ -11,9 +11,10 @@ import { EventBus } from "../events/bus.js";
 import type { ExecutionRunner } from "../execution/runner.js";
 import type { ExecutionRegistry } from "../execution/registry.js";
 import { signalChild } from "../execution/terminator.js";
-import { computeAnalytics } from "../analytics/service.js";
+import { computeAnalytics, compareSessions, computeCommandProfiles, computeRuntimePeaks } from "../analytics/service.js";
 import {
   allowedCommands,
+  assertReadableFileInWorkspace,
   assertTargetInWorkspace,
   isCommandAllowed,
   RedirectionPolicyError,
@@ -38,6 +39,10 @@ export interface ApiDeps {
 
 const TERMINAL_EVENT_TYPES = new Set(["execution.completed", "execution.failed", "execution.timeout"]);
 
+function csvField(value: string): string {
+  return `"${value.replace(/"/g, "\"\"")}"`;
+}
+
 function sendError(reply: FastifyReply, status: number, code: string, message: string, requestId?: string): void {
   reply.code(status).send({ error: { code, message, requestId } });
 }
@@ -58,11 +63,12 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
     command: z.string().min(1).max(256),
     args: z.array(z.string().max(4096)).max(512).default([]),
     redirections: z
-      .object({
-        in: z.string().optional(),
-        out: z.string().optional(),
-        append: z.string().optional(),
-      })
+        .object({
+          in: z.string().optional(),
+          out: z.string().optional(),
+          append: z.string().optional(),
+        })
+        .strict()
       .optional(),
     timeoutMs: z.number().int().min(1000).optional(),
   });
@@ -114,6 +120,23 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
       workspace: config.workspace,
       redirection: { supported: true, modes: ["in", "out", "append"] },
       signals: { supported: true },
+      telemetry: {
+        enabled: platform() === "linux",
+        intervalMs: 500,
+        source: platform() === "linux" ? "/proc/<tracked-pid>" : "UNAVAILABLE",
+        metrics: ["pid", "ppid", "state", "startTime", "elapsedMs", "cpuUserMs", "cpuSystemMs", "cpuPercent", "rssBytes", "virtualMemoryBytes", "threadCount", "voluntaryContextSwitches", "nonVoluntaryContextSwitches", "processGroupId", "sessionId"],
+      },
+      observability: {
+        timeline: { enabled: true, axis: "seconds-relative-to-first-event" },
+        annotations: true,
+        peaks: true,
+        replaySync: true,
+        sequenceIntegrity: true,
+        export: { formats: ["json", "csv"] },
+        report: true,
+        comparison: true,
+        commandProfiles: true,
+      },
       bind: `${config.host}:${config.port}`,
     });
   });
@@ -140,6 +163,9 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
     }
 
     try {
+      if (body.command === "cat") {
+        for (const path of body.args) assertReadableFileInWorkspace(config, path);
+      }
       for (const slot of ["in", "out", "append"] as const) {
         const target = body.redirections?.[slot];
         if (target) {
@@ -148,13 +174,14 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
       }
     } catch (err) {
       if (err instanceof RedirectionPolicyError) {
-        return sendError(reply, 422, "REDIRECTION_REJECTED", err.message, rid);
+        return sendError(reply, 422, body.command === "cat" ? "FILE_ARGUMENT_REJECTED" : "REDIRECTION_REJECTED", err.message, rid);
       }
       return sendError(reply, 422, "REDIRECTION_REJECTED", "Redirection target rejected.", rid);
     }
 
     const result = runner.start({
       command: body.command,
+      executable: resolved,
       args: body.args,
       redirections: body.redirections ?? {},
       timeoutMs,
@@ -358,12 +385,161 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
 
   // ------------------------------------------------------------ processes
   app.get("/api/processes", async (_req, reply) => {
-    return reply.send({ processes: registry.listProcesses(), capacity: config.maxConcurrent });
+    const processes = registry.listProcesses().map((process) => ({
+      ...process,
+      telemetry: events.latestForSessionByType(process.sessionId, "process.snapshot")?.payload ?? null,
+    }));
+    return reply.send({ processes, capacity: config.maxConcurrent });
   });
 
   // ------------------------------------------------------------- analytics
   app.get("/api/analytics/overview", async (_req, reply) => {
     return reply.send(computeAnalytics(sessions));
+  });
+
+  app.get("/api/analytics/commands", async (_req, reply) => {
+    const commands = computeCommandProfiles(sessions);
+    return reply.send({ commands, totalCommandRuns: commands.reduce((sum, c) => sum + c.runs, 0) });
+  });
+
+  app.get("/api/analytics/compare", async (req, reply) => {
+    const idsRaw = (req.query as { ids?: string }).ids;
+    const idList = (idsRaw ?? "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 2);
+    if (idList.length !== 2) {
+      return sendError(reply, 400, "INVALID_ARGUMENT", "Provide exactly two session ids (?ids=a,b).", requestId(req));
+    }
+    const a = sessions.findById(idList[0]!);
+    const b = sessions.findById(idList[1]!);
+    if (!a || !b) {
+      const missing = [a ? null : idList[0], b ? null : idList[1]].filter(Boolean).join(", ");
+      return sendError(reply, 404, "NOT_FOUND", `No execution found for: ${missing}.`);
+    }
+    if (a.id === b.id) {
+      return sendError(reply, 400, "INVALID_ARGUMENT", "A session cannot be compared with itself.", requestId(req));
+    }
+    return reply.send(compareSessions(a, b, events.listAllForSession(a.id), events.listAllForSession(b.id)));
+  });
+
+  // ------------------------------------------------------------- export
+  app.get("/api/sessions/:id/export", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const format = (req.query as { format?: string }).format === "csv" ? "csv" : "json";
+    const session = sessions.findById(id);
+    if (!session) return sendError(reply, 404, "NOT_FOUND", `No execution with id "${id}".`);
+    const evs = events.listAllForSession(id);
+    const peaks = computeRuntimePeaks(evs);
+
+    if (format === "csv") {
+      const lines = ["sequence,type,source,timestamp,monotonic_ms,pid,payload_json"];
+      for (const ev of evs) {
+        lines.push(
+          [
+            String(ev.sequence),
+            ev.type,
+            ev.source,
+            ev.timestamp,
+            ev.monotonicMs === null ? "" : String(ev.monotonicMs),
+            ev.pid === null ? "" : String(ev.pid),
+            csvField(JSON.stringify(ev.payload)),
+          ].join(","),
+        );
+      }
+      reply.header("content-type", "text/csv; charset=utf-8");
+      reply.header("content-disposition", `attachment; filename="${id}.csv"`);
+      return reply.send(lines.join("\n"));
+    }
+
+    reply.header("content-type", "application/json; charset=utf-8");
+    reply.header("content-disposition", `attachment; filename="${id}.json"`);
+    return reply.send({
+      exportedAt: new Date().toISOString(),
+      generator: "caps-observatory",
+      session: {
+        id: session.id,
+        command: session.command,
+        args: session.args,
+        argv: session.argv,
+        status: session.status,
+        startedAt: session.startedAt,
+        endedAt: session.endedAt,
+        durationMs: session.durationMs,
+        exitCode: session.exitCode,
+        signal: session.signal,
+        isSuccess: session.isSuccess,
+        pid: session.pid,
+        timeoutMs: session.timeoutMs,
+        eventCount: evs.length,
+      },
+      telemetry: peaks,
+      events: evs,
+    });
+  });
+
+  // ------------------------------------------------------------- report
+  app.get("/api/sessions/:id/report", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = sessions.findById(id);
+    if (!session) return sendError(reply, 404, "NOT_FOUND", `No execution with id "${id}".`);
+    const evs = events.listAllForSession(id);
+    const peaks = computeRuntimePeaks(evs);
+
+    const counts = new Map<string, number>();
+    for (const ev of evs) counts.set(ev.type, (counts.get(ev.type) ?? 0) + 1);
+    const timeline = [...counts.entries()].map(([type, n]) => `- \`${type}\` × ${n}`).join("\n");
+    const started = evs.find((e) => e.type === "process.started");
+    const exited = evs.find((e) => e.type === "process.exited");
+    const execError = evs.find((e) => e.type === "process.exec_error");
+    const signalEv = evs.find((e) => e.type === "signal.received");
+    const snapshotCount = peaks.sampleCount;
+
+    const span = peaks.firstSampleAt && peaks.lastSampleAt
+      ? `${Math.max(0, Math.round((new Date(peaks.lastSampleAt).getTime() - new Date(peaks.firstSampleAt).getTime()) / 100) / 10)}s (first sample ${peaks.firstSampleAt}, last ${peaks.lastSampleAt})`
+      : "no persistable samples";
+
+    const body = [
+      "# CAPS Observation Report",
+      "",
+      `- Execution: \`${session.id}\``,
+      `- Command: \`${session.command} ${session.args.join(" ")}\``,
+      `- Status: \`${session.status}\``,
+      `- Exit: ${session.exitCode === null ? "UNAVAILABLE" : `\`${session.exitCode}\``} · Signal: ${session.signal === null ? "none" : `\`${session.signal}\``}`,
+      `- Duration: ${session.durationMs === null ? "UNAVAILABLE (gateway did not finalize)" : `${(session.durationMs / 1000).toFixed(2)}s (gateway clock)`}`,
+      `- Started: ${session.startedAt} · Ended: ${session.endedAt ?? "still running"}`,
+      `- Events: ${evs.length} (sequences ${evs.length > 0 ? `0–${evs.at(-1)?.sequence ?? 0}` : "none"})`,
+      "",
+      "## Event timeline",
+      timeline === "" ? "No events recorded." : timeline,
+      "",
+      "## Process resources (observed)",
+      ...(snapshotCount === 0
+        ? ["No procfs snapshots were collected for this execution."]
+        : [
+            `- Samples: \`${snapshotCount}\` · span ${span}`,
+            `- Peak RSS: ${peaks.peakRssBytes === null ? "UNAVAILABLE" : `${(peaks.peakRssBytes.value / (1024 * 1024)).toFixed(2)} MiB at ${peaks.peakRssBytes.atTimeMs}ms after first event`} (OBSERVED /proc/${session.pid ?? "?"}/status)`,
+            `- Median RSS: ${peaks.medianRssBytes === null ? "UNAVAILABLE (needs ≥2 valid samples)" : `${(peaks.medianRssBytes / (1024 * 1024)).toFixed(2)} MiB`}`,
+            `- Peak CPU utilization: ${peaks.peakCpuPercent === null ? "UNAVAILABLE (needs ≥2 valid samples)" : `${peaks.peakCpuPercent.value.toFixed(1)}% at ${peaks.peakCpuPercent.atTimeMs}ms`} (DERIVED from tick deltas)`,
+            `- Total CPU time (user+system, final sample): ${peaks.cpuTimeMs === null ? "UNAVAILABLE" : `${(peaks.cpuTimeMs / 1000).toFixed(2)}s`}`,
+          ]),
+      "",
+      "## Lifecycle observations",
+      `- Process started: ${started ? `PID ${started.pid ?? "UNAVAILABLE"} at ${started.timestamp}` : "UNAVAILABLE"}`,
+      `- Exec outcome: ${execError ? "EXEC_ERROR observed" : exited ? "ordinary process exit (exec success inferred)" : "UNAVAILABLE"}`,
+      exited ? `- Process exited: exit \`${exited.payload.exitCode ?? "UNAVAILABLE"}\` at ${exited.timestamp}` : signalEv ? `- Signal received: \`${signalEv.payload.signal ?? "UNAVAILABLE"}\` at ${signalEv.timestamp}` : "UNAVAILABLE",
+      "",
+      "## Provenance",
+      "- Process snapshots come from `/proc/<tracked-pid>/stat` and `status`; CPU utilization and CPU time are derived from kernel tick counters and the system clock-tick rate.",
+      "- Event timestamps are gateway receive times, not kernel timestamps. Session duration uses the gateway clock; an engine monotonic duration may differ.",
+      "- Missing values are UNAVAILABLE rather than filled with zero.",
+      "",
+      "## Limits of this report",
+      "- stderr redirection and low-level `open()`/`dup2()`/`close()` events are unsupported.",
+      "- Only the CAPS-owned child PID is sampled; arbitrary descendants are not discovered.",
+      "- This is a summary of the persisted event store; it does not re-execute the command.",
+    ].join("\n");
+
+    reply.header("content-type", "text/markdown; charset=utf-8");
+    reply.header("content-disposition", `attachment; filename="${id}-report.md"`);
+    return reply.send(body);
   });
 
   // ------------------------------------------------------------ playground

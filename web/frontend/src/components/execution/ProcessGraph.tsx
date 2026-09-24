@@ -1,123 +1,63 @@
-import { AnimatePresence, motion } from "motion/react";
-import { ArrowDown, Check, LoaderCircle, TerminalSquare, X } from "lucide-react";
-import { clsx } from "clsx";
+import { GitFork, Radio, Timer } from "lucide-react";
 
-import { fmtDuration } from "../../lib/format";
-import type { CanonicalEvent } from "../../types/observability";
-import { Tooltip } from "../misc/Tooltip";
+import type { CanonicalEvent, ProcessSnapshot } from "../../types/observability";
 
-interface ProcessNodeProps {
-  label: string;
-  pid?: number;
-  tone: "violet" | "cyan" | "accent" | "muted";
-  icon: React.ReactNode;
-  active: boolean;
-  exited: boolean;
-  durationMs?: number;
-  caption?: string;
-}
-
-const TONES = {
-  violet: { ring: "border-[var(--violet-soft)] text-[var(--violet)]", label: "text-[var(--violet)]" },
-  cyan: { ring: "border-[var(--cyan-soft)] text-[var(--cyan)]", label: "text-[var(--cyan)]" },
-  accent: { ring: "border-[var(--accent-soft)] text-[var(--accent)]", label: "text-[var(--accent)]" },
-  muted: { ring: "border-[var(--line-1)] text-[var(--fg-3)]", label: "text-[var(--fg-3)]" },
-} as const;
-
-function ProcessNode({ label, pid, tone, icon, active, exited, durationMs, caption }: ProcessNodeProps) {
-  const t = TONES[tone];
-  return (
-    <Tooltip
-      title={
-        pid !== undefined
-          ? `${label} — PID ${pid}${exited ? " (reaped)" : ""}${durationMs !== undefined && durationMs !== null ? ` · ran ${fmtDuration(durationMs)}` : ""}`
-          : caption ?? label
-      }
-    >
-      <div className="flex flex-col items-center gap-1">
-        <motion.div
-          animate={active ? { scale: [1, 1.07, 1] } : { scale: 1 }}
-          transition={active ? { duration: 1.2, repeat: Infinity, ease: "easeInOut" } : { duration: 0.2 }}
-          className={clsx(
-            "flex h-12 w-12 items-center justify-center rounded-[var(--r-md)] border",
-            t.ring,
-            exited ? "opacity-60 grayscale" : active ? "bg-[var(--bg-3)]" : "bg-[var(--bg-2)]",
-          )}
-        >
-          {active ? <LoaderCircle className="h-[1.15rem] w-[1.15rem] animate-spin" /> : exited ? <Check className="h-[1.15rem] w-[1.15rem]" /> : icon}
-        </motion.div>
-        <span className={clsx("font-mono text-[10.5px] font-semibold", t.label)}>
-          {label}
-          {pid !== undefined ? <span className="text-[var(--fg-3)]"> · {pid}</span> : null}
-        </span>
-        {caption ? <span className="mt-[-0.4rem] text-[9.5px] text-[var(--fg-3)]">{caption}</span> : null}
-      </div>
-    </Tooltip>
-  );
-}
-
-function Edge({ lit, exited, label }: { lit: boolean; exited: boolean; label: string }) {
-  return (
-    <div className="flex min-w-[4.5rem] flex-1 flex-col items-center gap-1 px-1">
-      <div className="relative flex w-full items-center">
-        <div className={clsx("h-px w-full", exited ? "bg-[var(--line-1)]" : lit ? "bg-[var(--accent)]" : "bg-[var(--line-0)]")} />
-        <AnimatePresence>
-          {lit && !exited ? (
-            <motion.div
-              className="absolute h-1.5 w-1.5 rounded-full bg-[var(--accent)]"
-              initial={{ left: "0%", opacity: 0 }}
-              animate={{ left: "100%", opacity: [0, 1, 1, 0] }}
-              transition={{ duration: 0.9, repeat: Infinity, ease: "linear" }}
-            />
-          ) : null}
-        </AnimatePresence>
-      </div>
-      <span className="whitespace-nowrap text-[10px] text-[var(--fg-3)]">{label}</span>
-    </div>
-  );
-}
-
-/**
- * Fork → exec → run → reap. Facts come from real events: pid + label from
- * process.started, exit status from process.exited, exec error from
- * process.exec_error. execvp semantics (same PID, image replaced) are drawn
- * as nomenclature, never fabricated telemetry.
- */
 export function ProcessGraph({ events }: { events: CanonicalEvent[] }) {
-  const started = events.find((e) => e.type === "process.started");
-  const exited = events.find((e) => e.type === "process.exited");
-  const execError = events.find((e) => e.type === "process.exec_error");
-
-  const pid = typeof started?.payload?.pid === "number" ? started.payload.pid : undefined;
-  const label = typeof started?.payload?.label === "string" ? (started.payload.label as string) : "program";
-  const exitCode = typeof exited?.payload?.exitCode === "number" ? exited.payload.exitCode : undefined;
-  const durationMs = typeof exited?.payload?.durationMs === "number" ? exited.payload.durationMs : undefined;
-
-  const reaped = Boolean(exited) || Boolean(execError);
-  const isRunning = Boolean(started) && !reaped;
-  const success = reaped && !execError;
+  const started = events.find((event) => event.type === "process.started");
+  const exited = events.find((event) => event.type === "process.exited");
+  const execError = events.find((event) => event.type === "process.exec_error");
+  const signal = events.find((event) => event.type === "signal.received");
+  const latestSnapshotEvent = [...events].reverse().find((event) => event.type === "process.snapshot");
+  const snapshot = latestSnapshotEvent?.payload as unknown as ProcessSnapshot | undefined;
+  const pid = typeof started?.pid === "number" ? started.pid : null;
+  const capsPid = snapshot?.capsEnginePid?.value ?? null;
+  const ppid = snapshot?.ppid?.value ?? null;
+  const verifiedParent = capsPid !== null && ppid === capsPid;
+  const label = typeof started?.payload.label === "string" ? started.payload.label : "UNAVAILABLE";
+  const snapshotEvents = events.filter((event) => event.type === "process.snapshot");
 
   return (
-    <div className="flex flex-col gap-1.5 py-1">
-      <div className="overflow-x-auto">
-        <div className="flex min-w-[600px] items-center">
-          <ProcessNode label="CAPS" tone="violet" icon={<TerminalSquare className="h-[1.15rem] w-[1.15rem]" />} active={false} exited={false} caption="monitor parent" />
-          <Edge lit={Boolean(started)} exited={reaped} label="fork()" />
-          <ProcessNode
-            label="child"
-            pid={pid}
-            tone="cyan"
-            icon={<ArrowDown className="h-[1.15rem] w-[1.15rem]" />}
-            active={false}
-            exited={reaped}
-            caption={started ? "duplicated image" : undefined}
-          />
-          <Edge lit={Boolean(started)} exited={reaped} label="execvp" />
-          <ProcessNode label={label.length > 10 ? `${label.slice(0, 10)}…` : label} pid={pid} tone="accent" icon={<TerminalSquare className="h-[1.15rem] w-[1.15rem]" />} active={isRunning} exited={reaped} durationMs={durationMs} caption={reaped ? (execError ? "exec failed" : `exit ${exitCode ?? 0}`) : "running"} />
-          <Edge lit={reaped} exited={reaped} label="reap" />
-          <ProcessNode label="wait" tone="muted" icon={success ? <Check className="h-[1.15rem] w-[1.15rem]" /> : <X className="h-[1.15rem] w-[1.15rem]" />} active={false} exited={reaped} caption="waitpid()" />
-        </div>
+    <div className="space-y-3 py-2">
+      <div className="flex flex-col items-stretch gap-2 md:flex-row md:items-center">
+        {verifiedParent ? <>
+          <IdentityNode title="CAPS ENGINE" value={String(capsPid)} tag="LINUX PID" detail="Gateway-spawned CAPS process · OBSERVED" />
+          <Connector label="fork() · PPID matches" />
+        </> : null}
+        <IdentityNode title={label} value={pid === null ? "UNAVAILABLE" : String(pid)} tag="LINUX PID" detail={pid === null ? "Awaiting CAPS PROCESS_STARTED" : "Child PID from CAPS PROCESS_STARTED · OBSERVED"} active={Boolean(started && !exited && !execError)} />
       </div>
+
+      <div className="grid gap-2 border-t border-[var(--line-0)] pt-3 text-[10.5px] sm:grid-cols-2 lg:grid-cols-4">
+        <Fact label="PPID" value={ppid === null ? "UNAVAILABLE" : String(ppid)} provenance={snapshot?.ppid?.provenance ?? "UNAVAILABLE"} />
+        <Fact label="Parent relationship" value={verifiedParent ? "CAPS PID confirmed by procfs PPID" : capsPid !== null && ppid !== null ? "Mismatch · link withheld" : "UNAVAILABLE"} provenance={verifiedParent ? "DERIVED FROM TWO OBSERVATIONS" : "UNAVAILABLE"} />
+        <Fact label="execvp()" value={execError ? "EXEC_ERROR observed" : exited && !signal ? "success inferred from normal exit" : "UNAVAILABLE"} provenance={execError ? "OBSERVED" : exited && !signal ? "DERIVED" : "UNAVAILABLE"} />
+        <Fact label="waitpid result" value={exited ? `PROCESS_EXITED · ${String(exited.payload.exitCode ?? "signal")}` : "WAITING / UNAVAILABLE"} provenance={exited ? "OBSERVED FROM CAPS" : "NOT REACHED"} />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--line-0)] pt-2 font-mono text-[9.5px] text-[var(--fg-3)]">
+        <span className="inline-flex items-center gap-1"><GitFork className="h-3 w-3" /> PROCESS LINEAGE</span>
+        {started ? <span>START seq {started.sequence}</span> : null}
+        <span>{snapshotEvents.length} procfs samples</span>
+        {signal ? <span className="inline-flex items-center gap-1 text-[var(--red)]"><Radio className="h-3 w-3" /> SIGNAL seq {signal.sequence} · {String(signal.payload.signal)}</span> : null}
+        {exited ? <span className="inline-flex items-center gap-1 text-[var(--green)]"><Timer className="h-3 w-3" /> EXIT seq {exited.sequence}</span> : null}
+        {!exited && started ? <span className="text-[var(--accent)]">RUNNING · updates from real events</span> : null}
+      </div>
+      <p className="text-[9.5px] leading-relaxed text-[var(--fg-3)]">CAPS engine and target are separate Linux processes only when their PIDs are observed. execvp() replaces the child image without changing its PID; that mechanism is educational, not an additional process node.</p>
     </div>
   );
+}
+
+function IdentityNode({ title, value, tag, detail, active = false }: { title: string; value: string; tag: string; detail: string; active?: boolean }) {
+  return <div className={`min-w-0 flex-1 rounded border px-3 py-2 ${active ? "border-[var(--accent-soft)] bg-[var(--bg-2)]" : "border-[var(--line-0)] bg-[var(--bg-2)]"}`}>
+    <div className="flex items-center justify-between gap-2"><span className="truncate font-mono text-[11px] font-semibold text-[var(--fg-1)]">{title}</span><span className="font-mono text-[8px] text-[var(--fg-3)]">{tag}</span></div>
+    <div className={`mt-1 font-mono text-lg ${active ? "text-[var(--accent)]" : "text-[var(--fg-0)]"}`}>{value}</div>
+    <div className="mt-1 text-[9px] text-[var(--fg-3)]">{detail}</div>
+  </div>;
+}
+
+function Connector({ label }: { label: string }) {
+  return <div className="flex shrink-0 flex-col items-center justify-center gap-1 px-2 text-[9px] text-[var(--fg-3)]"><span className="hidden h-px w-8 bg-[var(--line-1)] md:block" /><GitFork className="h-3 w-3 md:hidden" /><span className="whitespace-nowrap font-mono">{label}</span></div>;
+}
+
+function Fact({ label, value, provenance }: { label: string; value: string; provenance: string }) {
+  return <div className="min-w-0"><div className="text-[8px] uppercase tracking-wide text-[var(--fg-3)]">{label}</div><div className="mt-0.5 break-words font-mono text-[10px] text-[var(--fg-1)]">{value}</div><div className="mt-0.5 font-mono text-[8px] text-[var(--fg-3)]">{provenance}</div></div>;
 }

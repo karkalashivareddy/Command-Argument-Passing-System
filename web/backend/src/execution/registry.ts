@@ -15,6 +15,8 @@ export interface ActiveSession {
   state: Exclude<SessionStatus, "COMPLETED" | "FAILED" | "TIMED_OUT" | "CANCELLED"> | "COMPLETED" | "FAILED" | "TIMED_OUT" | "CANCELLED";
   process: ChildProcess | null;
   childPid: number | null;
+  processStartedAt: string | null;
+  processReaped: boolean;
   startedAt: string;
   monotonicStartMs: number;
   exitCode: number | null;
@@ -96,6 +98,17 @@ export class ExecutionRegistry {
         exitCode: s.exitCode,
         signal: s.signal,
       });
+    }
+    return out;
+  }
+
+  /** Only CAPS-reported child PIDs are eligible for procfs sampling. */
+  listTelemetryTargets(): Array<{ sessionId: string; pid: number }> {
+    const out: Array<{ sessionId: string; pid: number }> = [];
+    for (const s of this.sessions.values()) {
+      if (s.childPid !== null && s.processStartedAt !== null && !s.processReaped) {
+        out.push({ sessionId: s.sessionId, pid: s.childPid });
+      }
     }
     return out;
   }

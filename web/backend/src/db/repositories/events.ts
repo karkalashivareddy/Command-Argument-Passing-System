@@ -66,6 +66,13 @@ export class EventRepository {
     return rows.map(rowToEvent);
   }
 
+  latestForSessionByType(sessionId: string, type: string): CanonicalEvent | null {
+    const row = this.db
+      .prepare("SELECT * FROM events WHERE session_id=? AND type=? ORDER BY sequence DESC LIMIT 1")
+      .get(sessionId, type) as EventRow | undefined;
+    return row === undefined ? null : rowToEvent(row);
+  }
+
   listRecentGlobal(limit: number, excludeSessionIds: string[] = []): CanonicalEvent[] {
     let sql = "SELECT * FROM events";
     if (excludeSessionIds.length) {

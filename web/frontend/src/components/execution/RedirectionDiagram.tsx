@@ -59,8 +59,9 @@ function FdRow({ fd, label, target, note, events, index }: FdRowProps) {
 /**
  * Standard io plumbing — stdin (fd 0) and stdout (fd 1) may be spliced to
  * plain relative workspace files; stderr (fd 2) is always the monitor
- * stream. Targets and open()/dup2() outcomes come from the real spec and
- * redirection.opened / redirection.failed events.
+ * stream. The request target and aggregate setup result come from the real
+ * spec and redirection.opened / redirection.failed events; individual
+ * open()/dup2()/close() calls are not separately observed.
  */
 export function RedirectionDiagram({ redirections, events }: { redirections: RedirectionSpec; events: CanonicalEvent[] }) {
   const opened = events.filter((e) => e.type === "redirection.opened").length;

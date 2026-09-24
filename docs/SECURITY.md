@@ -38,7 +38,7 @@ The CAPS Observatory executes user-supplied commands on the host system. This do
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    USER PROGRAM                              │
-│  echo, sleep, true, false, pwd, cat, uname, sh              │
+│  echo, sleep, true, false, pwd, cat, uname                 │
 │  (confined to workspace)                                     │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -52,14 +52,16 @@ The CAPS Observatory executes user-supplied commands on the host system. This do
 Only these commands may be executed:
 
 ```c
-static const char *ALLOWLIST[] = {
-    "echo", "printf", "sleep", "true", "false",
-    "pwd", "cat", "uname", "sh", "status_probe"
-};
+Gateway PATH allowlist: `echo`, `printf`, `sleep`, `true`, `false`,
+`pwd`, `cat`, `uname`. The optional fixed `status_probe` helper is
+resolved to its repository build path when present.
 ```
 
-- **No shell** — `execvp()` called directly, never `sh -c` or `system()`
-- **No PATH search** — commands resolved against allowlist; full path not used
+- **No shell** — shells are excluded from the gateway allowlist; `sh -c`
+  would otherwise allow arbitrary commands despite `shell:false`.
+- **No `system()` or `popen()`** — execution uses structured argv.
+- **Allowlist before PATH lookup** — the requested name must be allowed before `execvp()` resolves it through the sanitized PATH.
+- **Workspace-only `cat` reads** — the gateway accepts only existing regular files that resolve inside the workspace; flags and paths through escaping symlinks are rejected.
 - **No arguments injection** — argv passed as array, not joined string
 
 ### Workspace Confinement
@@ -242,6 +244,8 @@ Not implemented in gateway (assumes internal/trusted use). Add via reverse proxy
 3. **Database corruption**: Restore from `.backup` + `PRAGMA integrity_check`
 4. **Allowlist bypass attempt**: Check logs for `COMMAND_NOT_ALLOWED` (403)
 5. **Redirection escape attempt**: Check logs for `REDIRECTION_REJECTED` (422)
+
+Procfs telemetry is scoped to child PIDs emitted by CAPS and held in the active execution registry. The gateway does not provide arbitrary PID inspection. Before accepting a snapshot it checks that procfs PPID matches the gateway-spawned CAPS process PID and that the process start ticks remain stable; mismatched identities are recorded as unavailable.
 
 ---
 

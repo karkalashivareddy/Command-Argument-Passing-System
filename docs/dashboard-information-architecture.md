@@ -36,13 +36,15 @@
 │ Hero: CAPS — Process Execution Observatory — "See what a command becomes."        │
 │ $ [command ..........]                     [EXECUTE]                              │
 ├ Execution Pipeline (signature component) ────────────────────────────────────────┤
-│ INPUT → PARSE → ARGV → FORK → EXEC → WAIT → RESULT (live, animated)              │
+│ INPUT → PARSE* → ARGV → FORK → EXEC → RUN → WAIT → RESULT                       │
 ├──────────────┬──────────────────────────────┬────────────────────────────────────┤
 │ MetricCards  │ RECENT EXECUTIONS (table)    │ MINI ANALYTICS (success rate,      │
 │ (total,      │ command/status/pid/exit/     │  avg duration, top command)        │
 │  active, ...)│ duration/time                │                                    │
 └──────────────┴──────────────────────────────┴────────────────────────────────────┘
 ```
+
+`*` Web requests supply structured argv, so command-string tokenization is unavailable on this route. Stage emphasis follows monitor events and gateway session state; unobserved transitions are labeled unavailable or inferred.
 
 ## 4. Information hierarchy rules
 

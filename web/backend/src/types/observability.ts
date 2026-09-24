@@ -19,6 +19,7 @@ export type CanonicalEventType =
   | "redirection.opened"
   | "redirection.failed"
   | "process.started"
+  | "process.snapshot"
   | "process.exited"
   | "process.exec_error"
   | "signal.received"
@@ -100,6 +101,94 @@ export interface AnalyticsOverview {
   byCommand: Record<string, number>;
   redirectionUsage: Record<string, number>;
   byDay: Array<{ date: string; count: number; success: number }>;
+  processTelemetry: {
+    sampleCount: number;
+    executionsSampled: number;
+    averageRssBytes: number | null;
+    maxRssBytes: number | null;
+    rssSamples: number;
+    averageCpuTimeMs: number | null;
+    cpuTimeExecutions: number;
+    averageCpuPercent: number | null;
+    cpuPercentSamples: number;
+  };
+}
+
+/** A runtime peak/moment pinned to a real persisted sample. */
+export interface RuntimePeakPoint {
+  value: number;
+  /** milliseconds after the session's first event timestamp */
+  atTimeMs: number;
+  atTimestamp: string;
+}
+
+/** Per-execution telemetry summary derived only from persisted process.snapshot events. */
+export interface RuntimePeaks {
+  sampleCount: number;
+  firstSampleAt: string | null;
+  lastSampleAt: string | null;
+  minElapsedMs: number | null;
+  maxElapsedMs: number | null;
+  peakRssBytes: RuntimePeakPoint | null;
+  medianRssBytes: number | null;
+  peakCpuPercent: RuntimePeakPoint | null;
+  /** user + system CPU time from the final persisted sample */
+  cpuTimeMs: number | null;
+}
+
+/** Command-level profile built from terminal sessions of that command. */
+export interface CommandProfile {
+  command: string;
+  runs: number;
+  successful: number;
+  failed: number;
+  signalled: number;
+  successRate: number | null;
+  avgDurationMs: number | null;
+  medianDurationMs: number | null;
+  p95DurationMs: number | null;
+  minDurationMs: number | null;
+  maxDurationMs: number | null;
+  rssSamples: number;
+  medianRssBytes: number | null;
+  peakRssBytes: number | null;
+  lastRunAt: string | null;
+}
+
+/** One side of an execution comparison. */
+export interface ComparisonSide {
+  sessionId: string;
+  command: string;
+  args: string[];
+  status: SessionStatus;
+  exitCode: number | null;
+  signal: number | null;
+  durationMs: number | null;
+  eventCount: number;
+  snapshotCount: number;
+  peakRssBytes: number | null;
+  medianRssBytes: number | null;
+  peakCpuPercent: number | null;
+  cpuTimeMs: number | null;
+}
+
+export interface SessionComparison {
+  left: ComparisonSide;
+  right: ComparisonSide;
+  shared: {
+    sameCommand: boolean;
+    command: string | null;
+    sameExit: boolean;
+    sameSignal: boolean;
+    sameStatus: boolean;
+  };
+  deltas: {
+    durationMs: number | null;
+    eventDelta: number;
+    snapshotDelta: number;
+    peakRssDeltaBytes: number | null;
+    cpuTimeDeltaMs: number | null;
+  };
 }
 
 // Type-safe payloads for key events (informational; the event row also
