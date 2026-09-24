@@ -1,0 +1,28 @@
+{
+  "name": "caps-observatory-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "CAPS Process Execution Observatory — web gateway (real-time execution -> SSE -> SQLite)",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "dev": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx watch src/server.ts",
+    "start": "node --disable-warning=ExperimentalWarning dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "fastify": "^5.2.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}

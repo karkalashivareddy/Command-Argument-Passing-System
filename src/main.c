@@ -22,6 +22,9 @@ static void usage(FILE *stream)
             "       caps --monitor [--json]                 (interactive mode showing\n"
             "                                                  live execution events)\n"
             "       caps --monitor [--json] <command> ...   (one-shot with live events)\n"
+            "       caps --monitor --json [--redir-in F]    (one-shot with I/O redirection;\n"
+            "                       [--redir-out F]          uses the same open()/dup2()/\n"
+            "                       [--redir-append F]       close() path as the REPL)\n"
             "       caps --help | --version\n");
 }
 
@@ -168,9 +171,13 @@ static int interactive_loop(caps_monitor_t *mon, int quiet_ui)
 
 /*
  * One-shot execution under a monitor: emit the received/parsed events,
- * run the command, then close the session with a summary.
+ * run the command (optionally with redirection descriptors that follow
+ * the exact same open()/dup2()/close() path the REPL uses), then close
+ * the session with a summary.  The redirection paths are borrowed from
+ * argv and stay valid for the whole run.
  */
-static int monitor_one_shot(caps_monitor_t *mon, char *const cmd_argv[])
+static int monitor_one_shot(caps_monitor_t *mon, char *const cmd_argv[],
+                            redirection_t *redirs, int nredirs)
 {
     char joined[256];
 
@@ -178,7 +185,7 @@ static int monitor_one_shot(caps_monitor_t *mon, char *const cmd_argv[])
     emit_simple_event(mon, CAPS_EVENT_COMMAND_RECEIVED, joined);
     emit_simple_event(mon, CAPS_EVENT_PARSED, joined);
 
-    int status = process_exec(cmd_argv, NULL, 0, NULL, mon);
+    int status = process_exec(cmd_argv, redirs, nredirs, NULL, mon);
 
     caps_monitor_finish(mon);
     return status;
@@ -248,6 +255,9 @@ int main(int argc, char *argv[])
     if (monitor) {
         caps_monitor_t *mon = caps_monitor_create(stderr, json);
         int rc;
+        redirection_t *redirs = NULL;
+        int nredirs = 0;
+        const int max_redirs = 3;
 
         if (mon == NULL) {
             /*
@@ -259,11 +269,49 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
 
+        /*
+         * Optional one-shot redirection descriptors:
+         *   caps --monitor --json [--redir-in F] [--redir-out F]
+         *                          [--redir-append F] <command> [arg ...]
+         * Each flag consumes its file-name argument and records a
+         * descriptor that process_exec() opens before fork() and the
+         * child dup2()s onto stdin/stdout before execvp().  This is the
+         * same execution path as REPL redirection, exposed for the web
+         * gateway; it never activates outside --monitor.
+         */
+        while (i + 1 < argc && nredirs < max_redirs) {
+            caps_redir_type_t type;
+
+            if (strcmp(argv[i], "--redir-in") == 0)
+                type = CAPS_REDIR_IN;
+            else if (strcmp(argv[i], "--redir-out") == 0)
+                type = CAPS_REDIR_OUT;
+            else if (strcmp(argv[i], "--redir-append") == 0)
+                type = CAPS_REDIR_APPEND;
+            else
+                break;
+
+            if (redirs == NULL) {
+                redirs = calloc((size_t)max_redirs, sizeof *redirs);
+                if (redirs == NULL) {
+                    caps_error("memory allocation failure");
+                    caps_monitor_destroy(mon);
+                    return EXIT_FAILURE;
+                }
+            }
+            redirs[nredirs].type = type;
+            redirs[nredirs].path = argv[i + 1]; /* borrowed; lives for the run */
+            redirs[nredirs].fd = -1;
+            i += 2;
+            nredirs++;
+        }
+
         if (i < argc)
-            rc = monitor_one_shot(mon, &argv[i]);
+            rc = monitor_one_shot(mon, &argv[i], redirs, nredirs);
         else
             rc = interactive_loop(mon, json);
 
+        free(redirs);
         caps_monitor_destroy(mon);
         return rc;
     }
