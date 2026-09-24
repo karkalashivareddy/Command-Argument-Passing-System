@@ -12,6 +12,7 @@ const ExecutionPage = lazy(() => import("./pages/ExecutionPage"));
 const ArgumentsPage = lazy(() => import("./pages/ArgumentsPage"));
 const HistoryPage = lazy(() => import("./pages/HistoryPage"));
 const AnalyticsPage = lazy(() => import("./pages/AnalyticsPage"));
+const ComparePage = lazy(() => import("./pages/ComparePage"));
 const ArchitecturePage = lazy(() => import("./pages/ArchitecturePage"));
 const SignalsPage = lazy(() => import("./pages/SignalsPage"));
 const RedirectionPage = lazy(() => import("./pages/RedirectionPage"));
@@ -42,6 +43,7 @@ export function App() {
           <Route path="/arguments/:id" element={<ArgumentsPage />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/analytics" element={<AnalyticsPage />} />
+          <Route path="/compare" element={<ComparePage />} />
           <Route path="/architecture" element={<ArchitecturePage />} />
           <Route path="/signals" element={<SignalsPage />} />
           <Route path="/redirection" element={<RedirectionPage />} />

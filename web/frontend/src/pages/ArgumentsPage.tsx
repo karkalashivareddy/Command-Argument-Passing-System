@@ -6,7 +6,7 @@ import { shortId } from "../lib/format";
 import { ArgvView } from "../components/execution/ArgvView";
 import { EventStream } from "../components/execution/EventStream";
 import { Badge, Button, Card, EmptyState, Spinner, StatusDot } from "../components/ui";
-import { STATUS_META, stageStates } from "../lib/stages";
+import { STATUS_META } from "../lib/stages";
 import { useExecution } from "../store/execution";
 import { useUi } from "../store/ui";
 
@@ -32,8 +32,6 @@ export default function ArgumentsPage() {
       </div>
     );
   }
-
-  const states = stageStates(events, session.status);
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 px-6 py-6">
@@ -68,7 +66,7 @@ export default function ArgumentsPage() {
       </Card>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <Card title="Parsed command line" subtitle="How the raw command was tokenized">
+        <Card title="Structured execution request" subtitle="Source: gateway-validated command and arguments array">
           <div className="space-y-1.5">
             {session.argv.map((arg, i) => (
               <div key={i} className="flex items-center gap-2 rounded-[var(--r-sm)] bg-[var(--bg-2)] px-2 py-1 font-mono text-[12px]">
@@ -82,14 +80,17 @@ export default function ArgumentsPage() {
           </p>
         </Card>
 
-        <Card title="Parsing stage" subtitle="Real event-derived state">
+        <Card title="Shell-style tokenization" subtitle="Unavailable in the Observatory web execution path">
           <div className="flex items-center justify-between">
-            <span className="text-[12px] text-[var(--fg-2)]">PARSE stage</span>
-            <Badge tone={states.parse === "done" ? "success" : states.parse === "error" ? "danger" : states.parse === "current" ? "active" : "neutral"}>
-              {states.parse?.toUpperCase()}
-            </Badge>
+            <span className="text-[12px] text-[var(--fg-2)]">Tokenization</span>
+            <Badge tone="neutral">UNAVAILABLE</Badge>
           </div>
-          <EventStream events={events.filter((e) => e.type === "command.received" || e.type === "command.parsed" || e.type === "command.parse_error")} emptyLabel="The parser hasn't reported for this session." />
+          <p className="mt-3 text-[12px] leading-relaxed text-[var(--fg-2)]">
+            The gateway receives a structured argv array, not a shell command line. CAPS's one-shot PARSED monitor event
+            reports that supplied vector; it does not mean shell quoting or tokenization occurred.
+          </p>
+          <p className="mt-3 font-mono text-[10.5px] uppercase tracking-wide text-[var(--fg-3)]">Monitor events · source CAPS</p>
+          <EventStream events={events.filter((e) => e.type === "command.received" || e.type === "command.parsed" || e.type === "command.parse_error")} emptyLabel="No command receipt events are available for this session." />
         </Card>
       </div>
     </div>

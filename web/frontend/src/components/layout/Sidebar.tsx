@@ -8,6 +8,7 @@ import {
   Eye,
   FileCode2,
   FlaskConical,
+  GitCompareArrows,
   History,
   Play,
   Radio,
@@ -47,6 +48,7 @@ const GROUPS: NavGroup[] = [
     items: [
       { to: "/live", label: "Live feed", icon: Radio },
       { to: "/history", label: "History", icon: History },
+      { to: "/compare", label: "Compare", icon: GitCompareArrows },
       { to: "/analytics", label: "Analytics", icon: BarChart3 },
     ],
   },

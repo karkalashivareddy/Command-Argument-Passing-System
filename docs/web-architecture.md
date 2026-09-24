@@ -94,7 +94,7 @@ src/
 | `PROCESS_STARTED`      | `pid`, `command`                                             |
 | `PROCESS_EXITED`       | `pid`, `exit_code`, `duration_ms` (monotonic), `command`     |
 | `SIGNAL_RECEIVED`      | `pid`, `signal`, `command`                                   |
-| `EXEC_ERROR`           | `pid`, `command` (126/127 heuristic)                         |
+| `EXEC_ERROR`           | `pid`, `command` (child reported saved `execvp()` errno)       |
 | `SESSION_SUMMARY`      | counters + `average_duration_ms`                             |
 
 The gateway **does not invent C-side events**. Anything the C engine

@@ -17,6 +17,9 @@ describe("computeAnalytics", () => {
     expect(out.p50Ms).toBeNull();
     expect(out.byExitCode).toEqual({});
     expect(out.byDay).toEqual([]);
+    expect(out.processTelemetry.averageRssBytes).toBeNull();
+    expect(out.processTelemetry.averageCpuPercent).toBeNull();
+    expect(out.processTelemetry.sampleCount).toBe(0);
   });
 
   it("aggregates real terminal sessions", () => {
@@ -45,5 +48,39 @@ describe("computeAnalytics", () => {
     expect(out.p50Ms).not.toBeNull();
     expect(out.byDay[0]?.count).toBe(5);
     expect(out.byDay[0]?.success).toBe(2);
+  });
+
+  it("aggregates only persisted procfs snapshots with truthful sample counts", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SessionRepository(db);
+    for (const id of ["telemetry-a", "telemetry-b"]) {
+      repo.create({ id, command: "sleep", args: ["1"], redirections: {}, timeoutMs: 30000, startedAt: "2026-01-01T10:00:00.000Z" });
+      repo.finalize(id, { status: "COMPLETED", exitCode: 0, signal: null, isSuccess: true, durationMs: 1000, pid: 100, error: null });
+    }
+    const insert = db.prepare("INSERT INTO events (id, session_id, sequence, type, source, timestamp, monotonic_ms, pid, payload) VALUES (?, ?, ?, 'process.snapshot', 'gateway', ?, NULL, 100, ?)");
+    const makeSnapshot = (rss: number, user: number, system: number, cpu: number) => JSON.stringify({
+      rssBytes: { value: rss, provenance: "OBSERVED", source: "/proc/100/status" },
+      cpuUserMs: { value: user, provenance: "DERIVED", source: "/proc/100/stat" },
+      cpuSystemMs: { value: system, provenance: "DERIVED", source: "/proc/100/stat" },
+      cpuPercent: { value: cpu, provenance: "DERIVED", source: "sample delta" },
+    });
+    insert.run("snapshot-a1", "telemetry-a", 0, "2026-01-01T10:00:00.100Z", makeSnapshot(100, 10, 5, 1));
+    insert.run("snapshot-a2", "telemetry-a", 1, "2026-01-01T10:00:00.600Z", makeSnapshot(200, 20, 10, 2));
+    insert.run("snapshot-b1", "telemetry-b", 0, "2026-01-01T10:00:00.100Z", makeSnapshot(300, 30, 10, 3));
+    insert.run("snapshot-b2", "telemetry-b", 1, "2026-01-01T10:00:00.600Z", makeSnapshot(400, 50, 15, 4));
+
+    const out = computeAnalytics(repo);
+    expect(out.processTelemetry).toMatchObject({
+      sampleCount: 4,
+      executionsSampled: 2,
+      averageRssBytes: 250,
+      maxRssBytes: 400,
+      rssSamples: 4,
+      averageCpuTimeMs: 47.5,
+      cpuTimeExecutions: 2,
+      averageCpuPercent: 2.5,
+      cpuPercentSamples: 4,
+    });
+    db.close();
   });
 });

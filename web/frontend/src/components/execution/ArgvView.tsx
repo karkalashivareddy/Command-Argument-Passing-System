@@ -3,6 +3,8 @@ import { Hash } from "lucide-react";
 
 import { Tooltip } from "../misc/Tooltip";
 
+const encoder = new TextEncoder();
+
 /**
  * argv[0] = program path; argv[1..argc-1] = arguments; argv[argc] = NULL.
  * Cells come from the actual session argv; the trailing NULL cell is the
@@ -23,6 +25,7 @@ export function ArgvView({ argv, eventCount }: { argv: string[]; eventCount: num
         <Hash className="h-3 w-3" />
         argv[{argc}] · {eventCount} events for this session
       </div>
+      <p className="font-mono text-[10px] uppercase tracking-wide text-[var(--fg-3)]">Source · structured execution request</p>
       <div className="flex flex-wrap gap-1.5">
         {rows.map((row, i) => (
           <motion.div
@@ -56,6 +59,13 @@ export function ArgvView({ argv, eventCount }: { argv: string[]; eventCount: num
               </span>
             </Tooltip>
           </motion.div>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-1.5 text-[10px] font-mono text-[var(--fg-3)]">
+        {argv.map((value, index) => (
+          <span key={`length-${index}`} className="rounded bg-[var(--bg-2)] px-1.5 py-0.5">
+            argv[{index}] · {encoder.encode(value).length} bytes
+          </span>
         ))}
       </div>
       <p className="flex items-center gap-1 text-[11px] text-[var(--fg-3)]">

@@ -59,16 +59,6 @@ export const playgroundExamples: PlaygroundExample[] = [
     tryIt: "The session exits with code 1 and is recorded as failed.",
   },
   {
-    id: "custom-exit",
-    title: "Controlled exit status",
-    category: "exit",
-    command: "sh",
-    args: ["-c", "exit 7"],
-    explanation:
-      "sh runs '-c' with the string 'exit 7'. The status 7 comes back through waitpid() shell-style — a deterministic exit-code demonstration.",
-    tryIt: "exit_code = 7 in the recorder.",
-  },
-  {
     id: "signal-int",
     title: "SIGINT termination",
     category: "signal",
@@ -96,8 +86,8 @@ export const playgroundExamples: PlaygroundExample[] = [
     args: ["Hello"],
     redirections: { out: "demo.txt" },
     explanation:
-      "CAPS opens demo.txt with O_WRONLY|O_CREAT|O_TRUNC, dup2()s it onto stdout before execvp(), and closes the original. The file contains exactly one line.",
-    tryIt: "Open History → replay to watch open() → dup2() → close().",
+      "CAPS reports the stdout redirection configuration and whether redirection setup succeeded. Its current event protocol does not emit separate open(), dup2(), or close() events; those POSIX steps are an educational explanation.",
+    tryIt: "Open History to inspect the observed redirection event and the recorded output.",
   },
   {
     id: "redir-in",
@@ -111,12 +101,12 @@ export const playgroundExamples: PlaygroundExample[] = [
   },
   {
     id: "not-found",
-    title: "Invalid command (127)",
+    title: "Unlisted command policy rejection",
     category: "exit",
     command: "definitely_not_a_command",
     args: [],
     explanation:
-      "execvp() returns ENOENT in the child; the child reports 'command not found' on stderr and _exit(127). Shell-style 127 means 'not found'.",
-    tryIt: "The EXEC_ERROR event plus exit_code 127 and the real diagnostic line.",
+      "The gateway rejects this executable because it is not on the allowlist. No CAPS child is started. Use the local C monitor test to observe execvp() failure; the web gateway does not expose arbitrary missing executable names.",
+    tryIt: "Run it to see the gateway's COMMAND_NOT_ALLOWED response before fork().",
   },
 ];

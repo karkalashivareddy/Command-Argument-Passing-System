@@ -149,15 +149,44 @@ export function EmptyState({ icon, title, body, action }: { icon?: ReactNode; ti
 
 export function CopyButton({ value, label = "Copy", className }: { value: string; label?: string; className?: string }) {
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const copy = async () => {
-    await navigator.clipboard.writeText(value).catch(() => {});
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1400);
+    let ok = false;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+        ok = true;
+      }
+    } catch {
+      // Fall back for browsers that expose Clipboard API without write access.
+    }
+    if (!ok) {
+      const textarea = document.createElement("textarea");
+      textarea.value = value;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        ok = document.execCommand("copy");
+      } catch {
+        ok = false;
+      } finally {
+        textarea.remove();
+      }
+    }
+    setCopied(ok);
+    setCopyFailed(!ok);
+    window.setTimeout(() => {
+      setCopied(false);
+      setCopyFailed(false);
+    }, 1400);
   };
   return (
     <Button size="sm" variant="ghost" className={clsx("gap-1 text-[var(--fg-2)] hover:text-[var(--fg-0)]", className)} onClick={copy}>
       {copied ? <Check className="h-3.5 w-3.5 text-[var(--green)]" /> : <Copy className="h-3.5 w-3.5" />}
-      {copied ? "Copied" : label}
+      {copied ? "Copied" : copyFailed ? "Copy failed" : label}
     </Button>
   );
 }

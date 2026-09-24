@@ -67,7 +67,7 @@ Normal (non-monitor) execution is unaffected.
 | `PROCESS_STARTED`    | `fork()` returned a child pid                       | `pid`, `command`       |
 | `PROCESS_EXITED`     | `waitpid()` reaped a normally-exited child          | `pid`, `exit_code`, `duration_ms` |
 | `SIGNAL_RECEIVED`    | child was terminated by a signal                    | `pid`, `signal`        |
-| `EXEC_ERROR`         | child exited `126`/`127` (exec failed)              | `pid`, `command`       |
+| `EXEC_ERROR`         | child reports its saved `execvp()` errno through a close-on-exec status pipe | `pid`, `command` |
 | `SESSION_SUMMARY`    | end of session                                      | session counters       |
 
 Ordering for a normal external command:
@@ -138,11 +138,10 @@ Field notes:
   characters), preserving the one-object-per-line guarantee.
 - On `SIGNAL_RECEIVED`, `signal` is the signal number; the following
   `PROCESS_EXITED` carries `exit_code = 128 + signal`.
-- `EXEC_ERROR` is raised when the child exits `126` or `127`. This is a
-  **heuristic**: those codes are the shell convention for a failed
-  `exec`, and the event reports that the child exited with such a code —
-  a program that itself exits `127` without an exec failure is
-  indistinguishable at this layer.
+- `EXEC_ERROR` is raised only when the child reports the saved `errno`
+  from a failed `execvp()` through the close-on-exec status pipe. A
+  program that successfully execs and exits with `126` or `127` is
+  therefore reported as `PROCESS_EXITED` with that exit code.
 
 ---
 

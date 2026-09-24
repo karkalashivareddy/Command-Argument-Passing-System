@@ -31,7 +31,7 @@ export default function PlaygroundPage() {
   useEffect(() => {
     void api
       .examples()
-      .then(setExamples)
+      .then((response) => setExamples(response.examples))
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
   }, []);

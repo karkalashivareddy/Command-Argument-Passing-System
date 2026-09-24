@@ -14,6 +14,7 @@ export type CanonicalEventType =
   | "redirection.opened"
   | "redirection.failed"
   | "process.started"
+  | "process.snapshot"
   | "process.exited"
   | "process.exec_error"
   | "signal.received"
@@ -29,6 +30,34 @@ export interface CanonicalEvent {
   monotonicMs: number | null;
   pid: number | null;
   payload: Record<string, unknown>;
+}
+
+export type TelemetryProvenance = "OBSERVED" | "DERIVED" | "UNAVAILABLE";
+export interface TelemetryMetric<T> {
+  value: T | null;
+  provenance: TelemetryProvenance;
+  source: string;
+  reason?: string;
+}
+export interface ProcessSnapshot {
+  timestamp: string;
+  capsEnginePid: TelemetryMetric<number>;
+  pid: TelemetryMetric<number>;
+  command: TelemetryMetric<string>;
+  ppid: TelemetryMetric<number>;
+  processGroupId: TelemetryMetric<number>;
+  sessionId: TelemetryMetric<number>;
+  state: TelemetryMetric<string>;
+  startTime: TelemetryMetric<string>;
+  elapsedMs: TelemetryMetric<number>;
+  cpuUserMs: TelemetryMetric<number>;
+  cpuSystemMs: TelemetryMetric<number>;
+  cpuPercent: TelemetryMetric<number>;
+  rssBytes: TelemetryMetric<number>;
+  virtualMemoryBytes: TelemetryMetric<number>;
+  threadCount: TelemetryMetric<number>;
+  voluntaryContextSwitches: TelemetryMetric<number>;
+  nonVoluntaryContextSwitches: TelemetryMetric<number>;
 }
 
 export type SessionStatus =
@@ -95,6 +124,17 @@ export interface AnalyticsOverview {
   byCommand: Record<string, number>;
   redirectionUsage: Record<string, number>;
   byDay: Array<{ date: string; count: number; success: number }>;
+  processTelemetry: {
+    sampleCount: number;
+    executionsSampled: number;
+    averageRssBytes: number | null;
+    maxRssBytes: number | null;
+    rssSamples: number;
+    averageCpuTimeMs: number | null;
+    cpuTimeExecutions: number;
+    averageCpuPercent: number | null;
+    cpuPercentSamples: number;
+  };
 }
 
 export interface HealthResponse {
@@ -113,6 +153,7 @@ export interface CapabilitiesResponse {
   workspace: string;
   redirection: { supported: boolean; modes: string[] };
   signals: { supported: boolean };
+  telemetry: { enabled: boolean; intervalMs: number; source: string; metrics: string[] };
   bind: string;
 }
 
@@ -157,4 +198,76 @@ export interface ProcessInfo {
   durationMs: number | null;
   exitCode: number | null;
   signal: number | null;
+  telemetry: ProcessSnapshot | null;
+}
+
+export interface RuntimePeakPoint {
+  value: number;
+  atTimeMs: number;
+  atTimestamp: string;
+}
+
+export interface RuntimePeaks {
+  sampleCount: number;
+  firstSampleAt: string | null;
+  lastSampleAt: string | null;
+  minElapsedMs: number | null;
+  maxElapsedMs: number | null;
+  peakRssBytes: RuntimePeakPoint | null;
+  medianRssBytes: number | null;
+  peakCpuPercent: RuntimePeakPoint | null;
+  cpuTimeMs: number | null;
+}
+
+export interface CommandProfile {
+  command: string;
+  runs: number;
+  successful: number;
+  failed: number;
+  signalled: number;
+  successRate: number | null;
+  avgDurationMs: number | null;
+  medianDurationMs: number | null;
+  p95DurationMs: number | null;
+  minDurationMs: number | null;
+  maxDurationMs: number | null;
+  rssSamples: number;
+  medianRssBytes: number | null;
+  peakRssBytes: number | null;
+  lastRunAt: string | null;
+}
+
+export interface ComparisonSide {
+  sessionId: string;
+  command: string;
+  args: string[];
+  status: SessionStatus;
+  exitCode: number | null;
+  signal: number | null;
+  durationMs: number | null;
+  eventCount: number;
+  snapshotCount: number;
+  peakRssBytes: number | null;
+  medianRssBytes: number | null;
+  peakCpuPercent: number | null;
+  cpuTimeMs: number | null;
+}
+
+export interface SessionComparison {
+  left: ComparisonSide;
+  right: ComparisonSide;
+  shared: {
+    sameCommand: boolean;
+    command: string | null;
+    sameExit: boolean;
+    sameSignal: boolean;
+    sameStatus: boolean;
+  };
+  deltas: {
+    durationMs: number | null;
+    eventDelta: number;
+    snapshotDelta: number;
+    peakRssDeltaBytes: number | null;
+    cpuTimeDeltaMs: number | null;
+  };
 }

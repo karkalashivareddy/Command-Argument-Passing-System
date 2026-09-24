@@ -67,10 +67,21 @@ export function useSession(sessionId: string | undefined, opts?: { live?: boolea
   useLiveEvents({
     sessionId: sessionId ?? "",
     enabled: live && Boolean(sessionId) && !view.ended && view.session !== null,
+    onOpen: () => setView((v) => ({ ...v, connected: true })),
     onEvent: (ev) => {
       setView((v) => {
         if (v.events.some((e) => e.id === ev.id)) return v;
-        return { ...v, connected: true, events: [...v.events, ev] };
+        const session = v.session ? { ...v.session } : null;
+        if (session && ev.type === "process.started") {
+          session.pid = ev.pid;
+          session.status = "RUNNING";
+        } else if (session && ev.type === "process.exited") {
+          if (typeof ev.payload.exitCode === "number") session.exitCode = ev.payload.exitCode;
+          if (typeof ev.payload.durationMs === "number") session.durationMs = ev.payload.durationMs;
+        } else if (session && ev.type === "signal.received" && typeof ev.payload.signal === "number") {
+          session.signal = ev.payload.signal;
+        }
+        return { ...v, session, connected: true, events: [...v.events, ev] };
       });
       if (ev.type === "session.summary" || ev.type === "execution.completed" || ev.type === "execution.failed" || ev.type === "execution.timeout") {
         setView((v) => (v.ended ? v : { ...v, ended: true }));

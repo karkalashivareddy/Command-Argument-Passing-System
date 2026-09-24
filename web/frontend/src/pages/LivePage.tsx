@@ -9,7 +9,7 @@ import { fmtClock, fmtTimestamp, shortId, truncate } from "../lib/format";
 import type { ProcessInfo } from "../types/observability";
 
 export default function LivePage() {
-  const { events, connected } = useGlobalFeed(300);
+  const { events, connected, connection } = useGlobalFeed(300);
   const [processes, setProcesses] = useState<{ processes: ProcessInfo[]; capacity: number } | null>(null);
 
   useEffect(() => {
@@ -67,7 +67,7 @@ export default function LivePage() {
           <Card
             title="Global event stream"
             subtitle="All sessions, single chronological sequence"
-            actions={<Badge tone={connected ? "success" : "danger"}>{connected ? "streaming" : "reconnecting"}</Badge>}
+            actions={<Badge tone={connected ? "success" : connection === "reconnecting" ? "warn" : "neutral"}>{connection}</Badge>}
             pad={false}
           >
             {events.length === 0 ? (
