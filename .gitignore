@@ -21,3 +21,14 @@ vgcore.*
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Web frontend artifacts
+web/frontend/node_modules/
+web/frontend/dist/
+web/frontend/.vite/
+web/backend/node_modules/
+web/backend/dist/
+web/backend/*.db
+web/backend/*.db-*
+data/
+*.log

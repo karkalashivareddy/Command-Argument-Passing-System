@@ -1,0 +1,104 @@
+/* ============================================================
+   CAPS Observatory — design tokens (single source of truth)
+   Graphite / charcoal foundation. Semantic accents used *sparingly*.
+   ============================================================ */
+
+:root {
+  /* ---- surfaces (dark-first, near-black graphite) ---- */
+  --bg-0: #07090d;
+  --bg-1: #0c1016;
+  --bg-2: #11161d;
+  --bg-3: #171d25;
+  --bg-4: #202731;
+  --bg-5: #2a323e;
+
+  /* ---- borders ---- */
+  --line-0: #1b232d;
+  --line-1: #242e3a;
+  --line-2: #33404f;
+
+  /* ---- text ---- */
+  --fg-0: #eef2f7;
+  --fg-1: #c2cbd6;
+  --fg-2: #8b96a3;
+  --fg-3: #5b6673;
+  --fg-inverse: #07090d;
+
+  /* ---- semantic (state, not decoration) ---- */
+  --accent: #22c3ee; /* cyan — active info */
+  --violet: #8b7cf6; /* violet — execution / transition */
+  --green: #3ecf8e; /* green — successful completion */
+  --amber: #f5a623; /* amber — warning / signal */
+  --red: #f0554d; /* red — failure / termination */
+  --blue: #4c8bf5; /* blue — links / neutral info */
+
+  /* ---- accent surface tints (subtle) ---- */
+  --accent-soft: rgba(34, 195, 238, 0.1);
+  --violet-soft: rgba(139, 124, 246, 0.1);
+  --green-soft: rgba(62, 207, 142, 0.1);
+  --amber-soft: rgba(245, 166, 35, 0.1);
+  --red-soft: rgba(240, 85, 77, 0.1);
+
+  /* ---- typography ---- */
+  --font-ui: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* ---- spacing scale (4px base) ---- */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+  --s-10: 40px;
+  --s-12: 48px;
+
+  /* ---- radius ---- */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+
+  /* ---- shadows (subtle depth, no glow) ---- */
+  --shadow-panel: 0 1px 0 0 rgba(255, 255, 255, 0.03), 0 4px 16px -8px rgba(0, 0, 0, 0.6);
+  --shadow-pop: 0 8px 32px -8px rgba(0, 0, 0, 0.8);
+
+  /* ---- motion ---- */
+  --dur-fast: 120ms;
+  --dur-med: 220ms;
+  --dur-slow: 360ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+  /* ---- z-index ---- */
+  --z-panel: 10;
+  --z-overlay: 40;
+  --z-palette: 60;
+  --z-toast: 80;
+}
+
+/* ---- light variant (real design system, not inverted) ---- */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg-0: #f7f8fa;
+    --bg-1: #ffffff;
+    --bg-2: #f2f4f7;
+    --bg-3: #eceef2;
+    --bg-4: #e2e6ec;
+    --bg-5: #d4dae2;
+
+    --line-0: #e3e7ec;
+    --line-1: #d2d8e0;
+    --line-2: #b6c0cc;
+
+    --fg-0: #12161c;
+    --fg-1: #3c4652;
+    --fg-2: #66727f;
+    --fg-3: #96a0ac;
+    --fg-inverse: #ffffff;
+
+    --shadow-panel: 0 1px 0 0 rgba(18, 22, 28, 0.04), 0 4px 16px -8px rgba(18, 22, 28, 0.14);
+    --shadow-pop: 0 8px 32px -8px rgba(18, 22, 28, 0.28);
+  }
+}

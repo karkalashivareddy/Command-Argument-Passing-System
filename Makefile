@@ -91,4 +91,22 @@ clean:
 
 -include $(DEPS)
 
-.PHONY: all run test test-asan clean
+.PHONY: all run test test-asan clean web web-backend web-frontend web-install
+
+# Start the full observatory stack (backend + frontend dev servers)
+# Requires: make caps (C engine built), then run from repo root
+web: web-backend web-frontend
+
+# Start backend only (needs CAPS_DATABASE_PATH and CAPS_WORKSPACE)
+web-backend:
+	@cd web/backend && \
+	CAPS_DATABASE_PATH=/tmp/caps-web.db CAPS_WORKSPACE=/tmp/caps-web-work CAPS_LOG_LEVEL=info \
+	node --disable-warning=ExperimentalWarning --import tsx src/server.ts
+
+# Start frontend only (Vite dev server)
+web-frontend:
+	@cd web/frontend && npm run dev -- --host 127.0.0.1 --port 5173
+
+# Install frontend deps (run once before web-frontend)
+web-install:
+	@cd web/frontend && npm install --no-fund --no-audit

@@ -1,0 +1,118 @@
+/**
+ * Canonical observability event contract shared by the gateway, the SSE
+ * stream, the store, and the UI. The frontend mirrors these shapes under
+ * web/frontend/src/types/observability.ts (kept in lockstep).
+ */
+
+/** Which layer produced the event. */
+export type EventSource = "caps" | "gateway";
+
+export type CanonicalEventType =
+  | "execution.created"
+  | "execution.started"
+  | "execution.completed"
+  | "execution.failed"
+  | "execution.timeout"
+  | "command.received"
+  | "command.parsed"
+  | "command.parse_error"
+  | "redirection.opened"
+  | "redirection.failed"
+  | "process.started"
+  | "process.exited"
+  | "process.exec_error"
+  | "signal.received"
+  | "session.summary";
+
+export interface CanonicalEvent<T = Record<string, unknown>> {
+  id: string;
+  sessionId: string;
+  sequence: number;
+  type: CanonicalEventType;
+  source: EventSource;
+  timestamp: string; // ISO-8601 (gateway receives it; display tz is per-browser)
+  monotonicMs: number | null; // real elapsed ms (from CLOCK_MONOTONIC, caps) or null
+  pid: number | null;
+  payload: T;
+}
+
+export type SessionStatus =
+  | "CREATED"
+  | "STARTING"
+  | "RUNNING"
+  | "COMPLETED"
+  | "FAILED"
+  | "TIMED_OUT"
+  | "CANCELLED";
+
+export interface RedirectionSpec {
+  in?: string;
+  out?: string;
+  append?: string;
+}
+
+export interface SessionRecord {
+  id: string;
+  command: string;
+  args: string[];
+  argv: string[];
+  redirections: RedirectionSpec;
+  status: SessionStatus;
+  startedAt: string;
+  endedAt: string | null;
+  durationMs: number | null;
+  exitCode: number | null;
+  signal: number | null;
+  isSuccess: boolean | null;
+  pid: number | null;
+  stdout: string;
+  stderr: string;
+  error: string | null;
+  timeoutMs: number | null;
+  eventCount: number;
+}
+
+export interface ProcessRecord {
+  sessionId: string;
+  pid: number | null;
+  command: string;
+  argv: string[];
+  state: "STARTING" | "RUNNING" | "WAITING" | "EXITED" | "SIGNALED" | "FAILED";
+  startedAt: string;
+  endedAt: string | null;
+  durationMs: number | null;
+  exitCode: number | null;
+  signal: number | null;
+}
+
+export interface AnalyticsOverview {
+  totalExecutions: number;
+  successful: number;
+  failed: number;
+  signalled: number;
+  running: number;
+  avgDurationMs: number | null;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  p99Ms: number | null;
+  byExitCode: Record<string, number>;
+  bySignal: Record<string, number>;
+  byCommand: Record<string, number>;
+  redirectionUsage: Record<string, number>;
+  byDay: Array<{ date: string; count: number; success: number }>;
+}
+
+// Type-safe payloads for key events (informational; the event row also
+// keeps a copy of the raw payload as JSON).
+export interface ProcessStartedPayload { label: string; }
+export interface ProcessExitedPayload { label: string; exitCode: number; durationMs: number; }
+export interface SignalReceivedPayload { label: string; signal: number; }
+export interface SummaryPayload {
+  commands: number;
+  succeeded: number;
+  failed: number;
+  signals: number;
+  timed: number;
+  averageDurationMs: number;
+}
+export interface ExecErrorPayload { label: string; }
