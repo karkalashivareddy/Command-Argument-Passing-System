@@ -22,6 +22,14 @@ import {
   validateArgVector,
 } from "../security/policy.js";
 import type { CanonicalEvent } from "../types/observability.js";
+import { SNAPSHOT_METRIC_KEYS } from "../execution/procfs.js";
+import {
+  isWorkloadId,
+  materializeWorkloadArgv,
+  WORKLOAD_LIMITS,
+  WorkloadArgumentError,
+  workloadCapabilities,
+} from "../execution/workloadCatalog.js";
 import { logger } from "../utils/logger.js";
 import { newId } from "../utils/ids.js";
 import { SseStream, sendEnd, sendEvent } from "../events/sse.js";
@@ -106,8 +114,9 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
     } catch {
       engineAvailable = false;
     }
+    const onLinux = platform() === "linux";
     return reply.send({
-      platform: platform() === "linux" ? "linux/posix" : platform(),
+      platform: onLinux ? "linux/posix" : platform(),
       engineAvailable,
       capsPath: config.capsExecutable,
       allowlist: allowedCommands(),
@@ -120,11 +129,23 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
       workspace: config.workspace,
       redirection: { supported: true, modes: ["in", "out", "append"] },
       signals: { supported: true },
+      workloads: {
+        // Every entry is probed on disk at request time. An entry is
+        // available=false with a reason rather than a hopeful guess.
+        count: workloadCapabilities().length,
+        available: workloadCapabilities().filter((w) => w.available).length,
+        profiles: workloadCapabilities(),
+        limits: WORKLOAD_LIMITS,
+      },
       telemetry: {
-        enabled: platform() === "linux",
+        enabled: onLinux,
         intervalMs: 500,
-        source: platform() === "linux" ? "/proc/<tracked-pid>" : "UNAVAILABLE",
-        metrics: ["pid", "ppid", "state", "startTime", "elapsedMs", "cpuUserMs", "cpuSystemMs", "cpuPercent", "rssBytes", "virtualMemoryBytes", "threadCount", "voluntaryContextSwitches", "nonVoluntaryContextSwitches", "processGroupId", "sessionId"],
+        source: onLinux ? "/proc/<tracked-pid>/{stat,status,io}" : "UNAVAILABLE",
+        // Derived from the collector itself, so this list cannot claim a
+        // metric the gateway does not actually read.
+        metrics: SNAPSHOT_METRIC_KEYS,
+        perMetricProvenance: "reported per metric in every process.snapshot payload",
+        notCollected: ["eBPF", "cgroup accounting", "syscall tracing", "network I/O"],
       },
       observability: {
         timeline: { enabled: true, axis: "seconds-relative-to-first-event" },
@@ -162,6 +183,35 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
       return sendError(reply, 403, "COMMAND_NOT_ALLOWED", `Command "${body.command}" is unavailable (helper binary missing).`, rid);
     }
 
+    // Controlled workloads get a strict positional schema. The bound is
+    // enforced here and again inside the C program, so a bug in either
+    // layer still cannot run an unbounded workload.
+    let args = body.args;
+    if (isWorkloadId(body.command)) {
+      try {
+        args = materializeWorkloadArgv(body.command, body.args);
+      } catch (err) {
+        if (err instanceof WorkloadArgumentError) {
+          return sendError(reply, 400, err.code, err.message, rid);
+        }
+        return sendError(reply, 400, "WORKLOAD_ARGUMENT_REJECTED", "Workload arguments rejected.", rid);
+      }
+      // A workload owns its own runtime budget; the transport timeout must
+      // not be shorter than the budget or the sample series would be cut
+      // off before the workload ends on its own.
+      const budgetS = Number.parseInt(args[0] ?? "10", 10);
+      const required = budgetS * 1000 + 2000;
+      if (timeoutMs < required) {
+        return sendError(
+          reply,
+          400,
+          "TIMEOUT_TOO_SHORT",
+          `timeoutMs must be at least ${required} for a ${budgetS}s workload (budget plus cleanup margin).`,
+          rid,
+        );
+      }
+    }
+
     try {
       if (body.command === "cat") {
         for (const path of body.args) assertReadableFileInWorkspace(config, path);
@@ -182,7 +232,7 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
     const result = runner.start({
       command: body.command,
       executable: resolved,
-      args: body.args,
+      args,
       redirections: body.redirections ?? {},
       timeoutMs,
     });
@@ -194,7 +244,7 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
       sessionId: result.sessionId,
       status: session?.status ?? "STARTING",
       eventsUrl: `/api/sessions/${result.sessionId}/events`,
-      argvPreview: ["--monitor", "--json", body.command, ...body.args],
+      argvPreview: ["--monitor", "--json", body.command, ...args],
     });
   });
 

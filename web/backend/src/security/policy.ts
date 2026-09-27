@@ -3,14 +3,16 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import type { CapsConfig } from "../config/env.js";
 import { repoRoot } from "../config/env.js";
+import { isWorkloadId, probeWorkload, workloadExecutablePath, workloadIds } from "../execution/workloadCatalog.js";
 
 /**
  * Web-facing command allowlist.
  *
  * Every entry is a real binary that CAPS will execvp(). "PATH" entries are
  * resolved by execvp() from the gateway's environment; repo-relative
- * entries (the test status_probe helper) are resolved to their absolute
- * path at startup. The gateway NEVER interpolates anything into a shell.
+ * entries (the test status_probe helper and the first-party controlled
+ * workloads) are resolved to their absolute path at startup. The gateway
+ * NEVER interpolates anything into a shell.
  */
 // Do not allow shells here: `sh -c` would turn an argv allowlist into an
 // arbitrary command execution interface even though spawn() uses shell:false.
@@ -25,6 +27,11 @@ export function resolveAllowedExecutable(command: string): string | null {
     const p = REPO_HELPERS[command]!;
     return existsSync(p) ? p : null;
   }
+  // First-party controlled workloads live in one fixed directory and are
+  // resolved from the repository root, never from client input.
+  if (isWorkloadId(command)) {
+    return probeWorkload(command).available ? workloadExecutablePath(command) : null;
+  }
   return null;
 }
 
@@ -33,7 +40,7 @@ export function isCommandAllowed(command: string): boolean {
 }
 
 export function allowedCommands(): string[] {
-  return [...PATH_CMDS, ...Object.keys(REPO_HELPERS)];
+  return [...PATH_CMDS, ...Object.keys(REPO_HELPERS), ...workloadIds()];
 }
 
 /**

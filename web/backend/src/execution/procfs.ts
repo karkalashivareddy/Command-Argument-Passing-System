@@ -32,6 +32,25 @@ export interface ProcessSnapshot {
   threadCount: Metric<number>;
   voluntaryContextSwitches: Metric<number>;
   nonVoluntaryContextSwitches: Metric<number>;
+  /**
+   * Page-fault counters from /proc/<pid>/stat fields 10 and 12 (minflt,
+   * majflt). A CPU-only run stays near zero; a memory workload that
+   * touches a fresh anonymous mapping produces a visible minor-fault ramp.
+   */
+  minorFaults: Metric<number>;
+  majorFaults: Metric<number>;
+  /**
+   * /proc/<pid>/io counters. Character counters (readChars/writeChars)
+   * count bytes moved through the syscall layer and are always non-zero
+   * for a real read/write loop. Block counters (readBytes/writeBytes)
+   * count bytes that actually reached a block device, so they legitimately
+   * stay 0 while the page cache absorbs writes. Both are reported; neither
+   * is synthesised.
+   */
+  readBytes: Metric<number>;
+  writeBytes: Metric<number>;
+  readChars: Metric<number>;
+  writeChars: Metric<number>;
   /** Internal identity token used to reject a recycled PID during one execution. */
   identityStartTicks: number | null;
 }
@@ -47,6 +66,8 @@ export interface ProcStat {
   systemTicks: number;
   threadCount: number;
   startTicks: number;
+  minorFaults: number;
+  majorFaults: number;
 }
 
 export class ProcParseError extends Error {
@@ -77,6 +98,8 @@ export function parseProcStat(text: string): ProcStat {
     sessionId: integer(fields[3]!),
     userTicks: nonNegative(fields[11]!),
     systemTicks: nonNegative(fields[12]!),
+    minorFaults: nonNegative(fields[7]!),
+    majorFaults: nonNegative(fields[9]!),
     threadCount: nonNegative(fields[17]!),
     startTicks: nonNegative(fields[19]!),
   };
@@ -98,6 +121,71 @@ export function parseKilobytes(value: string | undefined): number | null {
   if (!match) return null;
   const n = Number(match[1]);
   return Number.isSafeInteger(n) ? n * 1024 : null;
+}
+
+/**
+ * The exact metric keys a snapshot carries. Exported so the capabilities
+ * endpoint cannot drift away from what the collector actually produces.
+ * `identityStartTicks` is internal and deliberately excluded.
+ */
+export const SNAPSHOT_METRIC_KEYS = [
+  "pid",
+  "command",
+  "ppid",
+  "processGroupId",
+  "sessionId",
+  "state",
+  "startTime",
+  "elapsedMs",
+  "cpuUserMs",
+  "cpuSystemMs",
+  "cpuPercent",
+  "rssBytes",
+  "virtualMemoryBytes",
+  "threadCount",
+  "voluntaryContextSwitches",
+  "nonVoluntaryContextSwitches",
+  "minorFaults",
+  "majorFaults",
+  "readBytes",
+  "writeBytes",
+  "readChars",
+  "writeChars",
+] as const;
+
+/**
+ * /proc/<pid>/io fields this gateway understands. Anything else in the
+ * file is ignored rather than guessed.
+ */
+export interface ProcIo {
+  rchar: number;
+  wchar: number;
+  syscr: number;
+  syscw: number;
+  readBytes: number;
+  writeBytes: number;
+}
+
+/** Parse /proc/<pid>/io. Missing keys come back as null, never as 0. */
+export function parseProcIo(text: string): Partial<ProcIo> {
+  const wanted: Record<string, keyof ProcIo> = {
+    rchar: "rchar",
+    wchar: "wchar",
+    syscr: "syscr",
+    syscw: "syscw",
+    read_bytes: "readBytes",
+    write_bytes: "writeBytes",
+  };
+  const out: Partial<ProcIo> = {};
+  for (const line of text.split(/\r?\n/)) {
+    const colon = line.indexOf(":");
+    if (colon <= 0) continue;
+    const key = wanted[line.slice(0, colon).trim()];
+    if (key === undefined) continue;
+    const n = parseFirstInt(line.slice(colon + 1).trim());
+    if (n !== null) out[key] = n;
+  }
+  return out;
 }
 
 export function readClockTicksPerSecond(): number | null {
@@ -129,7 +217,9 @@ export function readProcessSnapshot(pid: number, options: ProcReadOptions = {}):
   const root = `${procRoot}/${pid}`;
   let stat: ProcStat | null = null;
   let status = new Map<string, string>();
+  let io: Partial<ProcIo> = {};
   let unavailableReason: string | null = null;
+  let ioUnavailableReason: string | null = null;
 
   try {
     const parsed = parseProcStat(readFileSync(`${root}/stat`, "utf8"));
@@ -144,12 +234,23 @@ export function readProcessSnapshot(pid: number, options: ProcReadOptions = {}):
     } catch (err) {
       unavailableReason = errorReason(err);
     }
+    // /proc/<pid>/io is readable only by the owner (or with CAP_SYS_PTRACE),
+    // so an EACCES here is normal and must not be reported as a failure.
+    try {
+      io = parseProcIo(readFileSync(`${root}/io`, "utf8"));
+      if (Object.keys(io).length === 0) {
+        ioUnavailableReason = "/proc/<pid>/io contained no recognised counters";
+      }
+    } catch (err) {
+      ioUnavailableReason = errorReason(err);
+    }
   }
 
   const ticks = options.clockTicksPerSecond === undefined ? readClockTicksPerSecond() : options.clockTicksPerSecond;
   const uptimeSeconds = readUptime(procRoot);
   const source = `/proc/${pid}/stat`;
   const sourceStatus = `/proc/${pid}/status`;
+  const sourceIo = `/proc/${pid}/io`;
   const metric = <T>(value: T, provenance: Provenance, fieldSource: string): Metric<T> => ({ value, provenance, source: fieldSource });
   const unavailable = <T>(fieldSource: string, reason = unavailableReason ?? "Field is absent from this kernel procfs response"): Metric<T> => ({
     value: null,
@@ -166,7 +267,10 @@ export function readProcessSnapshot(pid: number, options: ProcReadOptions = {}):
       pid: metric(pid, "OBSERVED", "CAPS PROCESS_STARTED"), command: missing(), ppid: missing(), processGroupId: missing(), sessionId: missing(), state: missing(),
       startTime: missing(), elapsedMs: missing(), cpuUserMs: missing(), cpuSystemMs: missing(), cpuPercent: unavailable("DERIVED"),
       rssBytes: unavailable(sourceStatus), virtualMemoryBytes: unavailable(sourceStatus), threadCount: unavailable(sourceStatus),
-      voluntaryContextSwitches: unavailable(sourceStatus), nonVoluntaryContextSwitches: unavailable(sourceStatus), identityStartTicks: null,
+      voluntaryContextSwitches: unavailable(sourceStatus), nonVoluntaryContextSwitches: unavailable(sourceStatus),
+      minorFaults: unavailable(source), majorFaults: unavailable(source),
+      readBytes: unavailable(sourceIo), writeBytes: unavailable(sourceIo), readChars: unavailable(sourceIo), writeChars: unavailable(sourceIo),
+      identityStartTicks: null,
     };
   }
 
@@ -179,6 +283,10 @@ export function readProcessSnapshot(pid: number, options: ProcReadOptions = {}):
   const involuntary = parseFirstInt(status.get("nonvoluntary_ctxt_switches"));
   const vmRss = parseKilobytes(status.get("VmRSS"));
   const vmSize = parseKilobytes(status.get("VmSize"));
+  const ioOrUnavailable = (value: number | undefined): Metric<number> =>
+    value === undefined
+      ? unavailable(sourceIo, ioUnavailableReason ?? "Counter absent from /proc/<pid>/io")
+      : metric(value, "OBSERVED", sourceIo);
 
   return {
     timestamp,
@@ -199,6 +307,12 @@ export function readProcessSnapshot(pid: number, options: ProcReadOptions = {}):
     threadCount: threads === null ? metric(stat.threadCount, "OBSERVED", source) : metric(threads, "OBSERVED", sourceStatus),
     voluntaryContextSwitches: voluntary === null ? unavailable(sourceStatus) : metric(voluntary, "OBSERVED", sourceStatus),
     nonVoluntaryContextSwitches: involuntary === null ? unavailable(sourceStatus) : metric(involuntary, "OBSERVED", sourceStatus),
+    minorFaults: metric(stat.minorFaults, "OBSERVED", `${source} field minflt`),
+    majorFaults: metric(stat.majorFaults, "OBSERVED", `${source} field majflt`),
+    readBytes: ioOrUnavailable(io.readBytes),
+    writeBytes: ioOrUnavailable(io.writeBytes),
+    readChars: ioOrUnavailable(io.rchar),
+    writeChars: ioOrUnavailable(io.wchar),
     identityStartTicks: stat.startTicks,
   };
 }

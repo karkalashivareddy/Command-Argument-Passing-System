@@ -58,6 +58,12 @@ export interface ProcessSnapshot {
   threadCount: TelemetryMetric<number>;
   voluntaryContextSwitches: TelemetryMetric<number>;
   nonVoluntaryContextSwitches: TelemetryMetric<number>;
+  minorFaults: TelemetryMetric<number>;
+  majorFaults: TelemetryMetric<number>;
+  readBytes: TelemetryMetric<number>;
+  writeBytes: TelemetryMetric<number>;
+  readChars: TelemetryMetric<number>;
+  writeChars: TelemetryMetric<number>;
 }
 
 export type SessionStatus =
@@ -144,6 +150,29 @@ export interface HealthResponse {
   platform: string;
 }
 
+export interface WorkloadArgSpec {
+  name: string;
+  min: number;
+  max: number;
+  default: number;
+  unit: string;
+  description: string;
+}
+
+export interface WorkloadProfileCapability {
+  id: string;
+  label: string;
+  description: string;
+  observes: string[];
+  args: WorkloadArgSpec[];
+  executablePath: string;
+  executableRelativePath: string;
+  /** Probed on the server, never assumed by the client. */
+  available: boolean;
+  availabilityProvenance: "OBSERVED";
+  unavailableReason: string | null;
+}
+
 export interface CapabilitiesResponse {
   platform: string;
   engineAvailable: boolean;
@@ -153,7 +182,21 @@ export interface CapabilitiesResponse {
   workspace: string;
   redirection: { supported: boolean; modes: string[] };
   signals: { supported: boolean };
-  telemetry: { enabled: boolean; intervalMs: number; source: string; metrics: string[] };
+  workloads: {
+    count: number;
+    available: number;
+    profiles: WorkloadProfileCapability[];
+    limits: { maxDurationS: number; maxMemoryMib: number; maxIoMib: number; maxForkChildren: number };
+  };
+  telemetry: {
+    enabled: boolean;
+    intervalMs: number;
+    source: string;
+    metrics: string[];
+    perMetricProvenance: string;
+    /** Collected elsewhere or not at all. The UI must not imply coverage. */
+    notCollected: string[];
+  };
   bind: string;
 }
 

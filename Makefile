@@ -11,6 +11,16 @@ SRCS    := $(wildcard src/*.c)
 OBJS    := $(SRCS:src/%.c=$(BUILD)/%.o)
 DEPS    := $(OBJS:.o=.d)
 
+# Controlled first-party laboratory workloads (see docs/workload-lab.md).
+# They are real Linux programs built by this repository; the gateway
+# resolves them through explicit repository-relative paths and never
+# accepts an arbitrary executable path from the browser.
+WORKLOAD_DIR      := workloads
+WORKLOAD_BIN_DIR  := build/workloads
+WORKLOAD_SRCS     := $(wildcard $(WORKLOAD_DIR)/*.c)
+WORKLOAD_BINS     := $(patsubst $(WORKLOAD_DIR)/%.c,$(WORKLOAD_BIN_DIR)/%,$(WORKLOAD_SRCS))
+WL_CPPFLAGS       := -I$(WORKLOAD_DIR) -D_POSIX_C_SOURCE=200809L
+
 # Test harness
 TESTS   := tests/test_smoke.sh \
            tests/test_parser.sh \
@@ -25,6 +35,9 @@ TESTS   := tests/test_smoke.sh \
            tests/test_waitpolicy.sh
 HELPER  := $(BUILD)/status_probe
 
+# Controlled-workload tests (run the real workload binaries)
+WL_TESTS := tests/workloads/test_workloads.sh
+
 # Tests that need the status_probe helper binary
 HELPER_TESTS := *execution*|*exit_status*|*signals*|*monitor*
 
@@ -36,13 +49,32 @@ WAIT_TESTS  := *waitpolicy*
 SAN_TARGET := caps-asan
 SAN_FLAGS  := -fsanitize=address,undefined -fno-omit-frame-pointer
 
-all: $(TARGET)
+# Sanitizer build of every controlled workload
+WL_SAN_DIR   := build/workloads-asan
+WL_SAN_BINS  := $(patsubst $(WORKLOAD_DIR)/%.c,$(WL_SAN_DIR)/%,$(WORKLOAD_SRCS))
+
+all: $(TARGET) workloads
 
 $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 
 $(BUILD)/%.o: src/%.c | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+# ---------------------------------------------------------------- workloads
+# Each workload is an independent binary: no shared library, no coupling
+# to the CAPS engine.  `make` builds them so the gateway's capability
+# probe reports the truth instead of a guess.
+
+caps: $(TARGET)
+
+workloads: $(WORKLOAD_BINS)
+
+$(WORKLOAD_BIN_DIR)/%: $(WORKLOAD_DIR)/%.c $(WORKLOAD_DIR)/workload_common.h | $(WORKLOAD_BIN_DIR)
+	$(CC) $(WL_CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS)
+
+$(WORKLOAD_BIN_DIR):
+	mkdir -p $(WORKLOAD_BIN_DIR)
 
 $(HELPER): tests/helpers/status_probe.c | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
@@ -68,8 +100,17 @@ test: $(TARGET) $(HELPER) $(WAIT_HELPER)
 			$(HELPER_TESTS)) ./$$t ./$(TARGET) ./$(HELPER);; \
 			*) ./$$t ./$(TARGET);; \
 		esac; \
-	done; \
+		done; \
 	echo "ALL TESTS PASSED"
+
+# Controlled workloads are exercised against the real binaries so the
+# gateway's capability probe and the E2E suite observe the same program.
+test-workloads: workloads
+	@set -e; for t in $(WL_TESTS); do \
+		echo "== $$t =="; \
+		./$$t $(WORKLOAD_BIN_DIR); \
+	done; \
+	echo "ALL WORKLOAD TESTS PASSED"
 
 # AddressSanitizer + UBSan build (rebuilds sources directly into one binary)
 $(SAN_TARGET): $(SRCS) include/*.h
@@ -86,12 +127,29 @@ test-asan: $(SAN_TARGET) $(HELPER) $(WAIT_HELPER)
 	done; \
 	echo "ALL ASAN TESTS PASSED"
 
+# Sanitizer build of the controlled workloads, then the same test suite.
+# Leak detection matters most here: every workload owns a workspace and,
+# for the memory/mixed cases, an anonymous mapping.
+test-workloads-asan: $(WL_SAN_BINS)
+	@set -e; for t in $(WL_TESTS); do \
+		echo "== $$t (asan) =="; \
+		ASAN_OPTIONS=detect_leaks=1 ./$$t $(WL_SAN_DIR); \
+	done; \
+	echo "ALL WORKLOAD ASAN TESTS PASSED"
+
 clean:
 	rm -rf $(BUILD) $(TARGET) $(SAN_TARGET)
 
 -include $(DEPS)
 
-.PHONY: all run test test-asan clean web web-backend web-frontend web-install
+.PHONY: all caps workloads run test test-workloads test-asan \
+        test-workloads-asan clean web web-backend web-frontend web-install
+
+$(WL_SAN_DIR):
+	mkdir -p $(WL_SAN_DIR)
+
+$(WL_SAN_DIR)/%: $(WORKLOAD_DIR)/%.c $(WORKLOAD_DIR)/workload_common.h | $(WL_SAN_DIR)
+	$(CC) $(WL_CPPFLAGS) $(CFLAGS) $(SAN_FLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS)
 
 # Start the full observatory stack (backend + frontend dev servers)
 # Requires: make caps (C engine built), then run from repo root

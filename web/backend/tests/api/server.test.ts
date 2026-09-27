@@ -74,6 +74,98 @@ describeFx("CAPS gateway API (real engine)", () => {
     expect(body.limits.maxConcurrent).toBe(4);
     expect(body.telemetry.enabled).toBe(true);
     expect(body.telemetry.intervalMs).toBe(500);
+    // The advertised metric list must be the collector's real list.
+    expect(body.telemetry.metrics).toContain("rssBytes");
+    expect(body.telemetry.metrics).toContain("readBytes");
+    expect(body.telemetry.metrics).toContain("minorFaults");
+    expect(body.telemetry.metrics).not.toContain("identityStartTicks");
+  });
+
+  it("advertises the controlled workloads with an observed availability flag", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/capabilities" });
+    const body = res.json();
+    expect(body.workloads.limits).toEqual({
+      maxDurationS: 30,
+      maxMemoryMib: 256,
+      maxIoMib: 64,
+      maxForkChildren: 4,
+    });
+    expect(body.workloads.profiles.map((p: { id: string }) => p.id)).toEqual([
+      "caps_cpu_burn",
+      "caps_memory_burn",
+      "caps_io_burn",
+      "caps_mixed_burn",
+      "caps_fork_tree",
+    ]);
+    for (const profile of body.workloads.profiles) {
+      expect(profile.availabilityProvenance).toBe("OBSERVED");
+      expect(profile.executableRelativePath).toMatch(/^build\/workloads\//);
+      if (!profile.available) expect(profile.unavailableReason).toBeTruthy();
+    }
+    // The allowlist grows with the catalog, so the UI can offer them.
+    expect(body.allowlist).toContain("caps_cpu_burn");
+  });
+
+  it("rejects a workload argument outside the documented bound before spawning", async () => {
+    for (const args of [["0"], ["31"], ["3.5"], ["abc"], ["3", "999"]]) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { command: "caps_memory_burn", args },
+      });
+      // Either the workload binary is missing (403) or the argument is
+      // rejected (400). It must never be accepted and spawned.
+      expect([400, 403], `args=${args.join(" ")}`).toContain(res.statusCode);
+      expect(res.statusCode).toBe(400);
+    }
+  });
+
+  it("rejects unknown extra arguments and a too-short transport timeout", async () => {
+    const extra = await app.inject({
+      method: "POST",
+      url: "/api/sessions",
+      payload: { command: "caps_cpu_burn", args: ["3", "4"] },
+    });
+    expect(extra.statusCode).toBe(400);
+    expect(extra.json().error.code).toBe("WORKLOAD_ARGUMENT_REJECTED");
+
+    const short = await app.inject({
+      method: "POST",
+      url: "/api/sessions",
+      payload: { command: "caps_cpu_burn", args: ["20"], timeoutMs: 1000 },
+    });
+    expect(short.statusCode).toBe(400);
+    expect(short.json().error.code).toBe("TIMEOUT_TOO_SHORT");
+  });
+
+  it("runs a real controlled workload and observes the signal it targets", async () => {
+    const available = (await app.inject({ method: "GET", url: "/api/capabilities" })).json().workloads.profiles.find(
+      (p: { id: string }) => p.id === "caps_io_burn",
+    );
+    if (!available.available) {
+      // Honest skip: the binary has not been built in this environment.
+      expect(available.unavailableReason).toMatch(/make workloads/);
+      return;
+    }
+    const post = await app.inject({
+      method: "POST",
+      url: "/api/sessions",
+      payload: { command: "caps_io_burn", args: ["2", "2"], timeoutMs: 30_000 },
+    });
+    expect(post.statusCode).toBe(202);
+    const sid = post.json().sessionId as string;
+    const finished = await waitFor(app, sid, 30_000);
+    expect(finished.status).toBe("COMPLETED");
+    expect(finished.exitCode).toBe(0);
+
+    const replay = (await app.inject({ method: "GET", url: `/api/sessions/${sid}/replay` })).json();
+    const snapshots = replay.events.filter(
+      (e: { type: string }) => e.type === "process.snapshot",
+    ) as Array<{ payload: Record<string, { value: number | null }> }>;
+    expect(snapshots.length).toBeGreaterThan(0);
+    // The workload must have produced real, non-zero I/O character counters.
+    const maxWchar = Math.max(...snapshots.map((e) => e.payload.writeChars?.value ?? 0));
+    expect(maxWchar).toBeGreaterThan(0);
   });
 
   it("executes echo and records the full flight", async () => {

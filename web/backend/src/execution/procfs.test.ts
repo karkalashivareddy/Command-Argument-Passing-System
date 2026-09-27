@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { parseKilobytes, parseProcStat, parseProcStatus, ProcParseError, readProcessSnapshot } from "./procfs.js";
+import { parseKilobytes, parseProcIo, parseProcStat, parseProcStatus, ProcParseError, readProcessSnapshot, SNAPSHOT_METRIC_KEYS } from "./procfs.js";
 
 const roots: string[] = [];
 
@@ -13,6 +13,8 @@ function statLine(pid = 41, comm = "weird ) process name"): string {
   fields[1] = "7"; // ppid
   fields[2] = "8"; // pgrp
   fields[3] = "9"; // session
+  fields[7] = "1234"; // minflt
+  fields[9] = "6"; // majflt
   fields[11] = "10"; // utime
   fields[12] = "5"; // stime
   fields[17] = "2"; // num_threads
@@ -20,7 +22,12 @@ function statLine(pid = 41, comm = "weird ) process name"): string {
   return `${pid} (${comm}) ${fields.join(" ")}`;
 }
 
-function fixtureRoot(pid = 41, status = true): string {
+const IO_FIXTURE = [
+  "rchar: 3276879", "wchar: 3282724", "syscr: 412", "syscw: 402",
+  "read_bytes: 1068", "write_bytes: 0", "cancelled_write_bytes: 0", "",
+].join("\n");
+
+function fixtureRoot(pid = 41, status = true, io = true): string {
   const root = mkdtempSync(join(tmpdir(), "caps-procfs-"));
   roots.push(root);
   mkdirSync(join(root, String(pid)));
@@ -31,6 +38,7 @@ function fixtureRoot(pid = 41, status = true): string {
       "Name:\tprocess name", "State:\tS (sleeping)", "Pid:\t41", "PPid:\t7", "VmSize:\t1200 kB", "VmRSS:\t300 kB", "Threads:\t2", "voluntary_ctxt_switches:\t12", "nonvoluntary_ctxt_switches:\t3", "",
     ].join("\n"));
   }
+  if (io) writeFileSync(join(root, String(pid), "io"), IO_FIXTURE);
   return root;
 }
 
@@ -92,5 +100,73 @@ describe("procfs parsing and normalization", () => {
     const snapshot = readProcessSnapshot(41, { procRoot: root, clockTicksPerSecond: 100, nowMs: 1_000_000 });
     expect(snapshot.state).toMatchObject({ value: null, provenance: "UNAVAILABLE" });
     expect(snapshot.state.reason).toMatch(/did not match/i);
+  });
+});
+
+describe("/proc/<pid>/io and fault counters", () => {
+  it("parses only the counters it understands and ignores the rest", () => {
+    const io = parseProcIo(IO_FIXTURE);
+    expect(io).toEqual({
+      rchar: 3276879,
+      wchar: 3282724,
+      syscr: 412,
+      syscw: 402,
+      readBytes: 1068,
+      writeBytes: 0,
+    });
+    // cancelled_write_bytes is deliberately not surfaced.
+    expect(Object.keys(io)).not.toContain("cancelled_write_bytes");
+  });
+
+  it("omits absent counters instead of defaulting them to zero", () => {
+    expect(parseProcIo("rchar: 10\n")).toEqual({ rchar: 10 });
+    expect(parseProcIo("")).toEqual({});
+    expect(parseProcIo("syscr: not-a-number\n")).toEqual({});
+  });
+
+  it("reports character and block counters as OBSERVED with the procfs path", () => {
+    const root = fixtureRoot();
+    const snapshot = readProcessSnapshot(41, { procRoot: root, clockTicksPerSecond: 100, nowMs: 1_000_000 });
+    expect(snapshot.readChars).toEqual({ value: 3276879, provenance: "OBSERVED", source: "/proc/41/io" });
+    expect(snapshot.writeChars).toEqual({ value: 3282724, provenance: "OBSERVED", source: "/proc/41/io" });
+    // A page-cache-absorbed write is legitimately zero and must stay zero.
+    expect(snapshot.writeBytes).toEqual({ value: 0, provenance: "OBSERVED", source: "/proc/41/io" });
+    expect(snapshot.readBytes.value).toBe(1068);
+  });
+
+  it("reports page-fault counters from the stat record", () => {
+    const root = fixtureRoot();
+    const snapshot = readProcessSnapshot(41, { procRoot: root, clockTicksPerSecond: 100, nowMs: 1_000_000 });
+    expect(snapshot.minorFaults).toEqual({ value: 1234, provenance: "OBSERVED", source: "/proc/41/stat field minflt" });
+    expect(snapshot.majorFaults).toEqual({ value: 6, provenance: "OBSERVED", source: "/proc/41/stat field majflt" });
+  });
+
+  it("marks io counters UNAVAILABLE when procfs denies or omits the file", () => {
+    const noIo = fixtureRoot(41, true, false);
+    const snapshot = readProcessSnapshot(41, { procRoot: noIo, clockTicksPerSecond: 100, nowMs: 1_000_000 });
+    expect(snapshot.readChars).toMatchObject({ value: null, provenance: "UNAVAILABLE" });
+    expect(snapshot.readChars.reason).toBeTruthy();
+    // The rest of the snapshot is unaffected.
+    expect(snapshot.rssBytes.value).toBe(300 * 1024);
+  });
+
+  it("advertises exactly the metrics a snapshot carries", () => {
+    const root = fixtureRoot();
+    const snapshot = readProcessSnapshot(41, { procRoot: root, clockTicksPerSecond: 100, nowMs: 1_000_000 });
+    for (const key of SNAPSHOT_METRIC_KEYS) {
+      const metric = snapshot[key];
+      expect(metric, `capabilities must not advertise missing metric ${key}`).toBeDefined();
+      // The collector must really fill every advertised key, and an
+      // unavailable value must always carry a reason. cpuPercent is the
+      // canonical example: legitimately UNAVAILABLE on a first sample.
+      expect(["OBSERVED", "DERIVED", "UNAVAILABLE"], `metric ${key} has no provenance`).toContain(metric.provenance);
+      expect(typeof metric.source).toBe("string");
+      if (metric.provenance === "UNAVAILABLE") {
+        expect(metric.reason, `metric ${key} is unavailable without a reason`).toBeTruthy();
+        expect(metric.value).toBeNull();
+      }
+    }
+    // The internal identity token is never advertised.
+    expect(SNAPSHOT_METRIC_KEYS as readonly string[]).not.toContain("identityStartTicks");
   });
 });
