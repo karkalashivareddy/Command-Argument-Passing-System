@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 
 import { api, ApiError } from "../api/client";
 import { Button, Card, EmptyState, StatusDot } from "../components/ui";
-import { fmtDuration, shortId } from "../lib/format";
+import { fmtDuration, formatCount, shortId } from "../lib/format";
 import { STATUS_META } from "../lib/stages";
 import type { SessionComparison, SessionRecord } from "../types/observability";
 
@@ -22,6 +22,11 @@ function deltaLabel(delta: number | null, kind: "duration" | "count" | "percent"
   if (kind === "count") return `${sign}${abs}`;
   if (kind === "percent") return `${sign}${abs.toFixed(1)} pts`;
   return `${sign}${fmtBytes(abs)}`;
+}
+
+/** A delta is only defined when both sides observed the counter. */
+function pairedDelta(left: number | null, right: number | null): number | null {
+  return left === null || right === null ? null : right - left;
 }
 
 export default function ComparePage() {
@@ -129,6 +134,11 @@ export default function ComparePage() {
       { label: "Duration", left: cmp.left.durationMs === null ? "UNAVAILABLE" : fmtDuration(cmp.left.durationMs), right: cmp.right.durationMs === null ? "UNAVAILABLE" : fmtDuration(cmp.right.durationMs), delta: deltaLabel(cmp.deltas.durationMs, "duration") },
       { label: "Peak RSS", left: fmtBytes(cmp.left.peakRssBytes), right: fmtBytes(cmp.right.peakRssBytes), delta: deltaLabel(cmp.deltas.peakRssDeltaBytes, "bytes") },
       { label: "CPU time", left: cmp.left.cpuTimeMs === null ? "UNAVAILABLE" : fmtDuration(cmp.left.cpuTimeMs), right: cmp.right.cpuTimeMs === null ? "UNAVAILABLE" : fmtDuration(cmp.right.cpuTimeMs), delta: deltaLabel(cmp.deltas.cpuTimeDeltaMs, "duration") },
+      { label: "Peak major faults", left: cmp.left.peakMajorFaults === null ? "UNAVAILABLE" : formatCount(cmp.left.peakMajorFaults), right: cmp.right.peakMajorFaults === null ? "UNAVAILABLE" : formatCount(cmp.right.peakMajorFaults), delta: deltaLabel(cmp.deltas.majorFaultsDelta, "count") },
+      { label: "rchar characters", left: fmtBytes(cmp.left.totalRcharBytes), right: fmtBytes(cmp.right.totalRcharBytes), delta: deltaLabel(cmp.deltas.rcharDeltaBytes, "bytes") },
+      { label: "wchar characters", left: fmtBytes(cmp.left.totalWcharBytes), right: fmtBytes(cmp.right.totalWcharBytes), delta: deltaLabel(cmp.deltas.wcharDeltaBytes, "bytes") },
+      { label: "Block read", left: fmtBytes(cmp.left.totalReadBytes), right: fmtBytes(cmp.right.totalReadBytes), delta: deltaLabel(pairedDelta(cmp.left.totalReadBytes, cmp.right.totalReadBytes), "bytes") },
+      { label: "Block write", left: fmtBytes(cmp.left.totalWriteBytes), right: fmtBytes(cmp.right.totalWriteBytes), delta: deltaLabel(pairedDelta(cmp.left.totalWriteBytes, cmp.right.totalWriteBytes), "bytes") },
       { label: "Events", left: String(cmp.left.eventCount), right: String(cmp.right.eventCount), delta: deltaLabel(cmp.deltas.eventDelta, "count") },
       { label: "Snapshots", left: String(cmp.left.snapshotCount), right: String(cmp.right.snapshotCount), delta: deltaLabel(cmp.deltas.snapshotDelta, "count") },
     ];

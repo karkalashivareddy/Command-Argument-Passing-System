@@ -1,21 +1,47 @@
 import { motion } from "motion/react";
 import { ChevronLeft, ChevronRight, Pause, Play, RotateCcw, Square, Undo2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { CanonicalEvent, SessionStatus } from "../../types/observability";
 
 /**
  * Replays a session's recorded events against wall-clock speed. The UI shows
  * exactly the events that actually happened — nothing interpolated —
- * scrubbed through a speed-controlled clock.
+ * scrubbed through a speed-controlled clock. The cursor is shared: the parent
+ * can move it from a chart or a peak card through seekMs.
  */
-export function ReplayPanel({ events, status, onVisible, onCursorMs }: { events: CanonicalEvent[]; status: SessionStatus; onVisible?: (evs: CanonicalEvent[]) => void; onCursorMs?: (ms: number) => void }) {
+export interface ReplayPanelProps {
+  events: CanonicalEvent[];
+  status: SessionStatus;
+  onVisible?: (evs: CanonicalEvent[]) => void;
+  onCursorMs?: (ms: number) => void;
+  seekMs?: number | null;
+  /**
+   * When supplied, playback is controlled by the parent. The 3D view passes the
+   * keyboard state here, so Space toggles the same playback the button toggles
+   * instead of showing a toast that says playback lives somewhere else.
+   */
+  playing?: boolean;
+  onPlayingChange?: (playing: boolean) => void;
+}
+
+export function ReplayPanel({ events, status, onVisible, onCursorMs, seekMs, playing: playingProp, onPlayingChange }: ReplayPanelProps) {
   const [rate, setRate] = useState(2);
-  const [playing, setPlaying] = useState(true);
+  const [selfPlaying, setSelfPlaying] = useState(true);
   const [cursorSec, setCursorSec] = useState(0);
   const [stepCount, setStepCount] = useState<number | null>(null);
   const raf = useRef<number>(0);
   const last = useRef<number>(0);
+  const lastSeek = useRef<number | null>(null);
+
+  const playing = playingProp ?? selfPlaying;
+  const setPlaying = useCallback(
+    (next: boolean) => {
+      setSelfPlaying(next);
+      onPlayingChange?.(next);
+    },
+    [onPlayingChange],
+  );
 
   const totalEvents = events.length;
   const totalMs = useMemo(() => {
@@ -27,6 +53,16 @@ export function ReplayPanel({ events, status, onVisible, onCursorMs }: { events:
     setCursorSec(0);
     setStepCount(null);
   }, [totalEvents]);
+
+  // A chart or peak card moved the shared cursor: follow it here and pause.
+  useEffect(() => {
+    if (seekMs === null || seekMs === undefined) return;
+    if (lastSeek.current === seekMs) return;
+    lastSeek.current = seekMs;
+    setPlaying(false);
+    setStepCount(null);
+    setCursorSec(Math.max(0, seekMs / 1000));
+  }, [seekMs]);
 
   useEffect(() => {
     onCursorMs?.(Math.round(cursorSec * 1000));
@@ -68,6 +104,8 @@ export function ReplayPanel({ events, status, onVisible, onCursorMs }: { events:
     const next = Math.max(0, Math.min(totalEvents, count));
     setPlaying(false);
     setStepCount(next);
+    // The shared cursor follows the step, so "jump to end" leaves the reader at
+    // the end of the record instead of showing every event at t=0.
     if (next === 0 || events.length === 0) {
       setCursorSec(0);
     } else {
@@ -84,7 +122,7 @@ export function ReplayPanel({ events, status, onVisible, onCursorMs }: { events:
           <button
             onClick={() => {
               setStepCount(null);
-              setPlaying((p) => !p);
+              setPlaying(!playing);
             }}
             className="flex h-8 w-8 items-center justify-center rounded-[var(--r-sm)] border border-[var(--line-1)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
             aria-label={playing ? "Pause replay" : "Play replay"}
@@ -93,6 +131,7 @@ export function ReplayPanel({ events, status, onVisible, onCursorMs }: { events:
           </button>
           <button
             onClick={() => {
+              lastSeek.current = null;
               setCursorSec(0);
               setStepCount(null);
               setPlaying(true);
@@ -119,12 +158,9 @@ export function ReplayPanel({ events, status, onVisible, onCursorMs }: { events:
             <ChevronRight className="h-3.5 w-3.5" />
           </button>
           <button
-            onClick={() => {
-              setPlaying(false);
-              setStepCount(totalEvents);
-              onVisible?.(events);
-            }}
-            className="flex h-8 items-center gap-1.5 rounded-[var(--r-sm)] border border-[var(--line-1)] bg-[var(--bg-2)] px-2.5 text-[11.5px] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
+            type="button"
+            onClick={() => stepTo(totalEvents)}
+            className="flex h-8 items-center gap-1.5 rounded-[var(--r-sm)] border border-[var(--line-1)] bg-[var(--bg-2)] px-2.5 text-[11.5px] text-[var(--fg-1)] transition-colors hover:border-[var(--accent)]"
           >
             <Square className="h-3 w-3" /> jump to end
           </button>

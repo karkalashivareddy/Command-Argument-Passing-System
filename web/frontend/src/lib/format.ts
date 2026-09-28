@@ -27,6 +27,32 @@ export function fmtNumber(n: number | null | undefined): string {
   return new Intl.NumberFormat().format(n);
 }
 
+/** Telemetry display units. Every one states what it actually measures. */
+export function formatMiB(bytes: number): string {
+  if (!Number.isFinite(bytes)) return "—";
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MiB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${bytes.toFixed(0)} B`;
+}
+
+export function formatKibPerSec(bytesPerSec: number): string {
+  if (!Number.isFinite(bytesPerSec)) return "—";
+  if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / (1024 * 1024)).toFixed(2)} MiB/s`;
+  if (bytesPerSec >= 1024) return `${(bytesPerSec / 1024).toFixed(1)} KiB/s`;
+  return `${bytesPerSec.toFixed(0)} B/s`;
+}
+
+export function formatPercent(value: number): string {
+  if (!Number.isFinite(value)) return "—";
+  return `${value.toFixed(1)}%`;
+}
+
+export function formatCount(value: number): string {
+  if (!Number.isFinite(value)) return "—";
+  if (Number.isInteger(value)) return new Intl.NumberFormat().format(value);
+  return value.toFixed(1);
+}
+
 export function exitStatusLabel(exitCode: number | null, signal: number | null): string {
   if (signal !== null && signal > 0) {
     return `signal ${signal} (${signalName(signal)})`;

@@ -9,6 +9,7 @@ const ExecutePage = lazy(() => import("./pages/ExecutePage"));
 const LivePage = lazy(() => import("./pages/LivePage"));
 const ProcessesPage = lazy(() => import("./pages/ProcessesPage"));
 const ExecutionPage = lazy(() => import("./pages/ExecutionPage"));
+const ProcessSpacePage = lazy(() => import("./pages/ProcessSpacePage"));
 const ArgumentsPage = lazy(() => import("./pages/ArgumentsPage"));
 const HistoryPage = lazy(() => import("./pages/HistoryPage"));
 const AnalyticsPage = lazy(() => import("./pages/AnalyticsPage"));
@@ -40,6 +41,7 @@ export function App() {
           <Route path="/live" element={<LivePage />} />
           <Route path="/processes" element={<ProcessesPage />} />
           <Route path="/execution/:id" element={<ExecutionPage />} />
+          <Route path="/execution/:id/3d" element={<ProcessSpacePage />} />
           <Route path="/arguments/:id" element={<ArgumentsPage />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/analytics" element={<AnalyticsPage />} />

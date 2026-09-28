@@ -102,17 +102,6 @@ export class ExecutionRegistry {
     return out;
   }
 
-  /** Only CAPS-reported child PIDs are eligible for procfs sampling. */
-  listTelemetryTargets(): Array<{ sessionId: string; pid: number }> {
-    const out: Array<{ sessionId: string; pid: number }> = [];
-    for (const s of this.sessions.values()) {
-      if (s.childPid !== null && s.processStartedAt !== null && !s.processReaped) {
-        out.push({ sessionId: s.sessionId, pid: s.childPid });
-      }
-    }
-    return out;
-  }
-
   /** Sweep sessions that stalled without a live process (defensive cleanup). */
   sweep(now = Date.now(), staleMs = 120_000): string[] {
     const stale: string[] = [];

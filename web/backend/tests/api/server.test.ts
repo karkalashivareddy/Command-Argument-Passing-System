@@ -77,8 +77,42 @@ describeFx("CAPS gateway API (real engine)", () => {
     // The advertised metric list must be the collector's real list.
     expect(body.telemetry.metrics).toContain("rssBytes");
     expect(body.telemetry.metrics).toContain("readBytes");
+    expect(body.telemetry.metrics).toContain("rcharBytes");
+    expect(body.telemetry.metrics).toContain("wcharBytesPerSec");
+    expect(body.telemetry.metrics).toContain("cpuTimeMs");
     expect(body.telemetry.metrics).toContain("minorFaults");
     expect(body.telemetry.metrics).not.toContain("identityStartTicks");
+    // capsEnginePid comes from the gateway child handle, not from procfs.
+    expect(body.telemetry.metrics).toContain("capsEnginePid");
+    expect(body.telemetry.collectedMetrics).not.toContain("capsEnginePid");
+    expect(body.telemetry.derivedRateMetrics).toContain("cpuPercent");
+    expect(body.telemetry.derivedRateMetrics).toContain("wcharBytesPerSec");
+  });
+
+  it("reports telemetry categories with honest supported/unsupported coverage", async () => {
+    const body = (await app.inject({ method: "GET", url: "/api/capabilities" })).json();
+    const categories = body.telemetry.categories as Array<{ id: string; supported: boolean; metrics: string[]; detail: string }>;
+    const byId = new Map(categories.map((c) => [c.id, c]));
+    for (const id of ["cpu", "memory", "pageFaults", "io", "threads", "contextSwitches", "identity"]) {
+      expect(byId.get(id), `missing telemetry category ${id}`).toBeDefined();
+      expect(byId.get(id)!.supported).toBe(true);
+      expect(byId.get(id)!.detail).toBeTruthy();
+    }
+    // Every advertised metric is claimed by exactly one category.
+    const claimed = categories.flatMap((c) => c.metrics).sort();
+    expect(claimed).toEqual([...body.telemetry.metrics].sort());
+    // Process CPU must never be described as system-wide CPU.
+    expect(byId.get("cpu")!.detail).toMatch(/process CPU, never system-wide CPU/);
+    expect(byId.get("io")!.detail).toMatch(/not disk throughput/);
+
+    const unsupported = new Map((body.telemetry.unsupported as Array<{ id: string; supported: boolean; reason: string }>).map((c) => [c.id, c]));
+    for (const id of ["syscallTracing", "ebpf", "cgroups", "networkIo", "fileDescriptors"]) {
+      expect(unsupported.get(id), `missing unsupported telemetry category ${id}`).toBeDefined();
+      expect(unsupported.get(id)!.supported).toBe(false);
+      expect(unsupported.get(id)!.reason).toBeTruthy();
+    }
+    // Nothing may appear in both lists.
+    for (const id of unsupported.keys()) expect(byId.has(id)).toBe(false);
   });
 
   it("advertises the controlled workloads with an observed availability flag", async () => {
@@ -161,11 +195,20 @@ describeFx("CAPS gateway API (real engine)", () => {
     const replay = (await app.inject({ method: "GET", url: `/api/sessions/${sid}/replay` })).json();
     const snapshots = replay.events.filter(
       (e: { type: string }) => e.type === "process.snapshot",
-    ) as Array<{ payload: Record<string, { value: number | null }> }>;
+    ) as Array<{ payload: Record<string, { value: number | null; provenance: string }> }>;
     expect(snapshots.length).toBeGreaterThan(0);
-    // The workload must have produced real, non-zero I/O character counters.
-    const maxWchar = Math.max(...snapshots.map((e) => e.payload.writeChars?.value ?? 0));
+    // The workload must have produced real, non-zero syscall-layer counters.
+    const maxWchar = Math.max(...snapshots.map((e) => e.payload.wcharBytes?.value ?? 0));
     expect(maxWchar).toBeGreaterThan(0);
+    // The first sample cannot know a rate, and must say so instead of guessing.
+    const first = snapshots[0]!.payload;
+    expect(first.rcharBytesPerSec).toMatchObject({ value: null, provenance: "UNAVAILABLE" });
+    expect(first.cpuPercent).toMatchObject({ value: null, provenance: "UNAVAILABLE" });
+    // Once two samples exist, a rate is a real measurement of that interval.
+    if (snapshots.length > 1) {
+      const later = snapshots.slice(1).map((e) => e.payload.wcharBytesPerSec?.value ?? 0);
+      expect(later.some((value) => value > 0)).toBe(true);
+    }
   });
 
   it("executes echo and records the full flight", async () => {
@@ -329,11 +372,21 @@ describeFx("CAPS gateway API (real engine)", () => {
     await app.inject({ method: "POST", url: `/api/sessions/${sid}/terminate`, payload: { signal: "SIGINT" } });
     expect((await waitFor(app, sid)).status).toBe("CANCELLED");
     const finalReplay = await app.inject({ method: "GET", url: `/api/sessions/${sid}/replay` });
-    const finalEvents = finalReplay.json().events as Array<{ type: string }>;
+    const finalEvents = finalReplay.json().events as Array<{ type: string; sequence: number }>;
     const countAfterExit = finalEvents.filter((event) => event.type === "process.snapshot").length;
     await new Promise((resolve) => setTimeout(resolve, 650));
     const laterReplay = await app.inject({ method: "GET", url: `/api/sessions/${sid}/replay` });
-    expect((laterReplay.json().events as Array<{ type: string }>).filter((event) => event.type === "process.snapshot")).toHaveLength(countAfterExit);
+    const laterEvents = laterReplay.json().events as Array<{ type: string; sequence: number }>;
+    expect(laterEvents.filter((event) => event.type === "process.snapshot")).toHaveLength(countAfterExit);
+    // Nothing at all may be appended after the terminal event: no telemetry
+    // escapes past the end of the execution.
+    const terminalIndex = laterEvents.findIndex((event) => event.type === "execution.completed");
+    expect(terminalIndex).toBeGreaterThan(-1);
+    expect(terminalIndex).toBe(laterEvents.length - 1);
+    // Sequence stays strictly ascending with no gaps.
+    for (let i = 1; i < laterEvents.length; i++) {
+      expect(laterEvents[i]!.sequence).toBeGreaterThan(laterEvents[i - 1]!.sequence);
+    }
   });
 
   it("times out long executions", async () => {
@@ -495,6 +548,13 @@ describeFx("CAPS gateway API (real engine)", () => {
     expect(res.body).toContain("## Process resources (observed)");
     expect(res.body).toContain("redirection.opened");
     expect(res.body).toContain("UNAVAILABLE");
+    // The report must state the new telemetry and the limits of this collector.
+    expect(res.body).toContain("Peak page faults: minor");
+    expect(res.body).toContain("Syscall I/O totals (rchar/wchar)");
+    expect(res.body).toContain("Block-device I/O totals");
+    expect(res.body).toContain("not disk throughput");
+    expect(res.body).toContain("a rate needs two valid samples");
+    expect(res.body).toContain("Syscall tracing, eBPF, cgroup accounting, network I/O");
   });
 
   it("reports command profiles over the persisted store", async () => {

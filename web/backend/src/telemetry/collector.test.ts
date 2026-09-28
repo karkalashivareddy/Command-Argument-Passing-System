@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { parseKilobytes, parseProcIo, parseProcStat, parseProcStatus, ProcParseError, readProcessSnapshot, SNAPSHOT_METRIC_KEYS } from "./procfs.js";
+import { markUnavailable, parseKilobytes, parseProcIo, parseProcStat, parseProcStatus, ProcParseError, readProcessSnapshot } from "./collector.js";
+import { SNAPSHOT_METRIC_KEYS } from "./types.js";
 
 const roots: string[] = [];
 
@@ -74,6 +75,9 @@ describe("procfs parsing and normalization", () => {
     expect(snapshot.elapsedMs).toMatchObject({ value: 5000, provenance: "DERIVED" });
     expect(snapshot.cpuUserMs).toMatchObject({ value: 100, provenance: "DERIVED" });
     expect(snapshot.cpuSystemMs.value).toBe(50);
+    // Total CPU time is the sum of the same sample, never a separate read.
+    expect(snapshot.cpuTimeMs).toMatchObject({ value: 150, provenance: "DERIVED" });
+    expect(snapshot.cpuTimeMs.source).toMatch(/utime \+ stime/);
     expect(snapshot.rssBytes).toMatchObject({ value: 307200, provenance: "OBSERVED" });
     expect(snapshot.virtualMemoryBytes.value).toBe(1_228_800);
     expect(snapshot.threadCount.value).toBe(2);
@@ -124,11 +128,11 @@ describe("/proc/<pid>/io and fault counters", () => {
     expect(parseProcIo("syscr: not-a-number\n")).toEqual({});
   });
 
-  it("reports character and block counters as OBSERVED with the procfs path", () => {
+  it("reports syscall-layer character counters and block counters as OBSERVED with the procfs path", () => {
     const root = fixtureRoot();
     const snapshot = readProcessSnapshot(41, { procRoot: root, clockTicksPerSecond: 100, nowMs: 1_000_000 });
-    expect(snapshot.readChars).toEqual({ value: 3276879, provenance: "OBSERVED", source: "/proc/41/io" });
-    expect(snapshot.writeChars).toEqual({ value: 3282724, provenance: "OBSERVED", source: "/proc/41/io" });
+    expect(snapshot.rcharBytes).toEqual({ value: 3276879, provenance: "OBSERVED", source: "/proc/41/io" });
+    expect(snapshot.wcharBytes).toEqual({ value: 3282724, provenance: "OBSERVED", source: "/proc/41/io" });
     // A page-cache-absorbed write is legitimately zero and must stay zero.
     expect(snapshot.writeBytes).toEqual({ value: 0, provenance: "OBSERVED", source: "/proc/41/io" });
     expect(snapshot.readBytes.value).toBe(1068);
@@ -141,13 +145,67 @@ describe("/proc/<pid>/io and fault counters", () => {
     expect(snapshot.majorFaults).toEqual({ value: 6, provenance: "OBSERVED", source: "/proc/41/stat field majflt" });
   });
 
+  it("derives one stable start time for the same process across samples", () => {
+    // The start time is an identity value: the frontend compares it across
+    // samples to refuse a recycled PID. Deriving it from the wall clock made it
+    // drift by a millisecond between samples of one process, so the guard
+    // rejected the process's own samples. It must be a pure function of the
+    // kernel's btime and start ticks, whatever the wall clock says.
+    const root = fixtureRoot();
+    writeFileSync(join(root, "stat"), ["cpu  1 2 3", "btime 1700000000", "processes 42", ""].join("\n"));
+    const first = readProcessSnapshot(41, { procRoot: root, clockTicksPerSecond: 100, nowMs: 1_000_000 });
+    // A later sample: uptime and the wall clock have both moved on.
+    writeFileSync(join(root, "uptime"), "10.53 2.00\n");
+    const second = readProcessSnapshot(41, { procRoot: root, clockTicksPerSecond: 100, nowMs: 1_000_537 });
+
+    expect(first.startTime.value).toBe("2023-11-14T22:13:25.000Z");
+    expect(second.startTime.value).toBe(first.startTime.value);
+    // The stable path is a pure function of kernel values, not of "now".
+    expect(first.startTime.source).toContain("btime");
+    // Elapsed is a duration, so it is still expected to grow between samples.
+    expect(second.elapsedMs.value).toBeGreaterThan(first.elapsedMs.value as number);
+  });
+
+  it("keeps the wall-clock fallback when the kernel does not publish btime", () => {
+    const root = fixtureRoot();
+    const snapshot = readProcessSnapshot(41, { procRoot: root, clockTicksPerSecond: 100, nowMs: 1_000_000 });
+    expect(snapshot.startTime.value).toBe(new Date(1_000_000 - ((10 - 500 / 100) * 1000)).toISOString());
+    expect(snapshot.startTime.provenance).toBe("DERIVED");
+  });
+
   it("marks io counters UNAVAILABLE when procfs denies or omits the file", () => {
     const noIo = fixtureRoot(41, true, false);
     const snapshot = readProcessSnapshot(41, { procRoot: noIo, clockTicksPerSecond: 100, nowMs: 1_000_000 });
-    expect(snapshot.readChars).toMatchObject({ value: null, provenance: "UNAVAILABLE" });
-    expect(snapshot.readChars.reason).toBeTruthy();
+    expect(snapshot.rcharBytes).toMatchObject({ value: null, provenance: "UNAVAILABLE" });
+    expect(snapshot.rcharBytes.reason).toBeTruthy();
     // The rest of the snapshot is unaffected.
     expect(snapshot.rssBytes.value).toBe(300 * 1024);
+  });
+
+  it("leaves every rate UNAVAILABLE on a freshly collected sample", () => {
+    const root = fixtureRoot();
+    const snapshot = readProcessSnapshot(41, { procRoot: root, clockTicksPerSecond: 100, nowMs: 1_000_000 });
+    for (const key of ["cpuPercent", "minorFaultsPerSec", "majorFaultsPerSec", "rcharBytesPerSec", "wcharBytesPerSec", "readBytesPerSec", "writeBytesPerSec"] as const) {
+      expect(snapshot[key], `${key} must not be invented on the first sample`).toMatchObject({ value: null, provenance: "UNAVAILABLE" });
+      expect(snapshot[key].reason).toMatch(/two valid samples/i);
+    }
+  });
+
+  it("keeps the metric key list, the snapshot, and the unavailable pass in agreement", () => {
+    const root = fixtureRoot();
+    const observed = readProcessSnapshot(41, { procRoot: root, clockTicksPerSecond: 100, nowMs: 1_000_000 });
+    const payloadKeys = Object.keys(observed).filter((key) => key !== "timestamp" && key !== "identityStartTicks").sort();
+    expect(payloadKeys).toEqual([...SNAPSHOT_METRIC_KEYS].sort());
+
+    const blank = readProcessSnapshot(99, { procRoot: root, clockTicksPerSecond: 100, nowMs: 1_000_000 });
+    expect(Object.keys(blank).filter((key) => key !== "timestamp" && key !== "identityStartTicks").sort()).toEqual([...SNAPSHOT_METRIC_KEYS].sort());
+
+    // markUnavailable is driven by the same list, so a new metric can never
+    // keep claiming to be observed after a rejected identity.
+    const rejected = markUnavailable(observed, "identity rejected");
+    for (const key of SNAPSHOT_METRIC_KEYS) {
+      expect(rejected[key], `${key} survived the unavailable pass`).toMatchObject({ value: null, provenance: "UNAVAILABLE", reason: "identity rejected" });
+    }
   });
 
   it("advertises exactly the metrics a snapshot carries", () => {

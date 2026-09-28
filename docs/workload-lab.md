@@ -32,7 +32,7 @@ and mixed workloads own an anonymous mapping, so a leak would be a real bug.
 | --- | --- | --- |
 | `caps_cpu_burn` | `[seconds]` | `cpuUserMs`, `cpuSystemMs`, `cpuPercent` |
 | `caps_memory_burn` | `[seconds] [mib]` | `rssBytes`, `virtualMemoryBytes`, `minorFaults` |
-| `caps_io_burn` | `[seconds] [mib]` | `readChars`, `writeChars`, `readBytes`, `writeBytes` |
+| `caps_io_burn` | `[seconds] [mib]` | `rcharBytes`, `wcharBytes`, `readBytes`, `writeBytes` |
 | `caps_mixed_burn` | `[seconds] [mib] [io-mib]` | CPU, RSS, and I/O correlated on one PID |
 | `caps_fork_tree` | `[seconds] [children]` | real descendant topology |
 
@@ -101,7 +101,7 @@ for the profiles, and its bounds mirror `workload_common.h` exactly.
 `/proc/<pid>/io` exposes two different families, and the gateway reports both
 without pretending they are the same thing:
 
-- `readChars` / `writeChars` (`rchar`, `wchar`) count bytes moved through the
+- `rcharBytes` / `wcharBytes` (kernel `rchar`, `wchar`) count bytes moved through the
   syscall layer. A real read/write loop always moves them.
 - `readBytes` / `writeBytes` count bytes that reached a block device. While
   the page cache absorbs writes these legitimately stay `0`.

@@ -52,6 +52,9 @@ export interface ProcessSnapshot {
   elapsedMs: TelemetryMetric<number>;
   cpuUserMs: TelemetryMetric<number>;
   cpuSystemMs: TelemetryMetric<number>;
+  /** cpuUserMs + cpuSystemMs; OBSERVED total CPU time of the process. */
+  cpuTimeMs: TelemetryMetric<number>;
+  /** Process CPU utilization as a percentage of one CPU core. */
   cpuPercent: TelemetryMetric<number>;
   rssBytes: TelemetryMetric<number>;
   virtualMemoryBytes: TelemetryMetric<number>;
@@ -60,10 +63,20 @@ export interface ProcessSnapshot {
   nonVoluntaryContextSwitches: TelemetryMetric<number>;
   minorFaults: TelemetryMetric<number>;
   majorFaults: TelemetryMetric<number>;
+  minorFaultsPerSec: TelemetryMetric<number>;
+  majorFaultsPerSec: TelemetryMetric<number>;
+  /** Block-device read bytes; not a measure of all I/O. */
   readBytes: TelemetryMetric<number>;
+  /** Block-device write bytes; not a measure of all I/O. */
   writeBytes: TelemetryMetric<number>;
-  readChars: TelemetryMetric<number>;
-  writeChars: TelemetryMetric<number>;
+  /** Characters read by read()/pread() including page cache; not disk throughput. */
+  rcharBytes: TelemetryMetric<number>;
+  /** Characters written by write()/pwrite() including page cache; not disk throughput. */
+  wcharBytes: TelemetryMetric<number>;
+  readBytesPerSec: TelemetryMetric<number>;
+  writeBytesPerSec: TelemetryMetric<number>;
+  rcharBytesPerSec: TelemetryMetric<number>;
+  wcharBytesPerSec: TelemetryMetric<number>;
 }
 
 export type SessionStatus =
@@ -140,6 +153,15 @@ export interface AnalyticsOverview {
     cpuTimeExecutions: number;
     averageCpuPercent: number | null;
     cpuPercentSamples: number;
+    averageMinorFaults: number | null;
+    averageMajorFaults: number | null;
+    maxMajorFaults: number | null;
+    majorFaultSamples: number;
+    averageRcharBytesPerSec: number | null;
+    maxRcharBytesPerSec: number | null;
+    averageWcharBytesPerSec: number | null;
+    maxWcharBytesPerSec: number | null;
+    ioRateSamples: number;
   };
 }
 
@@ -192,12 +214,30 @@ export interface CapabilitiesResponse {
     enabled: boolean;
     intervalMs: number;
     source: string;
+    /** Every metric key a persisted process.snapshot can carry. */
     metrics: string[];
     perMetricProvenance: string;
     /** Collected elsewhere or not at all. The UI must not imply coverage. */
     notCollected: string[];
+    /** Metric keys the collector actually reads out of procfs. */
+    collectedMetrics: string[];
+    /** Metric keys derived by differencing two valid samples. */
+    derivedRateMetrics: string[];
+    firstSampleRule: string;
+    identityVerification: string;
+    categories: TelemetryCategoryCapability[];
+    unsupported: TelemetryCategoryCapability[];
   };
   bind: string;
+}
+
+export interface TelemetryCategoryCapability {
+  id: string;
+  label: string;
+  detail: string;
+  supported: boolean;
+  metrics: string[];
+  reason?: string;
 }
 
 export interface CreateSessionRequest {
@@ -260,6 +300,17 @@ export interface RuntimePeaks {
   medianRssBytes: number | null;
   peakCpuPercent: RuntimePeakPoint | null;
   cpuTimeMs: number | null;
+  peakMinorFaults: RuntimePeakPoint | null;
+  peakMajorFaults: RuntimePeakPoint | null;
+  peakMinorFaultsPerSec: RuntimePeakPoint | null;
+  peakMajorFaultsPerSec: RuntimePeakPoint | null;
+  peakRcharBytesPerSec: RuntimePeakPoint | null;
+  peakWcharBytesPerSec: RuntimePeakPoint | null;
+  /** Cumulative counters: the last valid observation is the session total. */
+  totalRcharBytes: number | null;
+  totalWcharBytes: number | null;
+  totalReadBytes: number | null;
+  totalWriteBytes: number | null;
 }
 
 export interface CommandProfile {
@@ -294,6 +345,12 @@ export interface ComparisonSide {
   medianRssBytes: number | null;
   peakCpuPercent: number | null;
   cpuTimeMs: number | null;
+  peakMinorFaults: number | null;
+  peakMajorFaults: number | null;
+  totalRcharBytes: number | null;
+  totalWcharBytes: number | null;
+  totalReadBytes: number | null;
+  totalWriteBytes: number | null;
 }
 
 export interface SessionComparison {
@@ -312,5 +369,47 @@ export interface SessionComparison {
     snapshotDelta: number;
     peakRssDeltaBytes: number | null;
     cpuTimeDeltaMs: number | null;
+    majorFaultsDelta: number | null;
+    rcharDeltaBytes: number | null;
+    wcharDeltaBytes: number | null;
   };
+}
+
+/**
+ * Future 3D contract: one frozen, serializable description of a process at a
+ * point in execution time. The 3D scene is not implemented yet; this type is
+ * the seam it will read, so no 3D code has to invent its own telemetry.
+ */
+export interface ProcessVisualState {
+  sessionId: string;
+  sequence: number;
+  timestamp: string;
+  /** Milliseconds since the first persisted sample of this session. */
+  atMs: number;
+  pid: number | null;
+  capsEnginePid: number | null;
+  command: string | null;
+  state: string | null;
+  /** Normalized 0..1 values, ready to scale geometry without a second parse. */
+  cpu: number | null;
+  memory: number | null;
+  io: number | null;
+  faults: number | null;
+  /** Raw observed values behind the normalized ones, for labels and tooltips. */
+  raw: {
+    cpuPercent: number | null;
+    rssBytes: number | null;
+    rcharBytesPerSec: number | null;
+    wcharBytesPerSec: number | null;
+    readBytesPerSec: number | null;
+    writeBytesPerSec: number | null;
+    minorFaults: number | null;
+    majorFaults: number | null;
+    /** DERIVED per-second rates, the values the fault lens actually reads. */
+    minorFaultsPerSec: number | null;
+    majorFaultsPerSec: number | null;
+    threadCount: number | null;
+  };
+  /** Why any of the above may be missing, verbatim from the backend. */
+  unavailable: Array<{ metric: string; reason: string }>;
 }

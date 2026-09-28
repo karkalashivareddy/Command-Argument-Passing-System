@@ -1,8 +1,23 @@
 import { GitFork, Radio, Timer } from "lucide-react";
 
 import type { CanonicalEvent, ProcessSnapshot } from "../../types/observability";
+import type { EvidenceIndex, EvidenceRole, ProcessIdentity } from "../../lib/evidenceCorrelation";
+import { nodeKeyForRole } from "../../lib/evidenceCorrelation";
 
-export function ProcessGraph({ events }: { events: CanonicalEvent[] }) {
+export interface ProcessGraphProps {
+  events: CanonicalEvent[];
+  /**
+   * Selection is optional so the same diagram can be embedded in a fallback
+   * where nothing may be selected. When an index is supplied, each identity
+   * node becomes a real selection control, using the same guarded identities
+   * the 3D view and the inspector use.
+   */
+  index?: EvidenceIndex;
+  selectedNodeKey?: string | null;
+  onSelect?: (identity: ProcessIdentity) => void;
+}
+
+export function ProcessGraph({ events, index, selectedNodeKey = null, onSelect }: ProcessGraphProps) {
   const started = events.find((event) => event.type === "process.started");
   const exited = events.find((event) => event.type === "process.exited");
   const execError = events.find((event) => event.type === "process.exec_error");
@@ -16,14 +31,38 @@ export function ProcessGraph({ events }: { events: CanonicalEvent[] }) {
   const label = typeof started?.payload.label === "string" ? started.payload.label : "UNAVAILABLE";
   const snapshotEvents = events.filter((event) => event.type === "process.snapshot");
 
+  const identityFor = (role: EvidenceRole, nodePid: number | null): ProcessIdentity | null => {
+    if (index === undefined || nodePid === null) return null;
+    return index.byNodeKey.get(nodeKeyForRole(role, nodePid))?.identity ?? null;
+  };
+  const engineIdentity = identityFor("caps-engine", capsPid);
+  const childIdentity = identityFor("child", pid);
+
   return (
     <div className="space-y-3 py-2">
       <div className="flex flex-col items-stretch gap-2 md:flex-row md:items-center">
         {verifiedParent ? <>
-          <IdentityNode title="CAPS ENGINE" value={String(capsPid)} tag="LINUX PID" detail="Gateway-spawned CAPS process · OBSERVED" />
+          <IdentityNode
+            title="CAPS ENGINE"
+            value={String(capsPid)}
+            tag="LINUX PID"
+            detail="Gateway-spawned CAPS process · OBSERVED"
+            identity={engineIdentity}
+            onPick={onSelect}
+            selected={engineIdentity !== null && selectedNodeKey === nodeKeyForRole("caps-engine", capsPid)}
+          />
           <Connector label="fork() · PPID matches" />
         </> : null}
-        <IdentityNode title={label} value={pid === null ? "UNAVAILABLE" : String(pid)} tag="LINUX PID" detail={pid === null ? "Awaiting CAPS PROCESS_STARTED" : "Child PID from CAPS PROCESS_STARTED · OBSERVED"} active={Boolean(started && !exited && !execError)} />
+        <IdentityNode
+          title={label}
+          value={pid === null ? "UNAVAILABLE" : String(pid)}
+          tag="LINUX PID"
+          detail={pid === null ? "Awaiting CAPS PROCESS_STARTED" : "Child PID from CAPS PROCESS_STARTED · OBSERVED"}
+          active={Boolean(started && !exited && !execError)}
+          identity={childIdentity}
+          onPick={onSelect}
+          selected={childIdentity !== null && selectedNodeKey === nodeKeyForRole("child", pid)}
+        />
       </div>
 
       <div className="grid gap-2 border-t border-[var(--line-0)] pt-3 text-[10.5px] sm:grid-cols-2 lg:grid-cols-4">
@@ -46,12 +85,46 @@ export function ProcessGraph({ events }: { events: CanonicalEvent[] }) {
   );
 }
 
-function IdentityNode({ title, value, tag, detail, active = false }: { title: string; value: string; tag: string; detail: string; active?: boolean }) {
-  return <div className={`min-w-0 flex-1 rounded border px-3 py-2 ${active ? "border-[var(--accent-soft)] bg-[var(--bg-2)]" : "border-[var(--line-0)] bg-[var(--bg-2)]"}`}>
-    <div className="flex items-center justify-between gap-2"><span className="truncate font-mono text-[11px] font-semibold text-[var(--fg-1)]">{title}</span><span className="font-mono text-[8px] text-[var(--fg-3)]">{tag}</span></div>
-    <div className={`mt-1 font-mono text-lg ${active ? "text-[var(--accent)]" : "text-[var(--fg-0)]"}`}>{value}</div>
-    <div className="mt-1 text-[9px] text-[var(--fg-3)]">{detail}</div>
-  </div>;
+function IdentityNode({
+  title,
+  value,
+  tag,
+  detail,
+  active = false,
+  selected = false,
+  identity,
+  onPick,
+}: {
+  title: string;
+  value: string;
+  tag: string;
+  detail: string;
+  active?: boolean;
+  selected?: boolean;
+  identity: ProcessIdentity | null;
+  onPick?: (identity: ProcessIdentity) => void;
+}) {
+  const body = (
+    <>
+      <div className="flex items-center justify-between gap-2"><span className="truncate font-mono text-[11px] font-semibold text-[var(--fg-1)]">{title}</span><span className="font-mono text-[8px] text-[var(--fg-3)]">{tag}</span></div>
+      <div className={`mt-1 font-mono text-lg ${active ? "text-[var(--accent)]" : "text-[var(--fg-0)]"}`}>{value}</div>
+      <div className="mt-1 text-[9px] text-[var(--fg-3)]">{detail}</div>
+      {selected ? <div className="mt-1 font-mono text-[8.5px] text-[var(--violet)]">◆ selected — synced with the 3D view</div> : null}
+    </>
+  );
+  const shell = `min-w-0 flex-1 rounded border px-3 py-2 text-left ${selected ? "border-[var(--violet-soft)] bg-[var(--violet-soft)]" : active ? "border-[var(--accent-soft)] bg-[var(--bg-2)]" : "border-[var(--line-0)] bg-[var(--bg-2)]"}`;
+  if (onPick === undefined || identity === null) return <div className={shell}>{body}</div>;
+  return (
+    <button
+      type="button"
+      aria-pressed={selected}
+      onClick={() => onPick(identity)}
+      className={`${shell} focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]`}
+      title={`Select PID ${identity.pid} by session, PID and derived start time`}
+    >
+      {body}
+    </button>
+  );
 }
 
 function Connector({ label }: { label: string }) {

@@ -2,58 +2,10 @@ import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 
+import { FIRST_SAMPLE_RATE_REASON } from "./derive.js";
+import { SNAPSHOT_METRIC_KEYS, type Metric, type ProcessSnapshot, type Provenance } from "./types.js";
+
 let cachedClockTicks: number | null | undefined;
-
-export type Provenance = "OBSERVED" | "DERIVED" | "UNAVAILABLE";
-
-export interface Metric<T> {
-  value: T | null;
-  provenance: Provenance;
-  source: string;
-  reason?: string;
-}
-
-export interface ProcessSnapshot {
-  timestamp: string;
-  capsEnginePid: Metric<number>;
-  pid: Metric<number>;
-  command: Metric<string>;
-  ppid: Metric<number>;
-  processGroupId: Metric<number>;
-  sessionId: Metric<number>;
-  state: Metric<string>;
-  startTime: Metric<string>;
-  elapsedMs: Metric<number>;
-  cpuUserMs: Metric<number>;
-  cpuSystemMs: Metric<number>;
-  cpuPercent: Metric<number>;
-  rssBytes: Metric<number>;
-  virtualMemoryBytes: Metric<number>;
-  threadCount: Metric<number>;
-  voluntaryContextSwitches: Metric<number>;
-  nonVoluntaryContextSwitches: Metric<number>;
-  /**
-   * Page-fault counters from /proc/<pid>/stat fields 10 and 12 (minflt,
-   * majflt). A CPU-only run stays near zero; a memory workload that
-   * touches a fresh anonymous mapping produces a visible minor-fault ramp.
-   */
-  minorFaults: Metric<number>;
-  majorFaults: Metric<number>;
-  /**
-   * /proc/<pid>/io counters. Character counters (readChars/writeChars)
-   * count bytes moved through the syscall layer and are always non-zero
-   * for a real read/write loop. Block counters (readBytes/writeBytes)
-   * count bytes that actually reached a block device, so they legitimately
-   * stay 0 while the page cache absorbs writes. Both are reported; neither
-   * is synthesised.
-   */
-  readBytes: Metric<number>;
-  writeBytes: Metric<number>;
-  readChars: Metric<number>;
-  writeChars: Metric<number>;
-  /** Internal identity token used to reject a recycled PID during one execution. */
-  identityStartTicks: number | null;
-}
 
 export interface ProcStat {
   pid: number;
@@ -124,38 +76,10 @@ export function parseKilobytes(value: string | undefined): number | null {
 }
 
 /**
- * The exact metric keys a snapshot carries. Exported so the capabilities
- * endpoint cannot drift away from what the collector actually produces.
- * `identityStartTicks` is internal and deliberately excluded.
- */
-export const SNAPSHOT_METRIC_KEYS = [
-  "pid",
-  "command",
-  "ppid",
-  "processGroupId",
-  "sessionId",
-  "state",
-  "startTime",
-  "elapsedMs",
-  "cpuUserMs",
-  "cpuSystemMs",
-  "cpuPercent",
-  "rssBytes",
-  "virtualMemoryBytes",
-  "threadCount",
-  "voluntaryContextSwitches",
-  "nonVoluntaryContextSwitches",
-  "minorFaults",
-  "majorFaults",
-  "readBytes",
-  "writeBytes",
-  "readChars",
-  "writeChars",
-] as const;
-
-/**
  * /proc/<pid>/io fields this gateway understands. Anything else in the
- * file is ignored rather than guessed.
+ * file is ignored rather than guessed. syscr/syscw are parsed to confirm the
+ * file was readable, but they are not exported as metrics: the gateway
+ * reports bytes, not a syscall census.
  */
 export interface ProcIo {
   rchar: number;
@@ -210,6 +134,14 @@ export interface ProcReadOptions {
   clockTicksPerSecond?: number | null;
 }
 
+/**
+ * Read every supported metric for one tracked PID in a single pass.
+ *
+ * This function is the only place that touches procfs. It never guesses: a
+ * missing field, an unreadable file, or a parse failure becomes an explicit
+ * UNAVAILABLE metric carrying the real kernel reason. Cross-sample rates are
+ * filled in afterwards by deriveRates().
+ */
 export function readProcessSnapshot(pid: number, options: ProcReadOptions = {}): ProcessSnapshot {
   const procRoot = options.procRoot ?? "/proc";
   const nowMs = options.nowMs ?? Date.now();
@@ -235,7 +167,8 @@ export function readProcessSnapshot(pid: number, options: ProcReadOptions = {}):
       unavailableReason = errorReason(err);
     }
     // /proc/<pid>/io is readable only by the owner (or with CAP_SYS_PTRACE),
-    // so an EACCES here is normal and must not be reported as a failure.
+    // so an EACCES here is normal and must not be reported as a failure of
+    // the whole snapshot.
     try {
       io = parseProcIo(readFileSync(`${root}/io`, "utf8"));
       if (Object.keys(io).length === 0) {
@@ -251,6 +184,8 @@ export function readProcessSnapshot(pid: number, options: ProcReadOptions = {}):
   const source = `/proc/${pid}/stat`;
   const sourceStatus = `/proc/${pid}/status`;
   const sourceIo = `/proc/${pid}/io`;
+  const sourceDerived = `${source} + ${procRoot}/uptime`;
+  const sourceEngine = "gateway child_process.spawn";
   const metric = <T>(value: T, provenance: Provenance, fieldSource: string): Metric<T> => ({ value, provenance, source: fieldSource });
   const unavailable = <T>(fieldSource: string, reason = unavailableReason ?? "Field is absent from this kernel procfs response"): Metric<T> => ({
     value: null,
@@ -258,24 +193,42 @@ export function readProcessSnapshot(pid: number, options: ProcReadOptions = {}):
     source: fieldSource,
     reason,
   });
+  const missing = <T>(fieldSource: string): Metric<T> => unavailable(fieldSource);
 
   if (stat === null) {
-    const missing = <T>() => unavailable<T>(source);
-    return {
+    // The PID we were asked to sample stays OBSERVED: it came from the CAPS
+    // process-start event, not from procfs. Everything procfs would have
+    // supplied carries the real kernel reason instead of a value.
+    const reason = unavailableReason ?? "Process exited or procfs entry disappeared before sampling";
+    const missing = <T>(fieldSource: string): Metric<T> => unavailable<T>(fieldSource, reason);
+    const snapshot: ProcessSnapshot = {
       timestamp,
-      capsEnginePid: unavailable("gateway child_process.spawn", "CAPS process identity is not available"),
-      pid: metric(pid, "OBSERVED", "CAPS PROCESS_STARTED"), command: missing(), ppid: missing(), processGroupId: missing(), sessionId: missing(), state: missing(),
-      startTime: missing(), elapsedMs: missing(), cpuUserMs: missing(), cpuSystemMs: missing(), cpuPercent: unavailable("DERIVED"),
-      rssBytes: unavailable(sourceStatus), virtualMemoryBytes: unavailable(sourceStatus), threadCount: unavailable(sourceStatus),
-      voluntaryContextSwitches: unavailable(sourceStatus), nonVoluntaryContextSwitches: unavailable(sourceStatus),
-      minorFaults: unavailable(source), majorFaults: unavailable(source),
-      readBytes: unavailable(sourceIo), writeBytes: unavailable(sourceIo), readChars: unavailable(sourceIo), writeChars: unavailable(sourceIo),
+      pid: metric(pid, "OBSERVED", "CAPS PROCESS_STARTED"),
+      capsEnginePid: missing(sourceEngine),
+      command: missing(source), ppid: missing(source), processGroupId: missing(source), sessionId: missing(source), state: missing(source),
+      startTime: missing("DERIVED"), elapsedMs: missing("DERIVED"),
+      cpuUserMs: missing("DERIVED"), cpuSystemMs: missing("DERIVED"), cpuTimeMs: missing("DERIVED"), cpuPercent: missing("DERIVED"),
+      rssBytes: missing(sourceStatus), virtualMemoryBytes: missing(sourceStatus),
+      threadCount: missing(sourceStatus),
+      voluntaryContextSwitches: missing(sourceStatus), nonVoluntaryContextSwitches: missing(sourceStatus),
+      minorFaults: missing(source), majorFaults: missing(source),
+      minorFaultsPerSec: missing("DERIVED"), majorFaultsPerSec: missing("DERIVED"),
+      readBytes: missing(sourceIo), writeBytes: missing(sourceIo), rcharBytes: missing(sourceIo), wcharBytes: missing(sourceIo),
+      readBytesPerSec: missing("DERIVED"), writeBytesPerSec: missing("DERIVED"), rcharBytesPerSec: missing("DERIVED"), wcharBytesPerSec: missing("DERIVED"),
       identityStartTicks: null,
     };
+    return snapshot;
   }
 
   const elapsedMs = uptimeSeconds === null || ticks === null ? null : Math.max(0, (uptimeSeconds - stat.startTicks / ticks) * 1000);
-  const startMs = elapsedMs === null ? null : nowMs - elapsedMs;
+  const bootSeconds = ticks === null ? null : readBootTimeSeconds(procRoot);
+  // Stable identity path: a pure function of kernel values, identical for every
+  // sample of the same process. The wall-clock path is only a fallback for a
+  // kernel that does not publish btime.
+  const stableStartMs = bootSeconds === null || ticks === null ? null : Math.round(bootSeconds * 1000 + (stat.startTicks / ticks) * 1000);
+  const startMs = stableStartMs ?? (elapsedMs === null ? null : nowMs - elapsedMs);
+  const startSource = stableStartMs === null ? sourceDerived : `${source} field 22 + ${procRoot}/stat btime, converted with CLK_TCK`;
+  const timeReason = uptimeSeconds === null ? "Cannot read /proc/uptime" : "Kernel clock tick rate unavailable";
   const statusPid = parseFirstInt(status.get("Pid"));
   const statusPpid = parseFirstInt(status.get("PPid"));
   const threads = parseFirstInt(status.get("Threads"));
@@ -287,21 +240,26 @@ export function readProcessSnapshot(pid: number, options: ProcReadOptions = {}):
     value === undefined
       ? unavailable(sourceIo, ioUnavailableReason ?? "Counter absent from /proc/<pid>/io")
       : metric(value, "OBSERVED", sourceIo);
+  const userMs = ticks === null ? null : (stat.userTicks * 1000) / ticks;
+  const systemMs = ticks === null ? null : (stat.systemTicks * 1000) / ticks;
+  const cpuTimeMs = userMs === null || systemMs === null ? null : userMs + systemMs;
+  const cpuTickSource = `${source} ticks converted with _SC_CLK_TCK`;
 
   return {
     timestamp,
-    capsEnginePid: unavailable("gateway child_process.spawn", "CAPS process identity is not available"),
     pid: metric(stat.pid, "OBSERVED", source),
+    capsEnginePid: missing(sourceEngine),
     command: metric(stat.command, "OBSERVED", source),
     ppid: statusPid === null || statusPpid === null ? metric(stat.ppid, "OBSERVED", source) : metric(statusPpid, "OBSERVED", sourceStatus),
     processGroupId: metric(stat.processGroupId, "OBSERVED", source),
     sessionId: metric(stat.sessionId, "OBSERVED", source),
     state: metric(stat.state, "OBSERVED", source),
-    startTime: startMs === null ? unavailable("DERIVED", uptimeSeconds === null ? "Cannot read /proc/uptime" : "Kernel clock tick rate unavailable") : metric(new Date(startMs).toISOString(), "DERIVED", `${source} + ${procRoot}/uptime`),
-    elapsedMs: elapsedMs === null ? unavailable("DERIVED", uptimeSeconds === null ? "Cannot read /proc/uptime" : "Kernel clock tick rate unavailable") : metric(elapsedMs, "DERIVED", `${source} + ${procRoot}/uptime`),
-    cpuUserMs: ticks === null ? unavailable("DERIVED", "Kernel clock tick rate unavailable") : metric(stat.userTicks * 1000 / ticks, "DERIVED", `${source} field utime converted with _SC_CLK_TCK`),
-    cpuSystemMs: ticks === null ? unavailable("DERIVED", "Kernel clock tick rate unavailable") : metric(stat.systemTicks * 1000 / ticks, "DERIVED", `${source} field stime converted with _SC_CLK_TCK`),
-    cpuPercent: unavailable("DERIVED", "Requires at least two valid samples"),
+    startTime: startMs === null ? unavailable("DERIVED", timeReason) : metric(new Date(startMs).toISOString(), "DERIVED", startSource),
+    elapsedMs: elapsedMs === null ? unavailable("DERIVED", timeReason) : metric(elapsedMs, "DERIVED", sourceDerived),
+    cpuUserMs: userMs === null ? unavailable("DERIVED", "Kernel clock tick rate unavailable") : metric(userMs, "DERIVED", `${cpuTickSource} (utime)`),
+    cpuSystemMs: systemMs === null ? unavailable("DERIVED", "Kernel clock tick rate unavailable") : metric(systemMs, "DERIVED", `${cpuTickSource} (stime)`),
+    cpuTimeMs: cpuTimeMs === null ? unavailable("DERIVED", "Kernel clock tick rate unavailable") : metric(cpuTimeMs, "DERIVED", `${cpuTickSource} (utime + stime)`),
+    cpuPercent: unavailable("DERIVED", FIRST_SAMPLE_RATE_REASON),
     rssBytes: vmRss === null ? unavailable(sourceStatus) : metric(vmRss, "OBSERVED", sourceStatus),
     virtualMemoryBytes: vmSize === null ? unavailable(sourceStatus) : metric(vmSize, "OBSERVED", sourceStatus),
     threadCount: threads === null ? metric(stat.threadCount, "OBSERVED", source) : metric(threads, "OBSERVED", sourceStatus),
@@ -309,18 +267,66 @@ export function readProcessSnapshot(pid: number, options: ProcReadOptions = {}):
     nonVoluntaryContextSwitches: involuntary === null ? unavailable(sourceStatus) : metric(involuntary, "OBSERVED", sourceStatus),
     minorFaults: metric(stat.minorFaults, "OBSERVED", `${source} field minflt`),
     majorFaults: metric(stat.majorFaults, "OBSERVED", `${source} field majflt`),
+    minorFaultsPerSec: unavailable("DERIVED", FIRST_SAMPLE_RATE_REASON),
+    majorFaultsPerSec: unavailable("DERIVED", FIRST_SAMPLE_RATE_REASON),
     readBytes: ioOrUnavailable(io.readBytes),
     writeBytes: ioOrUnavailable(io.writeBytes),
-    readChars: ioOrUnavailable(io.rchar),
-    writeChars: ioOrUnavailable(io.wchar),
+    rcharBytes: ioOrUnavailable(io.rchar),
+    wcharBytes: ioOrUnavailable(io.wchar),
+    readBytesPerSec: unavailable("DERIVED", FIRST_SAMPLE_RATE_REASON),
+    writeBytesPerSec: unavailable("DERIVED", FIRST_SAMPLE_RATE_REASON),
+    rcharBytesPerSec: unavailable("DERIVED", FIRST_SAMPLE_RATE_REASON),
+    wcharBytesPerSec: unavailable("DERIVED", FIRST_SAMPLE_RATE_REASON),
     identityStartTicks: stat.startTicks,
   };
+}
+
+/**
+ * Blanket UNAVAILABLE pass used when a sample is rejected (identity mismatch)
+ * or when procfs could not be read. Driven by the canonical key list, so a
+ * newly added metric can never be silently left claiming to be observed.
+ * `identityStartTicks` is left untouched: the kernel value we read is the
+ * kernel value we read.
+ */
+export function markUnavailable(snapshot: ProcessSnapshot, reason: string): ProcessSnapshot {
+  const out: Record<string, unknown> = { ...snapshot };
+  for (const key of SNAPSHOT_METRIC_KEYS) {
+    const current = out[key] as Metric<unknown> | undefined;
+    out[key] = { value: null, provenance: "UNAVAILABLE", source: current?.source ?? "unavailable", reason };
+  }
+  return out as unknown as ProcessSnapshot;
 }
 
 function readUptime(procRoot: string): number | null {
   try {
     const value = Number(readFileSync(`${procRoot}/uptime`, "utf8").trim().split(/\s+/)[0]);
     return Number.isFinite(value) && value >= 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Boot wall-clock time in whole seconds, read from `/proc/stat` `btime`.
+ *
+ * The process start time is an identity value: the frontend uses it to refuse a
+ * recycled PID, so it must be the SAME string for every sample of one process.
+ * Deriving it as `now - (uptime - startTicks/CLK_TCK)` cannot do that, because
+ * `/proc/uptime` only advances once per clock tick while `now` advances
+ * continuously; the sub-jiffy lag between the two changes the millisecond
+ * field from sample to sample and the identity guard then rejects the process's
+ * own samples. `btime` is a fixed anchor, so `btime + startTicks/CLK_TCK` is a
+ * pure function of the kernel's own values and is stable for the life of the
+ * process.
+ */
+function readBootTimeSeconds(procRoot: string): number | null {
+  try {
+    for (const line of readFileSync(`${procRoot}/stat`, "utf8").split("\n")) {
+      if (!line.startsWith("btime ")) continue;
+      const value = Number(line.slice("btime ".length).trim());
+      return Number.isFinite(value) && value > 0 ? value : null;
+    }
+    return null;
   } catch {
     return null;
   }

@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import { Badge, Card, EmptyState, StatusDot, Spinner } from "../components/ui";
-import { fmtClock, fmtDuration } from "../lib/format";
+import { fmtClock, fmtDuration, formatMiB, formatPercent } from "../lib/format";
 import type { ProcessInfo, TelemetryMetric } from "../types/observability";
 
 const STATE_TONE: Record<ProcessInfo["state"], "neutral" | "active" | "violet" | "success" | "danger" | "warn"> = {
@@ -72,7 +72,7 @@ export default function ProcessesPage() {
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1250px] text-left font-mono text-[11.5px]">
+            <table className="w-full min-w-[1600px] text-left font-mono text-[11.5px]">
               <thead>
                 <tr className="border-b border-[var(--line-0)] text-[10px] uppercase tracking-[0.12em] text-[var(--fg-3)]">
                   <th className="px-3 py-2 font-semibold">PID</th>
@@ -85,6 +85,10 @@ export default function ProcessesPage() {
                   <th className="px-3 py-2 font-semibold">Execution</th>
                   <th className="px-3 py-2 font-semibold">SID</th>
                   <th className="px-3 py-2 font-semibold">RSS</th>
+                  <th className="px-3 py-2 font-semibold">CPU % (1 core)</th>
+                  <th className="px-3 py-2 font-semibold">Write chars</th>
+                  <th className="px-3 py-2 font-semibold">Block write</th>
+                  <th className="px-3 py-2 font-semibold">Minor faults</th>
                   <th className="px-3 py-2 font-semibold">Threads</th>
                   <th className="px-3 py-2 font-semibold">Exit</th>
                   <th className="px-3 py-2 font-semibold">Signal</th>
@@ -102,7 +106,11 @@ export default function ProcessesPage() {
                     <td className="px-3 py-2 text-[var(--fg-2)]">{fmtDuration(p.durationMs)}</td>
                     <td className="px-3 py-2"><Link to={`/execution/${p.sessionId}`} className="text-[var(--accent)] hover:underline">{p.sessionId.slice(0, 8)}…</Link></td>
                     <td className="px-3 py-2 text-[var(--fg-3)]">{metricValue(p.telemetry?.sessionId, String)}</td>
-                    <td className="px-3 py-2 text-[var(--fg-2)]">{metricValue(p.telemetry?.rssBytes, (n) => `${(n / (1024 * 1024)).toFixed(2)} MiB`)}</td>
+                    <td className="px-3 py-2 text-[var(--fg-2)]">{metricValue(p.telemetry?.rssBytes, formatMiB)}</td>
+                    <td className="px-3 py-2 text-[var(--fg-2)]" title="Process CPU utilization as a percentage of one core; a rate, so the first sample has none">{metricValue(p.telemetry?.cpuPercent, formatPercent)}</td>
+                    <td className="px-3 py-2 text-[var(--fg-2)]" title="Cumulative characters written via write(); includes page cache, so it is not disk throughput">{metricValue(p.telemetry?.wcharBytes, formatMiB)}</td>
+                    <td className="px-3 py-2 text-[var(--fg-2)]" title="Cumulative bytes written to the block device">{metricValue(p.telemetry?.writeBytes, formatMiB)}</td>
+                    <td className="px-3 py-2 text-[var(--fg-2)]">{metricValue(p.telemetry?.minorFaults, String)}</td>
                     <td className="px-3 py-2 text-[var(--fg-2)]">{metricValue(p.telemetry?.threadCount, String)}</td>
                     <td className="px-3 py-2 text-[var(--fg-3)]">{p.exitCode ?? "UNAVAILABLE"}</td>
                     <td className="px-3 py-2 text-[var(--fg-3)]">{p.signal ?? "UNAVAILABLE"}</td>
@@ -115,7 +123,7 @@ export default function ProcessesPage() {
       </Card>
 
       <p className="text-[11px] text-[var(--fg-3)]">
-        Execution ID is the CAPS gateway session key; it is not Linux SID. Kernel fields are labeled with their telemetry provenance. Finished processes leave this live registry and remain in History.
+        Execution ID is the CAPS gateway session key; it is not Linux SID. Kernel fields are labeled with their telemetry provenance. CPU % is a rate derived from two samples and measured against one core, so it is unavailable for the first sample; write characters include page-cache writes and are not disk throughput. Finished processes leave this live registry and remain in History.
       </p>
     </div>
   );

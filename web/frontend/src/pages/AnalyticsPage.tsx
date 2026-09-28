@@ -3,7 +3,7 @@ import { BarChart3, Gauge, TerminalSquare } from "lucide-react";
 
 import { Card, EmptyState, Spinner } from "../components/ui";
 import { api } from "../api/client";
-import { fmtDuration, fmtNumber } from "../lib/format";
+import { fmtDuration, fmtNumber, formatCount, formatKibPerSec } from "../lib/format";
 import { useEffect, useState } from "react";
 import type { AnalyticsOverview, CommandProfile } from "../types/observability";
 
@@ -95,7 +95,12 @@ export default function AnalyticsPage() {
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
           <ResourceStat label="Average sampled RSS" value={data.processTelemetry.averageRssBytes === null ? "Insufficient telemetry" : `${(data.processTelemetry.averageRssBytes / (1024 * 1024)).toFixed(2)} MiB`} detail={data.processTelemetry.averageRssBytes === null ? `Need at least 2 valid RSS samples; found ${data.processTelemetry.rssSamples}.` : `Sample-weighted average · ${data.processTelemetry.rssSamples} OBSERVED procfs values`} />
           <ResourceStat label="Maximum sampled RSS" value={data.processTelemetry.maxRssBytes === null ? "Insufficient telemetry" : `${(data.processTelemetry.maxRssBytes / (1024 * 1024)).toFixed(2)} MiB`} detail={data.processTelemetry.maxRssBytes === null ? `Requires at least 2 valid RSS samples; found ${data.processTelemetry.rssSamples}.` : `Maximum of ${data.processTelemetry.rssSamples} persisted VmRSS samples · OBSERVED`} />
-          <ResourceStat label="CPU" value={data.processTelemetry.averageCpuPercent === null ? "Insufficient telemetry" : `${data.processTelemetry.averageCpuPercent.toFixed(2)}%`} detail={data.processTelemetry.averageCpuPercent === null ? `Need at least 2 valid CPU utilization samples; found ${data.processTelemetry.cpuPercentSamples}.` : `${data.processTelemetry.cpuPercentSamples} derived sample deltas · average CPU time per execution: ${data.processTelemetry.averageCpuTimeMs === null ? "Insufficient telemetry" : fmtDuration(data.processTelemetry.averageCpuTimeMs)}`} />
+          <ResourceStat label="CPU" value={data.processTelemetry.averageCpuPercent === null ? "Insufficient telemetry" : `${data.processTelemetry.averageCpuPercent.toFixed(2)}%`} detail={data.processTelemetry.averageCpuPercent === null ? `Need at least 2 valid CPU utilization samples; found ${data.processTelemetry.cpuPercentSamples}.` : `${data.processTelemetry.cpuPercentSamples} derived sample deltas against one core · average CPU time per execution: ${data.processTelemetry.averageCpuTimeMs === null ? "Insufficient telemetry" : fmtDuration(data.processTelemetry.averageCpuTimeMs)}`} />
+        </div>
+        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+          <ResourceStat label="Syscall I/O rate" value={data.processTelemetry.averageRcharBytesPerSec === null && data.processTelemetry.averageWcharBytesPerSec === null ? "Insufficient telemetry" : `r ${data.processTelemetry.averageRcharBytesPerSec === null ? "—" : formatKibPerSec(data.processTelemetry.averageRcharBytesPerSec)} · w ${data.processTelemetry.averageWcharBytesPerSec === null ? "—" : formatKibPerSec(data.processTelemetry.averageWcharBytesPerSec)}`} detail={data.processTelemetry.ioRateSamples === 0 ? "No derived I/O rate samples; the first sample of every session has no rate by design." : `Characters per second averaged over ${data.processTelemetry.ioRateSamples} DERIVED samples · rchar/wchar include page cache, so this is not disk throughput.`} />
+          <ResourceStat label="Page faults per execution" value={data.processTelemetry.averageMajorFaults === null ? "Insufficient telemetry" : `min ${formatCount(data.processTelemetry.averageMinorFaults ?? 0)} · maj ${formatCount(data.processTelemetry.averageMajorFaults)}`} detail={data.processTelemetry.majorFaultSamples === 0 ? "No valid fault counters collected." : `Averaged over ${data.processTelemetry.majorFaultSamples} samples · worst single sample saw ${formatCount(data.processTelemetry.maxMajorFaults ?? 0)} major faults`} />
+          <ResourceStat label="Sampling coverage" value={`${data.processTelemetry.sampleCount} snapshots`} detail={`A rate needs two valid samples, so the average CPU rate rests on ${data.processTelemetry.cpuPercentSamples} samples and the I/O rates on ${data.processTelemetry.ioRateSamples}.`} />
         </div>
       </Card>
 

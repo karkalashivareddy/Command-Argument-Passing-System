@@ -47,6 +47,15 @@ export function computeAnalytics(repo: SessionRepository): AnalyticsOverview {
       cpuTimeExecutions: 0,
       averageCpuPercent: null,
       cpuPercentSamples: 0,
+      averageMinorFaults: null,
+      averageMajorFaults: null,
+      majorFaultSamples: 0,
+      maxMajorFaults: null,
+      averageRcharBytesPerSec: null,
+      averageWcharBytesPerSec: null,
+      maxRcharBytesPerSec: null,
+      maxWcharBytesPerSec: null,
+      ioRateSamples: 0,
     },
   };
 
@@ -103,22 +112,40 @@ export function computeAnalytics(repo: SessionRepository): AnalyticsOverview {
   const rssSamples: number[] = [];
   const cpuPercentSamples: number[] = [];
   const terminalCpuTotals: number[] = [];
+  const minorFaultSamples: number[] = [];
+  const majorFaultSamples: number[] = [];
+  const rcharRates: number[] = [];
+  const wcharRates: number[] = [];
   for (const records of snapshots.values()) {
     for (const sample of records) {
       const rss = metricValue(sample.rssBytes);
       const cpuPercent = metricValue(sample.cpuPercent);
+      const minorFaults = metricValue(sample.minorFaults);
+      const majorFaults = metricValue(sample.majorFaults);
+      const rcharRate = metricValue(sample.rcharBytesPerSec);
+      const wcharRate = metricValue(sample.wcharBytesPerSec);
       if (rss !== null) rssSamples.push(rss);
       if (cpuPercent !== null) cpuPercentSamples.push(cpuPercent);
+      if (minorFaults !== null) minorFaultSamples.push(minorFaults);
+      if (majorFaults !== null) majorFaultSamples.push(majorFaults);
+      if (rcharRate !== null) rcharRates.push(rcharRate);
+      if (wcharRate !== null) wcharRates.push(wcharRate);
     }
     const latest = records.at(-1)!;
-    const user = metricValue(latest.cpuUserMs);
-    const system = metricValue(latest.cpuSystemMs);
-    if (user !== null && system !== null) terminalCpuTotals.push(user + system);
+    // cpuTimeMs is the collector's own per-sample total; older persisted rows
+    // may predate it, so fall back to summing the two tick counters.
+    const cpuTime = metricValue(latest.cpuTimeMs)
+      ?? (metricValue(latest.cpuUserMs) !== null && metricValue(latest.cpuSystemMs) !== null
+        ? metricValue(latest.cpuUserMs)! + metricValue(latest.cpuSystemMs)!
+        : null);
+    if (cpuTime !== null) terminalCpuTotals.push(cpuTime);
   }
   result.processTelemetry.executionsSampled = snapshots.size;
   result.processTelemetry.rssSamples = rssSamples.length;
   result.processTelemetry.cpuPercentSamples = cpuPercentSamples.length;
   result.processTelemetry.cpuTimeExecutions = terminalCpuTotals.length;
+  result.processTelemetry.majorFaultSamples = majorFaultSamples.length;
+  result.processTelemetry.ioRateSamples = Math.min(rcharRates.length, wcharRates.length);
   if (rssSamples.length >= 2) {
     result.processTelemetry.averageRssBytes = rssSamples.reduce((sum, value) => sum + value, 0) / rssSamples.length;
     result.processTelemetry.maxRssBytes = Math.max(...rssSamples);
@@ -127,6 +154,21 @@ export function computeAnalytics(repo: SessionRepository): AnalyticsOverview {
     result.processTelemetry.averageCpuTimeMs = terminalCpuTotals.reduce((sum, value) => sum + value, 0) / terminalCpuTotals.length;
   }
   if (cpuPercentSamples.length >= 2) result.processTelemetry.averageCpuPercent = cpuPercentSamples.reduce((sum, value) => sum + value, 0) / cpuPercentSamples.length;
+  if (minorFaultSamples.length >= 2) {
+    result.processTelemetry.averageMinorFaults = minorFaultSamples.reduce((sum, value) => sum + value, 0) / minorFaultSamples.length;
+  }
+  if (majorFaultSamples.length >= 2) {
+    result.processTelemetry.averageMajorFaults = majorFaultSamples.reduce((sum, value) => sum + value, 0) / majorFaultSamples.length;
+    result.processTelemetry.maxMajorFaults = Math.max(...majorFaultSamples);
+  }
+  if (rcharRates.length >= 2) {
+    result.processTelemetry.averageRcharBytesPerSec = rcharRates.reduce((sum, value) => sum + value, 0) / rcharRates.length;
+    result.processTelemetry.maxRcharBytesPerSec = Math.max(...rcharRates);
+  }
+  if (wcharRates.length >= 2) {
+    result.processTelemetry.averageWcharBytesPerSec = wcharRates.reduce((sum, value) => sum + value, 0) / wcharRates.length;
+    result.processTelemetry.maxWcharBytesPerSec = Math.max(...wcharRates);
+  }
 
   return result;
 }
@@ -176,11 +218,22 @@ export function computeRuntimePeaks(events: CanonicalEvent[]): RuntimePeaks {
     medianRssBytes: null,
     peakCpuPercent: null,
     cpuTimeMs: null,
+    peakMinorFaults: null,
+    peakMajorFaults: null,
+    peakMinorFaultsPerSec: null,
+    peakMajorFaultsPerSec: null,
+    totalRcharBytes: null,
+    totalWcharBytes: null,
+    totalReadBytes: null,
+    totalWriteBytes: null,
+    peakRcharBytesPerSec: null,
+    peakWcharBytesPerSec: null,
   };
   const base = new Date(events[0]?.timestamp ?? 0).getTime();
   const rssValues: number[] = [];
   let lastUser: number | null = null;
   let lastSystem: number | null = null;
+  let lastCpuTime: number | null = null;
 
   for (const ev of events) {
     if (ev.type !== "process.snapshot") continue;
@@ -216,15 +269,49 @@ export function computeRuntimePeaks(events: CanonicalEvent[]): RuntimePeaks {
       lastUser = user;
       lastSystem = system;
     }
+    const cpuTime = metricValue(payload.cpuTimeMs);
+    if (cpuTime !== null) lastCpuTime = cpuTime;
+
+    track(out, "peakMinorFaults", payload.minorFaults, atMs, ts);
+    track(out, "peakMajorFaults", payload.majorFaults, atMs, ts);
+    track(out, "peakMinorFaultsPerSec", payload.minorFaultsPerSec, atMs, ts);
+    track(out, "peakMajorFaultsPerSec", payload.majorFaultsPerSec, atMs, ts);
+    track(out, "peakRcharBytesPerSec", payload.rcharBytesPerSec, atMs, ts);
+    track(out, "peakWcharBytesPerSec", payload.wcharBytesPerSec, atMs, ts);
+
+    // Cumulative counters: the last valid observation is the session total.
+    out.totalRcharBytes = latestValue(out.totalRcharBytes, payload.rcharBytes);
+    out.totalWcharBytes = latestValue(out.totalWcharBytes, payload.wcharBytes);
+    out.totalReadBytes = latestValue(out.totalReadBytes, payload.readBytes);
+    out.totalWriteBytes = latestValue(out.totalWriteBytes, payload.writeBytes);
   }
 
   if (rssValues.length >= 2) {
     const sorted = [...rssValues].sort((a, b) => a - b);
     out.medianRssBytes = sorted[Math.floor(sorted.length / 2)] ?? null;
   }
-  if (lastUser !== null && lastSystem !== null) out.cpuTimeMs = lastUser + lastSystem;
+  if (lastCpuTime !== null) out.cpuTimeMs = lastCpuTime;
+  else if (lastUser !== null && lastSystem !== null) out.cpuTimeMs = lastUser + lastSystem;
 
   return out;
+}
+
+/** Keep the highest observed value of a metric together with where it happened. */
+function track(
+  out: RuntimePeaks,
+  key: "peakMinorFaults" | "peakMajorFaults" | "peakMinorFaultsPerSec" | "peakMajorFaultsPerSec" | "peakRcharBytesPerSec" | "peakWcharBytesPerSec",
+  metric: unknown,
+  atMs: number,
+  ts: string,
+): void {
+  const value = metricValue(metric);
+  if (value === null) return;
+  if (out[key] === null || value > out[key]!.value) out[key] = { value, atTimeMs: atMs, atTimestamp: ts };
+}
+
+function latestValue(current: number | null, metric: unknown): number | null {
+  const value = metricValue(metric);
+  return value === null ? current : value;
 }
 
 /**
@@ -306,6 +393,10 @@ function comparisonSide(session: SessionRecord, peaks: RuntimePeaks, eventCount:
     medianRssBytes: peaks.medianRssBytes,
     peakCpuPercent: peaks.peakCpuPercent?.value ?? null,
     cpuTimeMs: peaks.cpuTimeMs,
+    peakMinorFaults: peaks.peakMinorFaults?.value ?? null,
+    peakMajorFaults: peaks.peakMajorFaults?.value ?? null,
+    totalRcharBytes: peaks.totalRcharBytes,
+    totalWcharBytes: peaks.totalWcharBytes,
   };
 }
 
@@ -339,6 +430,10 @@ export function compareSessions(
       snapshotDelta: right.snapshotCount - left.snapshotCount,
       peakRssDeltaBytes: delta(left.peakRssBytes, right.peakRssBytes),
       cpuTimeDeltaMs: delta(left.cpuTimeMs, right.cpuTimeMs),
+      minorFaultsDelta: delta(left.peakMinorFaults, right.peakMinorFaults),
+      majorFaultsDelta: delta(left.peakMajorFaults, right.peakMajorFaults),
+      rcharDeltaBytes: delta(left.totalRcharBytes, right.totalRcharBytes),
+      wcharDeltaBytes: delta(left.totalWcharBytes, right.totalWcharBytes),
     },
   };
 }

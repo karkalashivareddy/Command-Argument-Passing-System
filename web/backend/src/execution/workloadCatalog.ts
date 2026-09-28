@@ -113,7 +113,7 @@ export const WORKLOAD_PROFILES: readonly WorkloadProfile[] = [
     id: "caps_io_burn",
     label: "File I/O burn",
     description: "Writes and reads back a bounded file inside a private workspace it creates and removes.",
-    observes: ["readBytes", "writeBytes", "readChars", "writeChars"],
+    observes: ["readBytes", "writeBytes", "rcharBytes", "wcharBytes"],
     args: [duration(), io()],
     buildArgv: (v) => [String(num(v[0], duration())), String(num(v[1], io()))],
   },

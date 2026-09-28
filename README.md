@@ -136,9 +136,12 @@ caps-observatory/
 ## Development
 
 Observability facts, event timing, and current unavailable fields are described in
-[the observability model](docs/observability-model.md), [the real-time visualization contract](docs/realtime-visualization.md),
+[the observability model](docs/observability-model.md), [process telemetry](docs/telemetry.md),
+[the real-time visualization contract](docs/realtime-visualization.md),
 [the visualization architecture](docs/visualization-architecture.md),
-[the process microscope](docs/process-microscope.md), and the [faculty demo guide](docs/faculty-demo.md).
+[the process microscope](docs/process-microscope.md), the
+[3D Process Observatory](docs/three-dimensional-observatory.md), and the
+[faculty demo guide](docs/faculty-demo.md).
 
 ```bash
 # Run C tests

@@ -111,6 +111,17 @@ export interface AnalyticsOverview {
     cpuTimeExecutions: number;
     averageCpuPercent: number | null;
     cpuPercentSamples: number;
+    /** Page faults, averaged per observed sample */
+    averageMinorFaults: number | null;
+    averageMajorFaults: number | null;
+    majorFaultSamples: number;
+    maxMajorFaults: number | null;
+    /** Syscall-layer character I/O rates (not disk throughput) */
+    averageRcharBytesPerSec: number | null;
+    averageWcharBytesPerSec: number | null;
+    maxRcharBytesPerSec: number | null;
+    maxWcharBytesPerSec: number | null;
+    ioRateSamples: number;
   };
 }
 
@@ -134,6 +145,20 @@ export interface RuntimePeaks {
   peakCpuPercent: RuntimePeakPoint | null;
   /** user + system CPU time from the final persisted sample */
   cpuTimeMs: number | null;
+  peakMinorFaults: RuntimePeakPoint | null;
+  peakMajorFaults: RuntimePeakPoint | null;
+  peakMinorFaultsPerSec: RuntimePeakPoint | null;
+  peakMajorFaultsPerSec: RuntimePeakPoint | null;
+  /**
+   * Cumulative counters: the last valid observed value of each /proc/<pid>/io
+   * counter in the session, which is the total the process moved.
+   */
+  totalRcharBytes: number | null;
+  totalWcharBytes: number | null;
+  totalReadBytes: number | null;
+  totalWriteBytes: number | null;
+  peakRcharBytesPerSec: RuntimePeakPoint | null;
+  peakWcharBytesPerSec: RuntimePeakPoint | null;
 }
 
 /** Command-level profile built from terminal sessions of that command. */
@@ -170,6 +195,10 @@ export interface ComparisonSide {
   medianRssBytes: number | null;
   peakCpuPercent: number | null;
   cpuTimeMs: number | null;
+  peakMinorFaults: number | null;
+  peakMajorFaults: number | null;
+  totalRcharBytes: number | null;
+  totalWcharBytes: number | null;
 }
 
 export interface SessionComparison {
@@ -188,6 +217,10 @@ export interface SessionComparison {
     snapshotDelta: number;
     peakRssDeltaBytes: number | null;
     cpuTimeDeltaMs: number | null;
+    minorFaultsDelta: number | null;
+    majorFaultsDelta: number | null;
+    rcharDeltaBytes: number | null;
+    wcharDeltaBytes: number | null;
   };
 }
 

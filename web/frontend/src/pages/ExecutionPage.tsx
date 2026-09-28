@@ -1,6 +1,6 @@
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { Activity, ClipboardList, Download, ExternalLink, FileText, RefreshCw, Square, Timer, XCircle } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Activity, Box, ClipboardList, Download, ExternalLink, FileText, RefreshCw, Square, Timer, XCircle } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 
 import { api, ApiError } from "../api/client";
 import { ArgvView } from "../components/execution/ArgvView";
@@ -18,9 +18,12 @@ import { SignalDiagram } from "../components/execution/SignalDiagram";
 import { Timeline } from "../components/execution/Timeline";
 import { Badge, Button, Card, CopyButton, EmptyState, LiveBadge, Spinner, StatusDot } from "../components/ui";
 import { fmtClock, fmtDuration, shortId } from "../lib/format";
+import { collectSamples } from "../lib/telemetry";
+import { buildEvidenceIndex, eventCursorMs, eventIdentity, resolveSelection } from "../lib/evidenceCorrelation";
 import type { ProcessSnapshot } from "../types/observability";
 import { STATUS_META } from "../lib/stages";
 import { useSession } from "../lib/useSession";
+import { cursorForView, useInvestigation } from "../store/investigation";
 import { useUi } from "../store/ui";
 
 function download(filename: string, content: string, mime: string): void {
@@ -45,13 +48,62 @@ export default function ExecutionPage() {
   const [visibleEvents, setVisibleEvents] = useState<null | typeof events>(null);
   const [terminating, setTerminating] = useState(false);
   const [clockNow, setClockNow] = useState(() => Date.now());
-  const [cursorMs, setCursorMs] = useState(0);
+  const [playing, setPlaying] = useState(true);
   const [reportOpen, setReportOpen] = useState(false);
   const [reportText, setReportText] = useState<string | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
 
+  // One selection model, shared with the 3D process space. The cursor, the
+  // selected process identity, and the selected event sequence all live in the
+  // store, so navigating between the 2D and 3D views keeps the same evidence
+  // selected instead of resetting to "everything".
+  const openSession = useInvestigation((s) => s.openSession);
+  const storeSessionId = useInvestigation((s) => s.sessionId);
+  const storeCursorMs = useInvestigation((s) => s.cursorMs);
+  const cursorPinned = useInvestigation((s) => s.cursorPinned);
+  const cursorSource = useInvestigation((s) => s.cursorSource);
+  const identity = useInvestigation((s) => s.identity);
+  const eventSeq = useInvestigation((s) => s.eventSeq);
+  const selectProcess = useInvestigation((s) => s.selectProcess);
+  const selectEvidence = useInvestigation((s) => s.selectEvidence);
+  const moveCursor = useInvestigation((s) => s.moveCursor);
+  const clearEvent = useInvestigation((s) => s.clearEvent);
+  const clearAll = useInvestigation((s) => s.clearAll);
+
   const activeEvents = replayMode ? (visibleEvents ?? []) : events;
   const activeStatus = session?.status ?? "CREATED";
+
+  useEffect(() => {
+    if (id) openSession(id);
+  }, [id, openSession]);
+
+  /**
+   * One execution-time cursor for the whole observatory. In replay it comes
+   * from the scrubber; live, it follows the newest sample until the user
+   * clicks a track or a peak card, then it stays where they put it.
+   */
+  const liveSamples = useMemo(() => collectSamples(events), [events]);
+  const latestSampleMs = liveSamples.at(-1)?.atMs ?? null;
+  const storeCursor = cursorForView({ cursorMs: storeCursorMs, cursorPinned, cursorSource }, !replayMode);
+  const sharedCursorMs = replayMode ? storeCursor : storeCursor ?? latestSampleMs;
+
+  const seekTo = (atMs: number) => {
+    if (id) moveCursor(id, atMs, replayMode ? "replay" : "user");
+  };
+
+  // The selection, resolved against the same events the page is showing. An
+  // event selected in the 3D view therefore highlights here, and an event
+  // selected here highlights in the 3D view.
+  const index = useMemo(() => buildEvidenceIndex(activeEvents), [activeEvents]);
+  const selection = useMemo(
+    () => ({ sessionId: storeSessionId ?? id, cursorMs: storeCursor, identity, eventSeq }),
+    [storeSessionId, id, storeCursor, identity, eventSeq],
+  );
+  const resolution = useMemo(() => resolveSelection(selection, index), [selection, index]);
+  const selectedEvent = useMemo(() => {
+    if (resolution.event === null) return null;
+    return { sequence: resolution.event.sequence, atSec: resolution.cursorMs === null ? 0 : resolution.cursorMs / 1000 };
+  }, [resolution.event, resolution.cursorMs]);
 
   useEffect(() => {
     if (!replayMode) setVisibleEvents(null);
@@ -197,6 +249,11 @@ export default function ExecutionPage() {
               <Activity className="h-3 w-3" /> Argument inspector <ExternalLink className="h-3 w-3 text-[var(--fg-3)]" />
             </Button>
           </Link>
+          <Link to={`/execution/${session.id}/3d`} title="Open the 3D process space for this execution">
+            <Button size="sm" variant="outline">
+              <Box className="h-3 w-3" /> 3D process space
+            </Button>
+          </Link>
         </div>
       </div>
 
@@ -214,8 +271,16 @@ export default function ExecutionPage() {
               onVisible={(evs) => {
                 setVisibleEvents(evs);
               }}
-              onCursorMs={(ms) => setCursorMs(ms)}
+              onCursorMs={(ms) => {
+                if (id) moveCursor(id, ms, "replay");
+              }}
+              seekMs={cursorSource === "replay" || !cursorPinned ? undefined : (storeCursorMs ?? undefined)}
+              playing={playing}
+              onPlayingChange={setPlaying}
             />
+            <p className="mt-2 font-mono text-[9.5px] text-[var(--fg-3)]">
+              Replay writes the shared cursor. Selecting an event below, or a process in the 3D view, moves this same cursor.
+            </p>
           </div>
         </Card>
       ) : null}
@@ -249,7 +314,12 @@ export default function ExecutionPage() {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <Card title="Observed process lineage" subtitle="A Linux parent/child link appears only when procfs PPID matches the gateway-spawned CAPS PID" pad={false}>
           <div className="px-4 py-2">
-            <ProcessGraph events={activeEvents} />
+            <ProcessGraph
+              events={activeEvents}
+              index={index}
+              selectedNodeKey={resolution.nodeKey}
+              onSelect={id ? (next) => selectProcess(id, next) : undefined}
+            />
           </div>
         </Card>
         <Card title="Argument vector" subtitle={`argv[${session.argv.length}] with required NULL terminator`}>
@@ -257,18 +327,24 @@ export default function ExecutionPage() {
         </Card>
       </div>
 
-      <ProcessTelemetry events={activeEvents} replay={replayMode || ended} />
+      <ProcessTelemetry events={activeEvents} replay={replayMode || ended} cursorMs={sharedCursorMs} identity={identity} />
 
-      {/* Flight recorder timeline — resource curves, lifecycle markers, replay cursor */}
+      {/* Flight recorder timeline — shared-cursor resource tracks, lifecycle markers, peaks */}
       <Card
         title="Flight recorder"
-        subtitle={replayMode ? "Resource curves and lifecycle markers follow the replay cursor" : "Resource curves plot only collected procfs samples; lifecycle markers come from real events"}
+        subtitle={replayMode ? "Every track, the inspector, and the peaks follow the replay cursor" : "Five resource tracks over the same collected samples and one shared cursor"}
         actions={<Badge tone={replayMode ? "violet" : "active"}>{replayMode ? "REPLAY SYNCED" : "LIVE"}</Badge>}
         pad={false}
       >
         <div className="space-y-3 px-4 py-3">
-          <Timeline events={events} highlightMs={replayMode ? cursorMs : null} />
-          <PeaksPanel events={events} />
+          <Timeline
+            events={activeEvents}
+            cursorMs={sharedCursorMs}
+            onSeek={seekTo}
+            selectedEvent={selectedEvent}
+            onClearEvent={id ? () => clearEvent(id) : undefined}
+          />
+          <PeaksPanel events={activeEvents} cursorMs={sharedCursorMs} onSeek={seekTo} />
         </div>
       </Card>
 
@@ -291,14 +367,32 @@ export default function ExecutionPage() {
         ) : null}
       </div>
 
-      {/* Event stream — the raw chronological record */}
+      {/* Event stream — the raw chronological record, and an event selection
+          surface: selecting a row moves the shared cursor to that event's own
+          recorded timestamp and correlates the process it belongs to. */}
       <Card
         title="Event stream"
         subtitle="Sequence, timestamp, type, payload — every event that reached the gateway"
         actions={<span className="flex flex-wrap items-center justify-end gap-2"><SequenceBadge events={activeEvents} /><span className="font-mono text-[10.5px] text-[var(--fg-3)]">source: caps events · gateway envelope</span></span>}
         pad={false}
       >
-        <EventStream events={activeEvents} status={activeStatus} live={!replayMode && !ended} />
+        <div id="event-stream">
+          <EventStream
+            events={activeEvents}
+            status={activeStatus}
+            live={!replayMode && !ended}
+            selectedSequence={eventSeq}
+            onSelect={(ev) => {
+              if (!id) return;
+              // The cursor goes to the event's own recorded timestamp. Nothing
+              // is interpolated, and the process comes from the correlation
+              // layer's verified mapping, so a recycled PID cannot ride along
+              // on an envelope PID alone.
+              selectEvidence(id, ev.sequence, eventIdentity(ev, index), eventCursorMs(ev, index));
+            }}
+            onClearSelection={id ? () => clearAll(id) : undefined}
+          />
+        </div>
       </Card>
 
       <Card title="Data lineage" subtitle="Where each displayed fact comes from; inferred values are labeled">
@@ -312,6 +406,8 @@ export default function ExecutionPage() {
           <LineageRow label="Session elapsed display" source={session.durationMs === null ? "UNAVAILABLE" : "DERIVED · gateway wall clock"} detail={session.durationMs === null ? "No finalized session duration is available." : `${fmtDuration(session.durationMs)} calculated by the gateway; it is distinct from the engine's monotonic duration.`} />
           <LineageRow label="Exit status / signal" source={session.exitCode !== null || session.signal !== null ? "REAL · CAPS waitpid status" : "UNAVAILABLE · process has not reported a result"} detail={session.signal !== null ? `Terminated by signal ${session.signal}; status ${session.exitCode ?? "UNAVAILABLE"} uses shell-style 128 + signal interpretation.` : session.exitCode !== null ? `wait status interpreted as exit code ${session.exitCode}.` : ""} />
           <LineageRow label="Resources" source="OBSERVED · /proc/<pid>/status; DERIVED · CPU delta" detail="RSS, virtual memory, thread count, and context switches come from procfs. CPU utilization is derived only when two valid samples are available." />
+          <LineageRow label="I/O counters" source="OBSERVED · /proc/<pid>/io" detail="rchar/wchar count characters passed to read()/write(), including page-cache hits; read_bytes/write_bytes count bytes that reached the block layer. Character counters are not disk throughput, and neither measures request latency." />
+          <LineageRow label="Page faults" source="OBSERVED · /proc/<pid>/stat; DERIVED · per-second rates" detail="Minor and major faults are cumulative kernel counters. The per-second figures exist only after two valid samples, which is why the first snapshot of a session shows every rate as UNAVAILABLE." />
           <LineageRow label="Start time / elapsed" source="DERIVED · /proc/<pid>/stat + /proc/uptime" detail="Derived from kernel start ticks and uptime using the Linux clock-tick rate. The gateway receive timestamp is not presented as a kernel timestamp." />
           <LineageRow label="Working directory / argv" source="UNAVAILABLE / OBSERVED REQUEST" detail="Working directory is not sampled. argv is the gateway-validated structured request, not cmdline read from procfs." />
           <LineageRow label="Event timestamp" source="REAL · gateway receive time" detail="The timestamp records when the gateway received each monitor line, not a kernel timestamp." />

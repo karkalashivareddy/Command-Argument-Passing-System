@@ -22,7 +22,7 @@ import {
   validateArgVector,
 } from "../security/policy.js";
 import type { CanonicalEvent } from "../types/observability.js";
-import { SNAPSHOT_METRIC_KEYS } from "../execution/procfs.js";
+import { telemetryCapabilities } from "../telemetry/capabilities.js";
 import {
   isWorkloadId,
   materializeWorkloadArgv,
@@ -137,16 +137,10 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
         profiles: workloadCapabilities(),
         limits: WORKLOAD_LIMITS,
       },
-      telemetry: {
+      telemetry: telemetryCapabilities({
         enabled: onLinux,
-        intervalMs: 500,
         source: onLinux ? "/proc/<tracked-pid>/{stat,status,io}" : "UNAVAILABLE",
-        // Derived from the collector itself, so this list cannot claim a
-        // metric the gateway does not actually read.
-        metrics: SNAPSHOT_METRIC_KEYS,
-        perMetricProvenance: "reported per metric in every process.snapshot payload",
-        notCollected: ["eBPF", "cgroup accounting", "syscall tracing", "network I/O"],
-      },
+      }),
       observability: {
         timeline: { enabled: true, axis: "seconds-relative-to-first-event" },
         annotations: true,
@@ -526,6 +520,11 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
   });
 
   // ------------------------------------------------------------- report
+  const mib = (bytes: number | null): string => (bytes === null ? "UNAVAILABLE" : `${(bytes / (1024 * 1024)).toFixed(2)} MiB`);
+  const kibPerSec = (bytes: number | null): string => {
+    if (bytes === null) return "UNAVAILABLE";
+    return bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(2)} MiB/s` : `${(bytes / 1024).toFixed(1)} KiB/s`;
+  };
   app.get("/api/sessions/:id/report", async (req, reply) => {
     const { id } = req.params as { id: string };
     const session = sessions.findById(id);
@@ -567,8 +566,13 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
             `- Samples: \`${snapshotCount}\` · span ${span}`,
             `- Peak RSS: ${peaks.peakRssBytes === null ? "UNAVAILABLE" : `${(peaks.peakRssBytes.value / (1024 * 1024)).toFixed(2)} MiB at ${peaks.peakRssBytes.atTimeMs}ms after first event`} (OBSERVED /proc/${session.pid ?? "?"}/status)`,
             `- Median RSS: ${peaks.medianRssBytes === null ? "UNAVAILABLE (needs ≥2 valid samples)" : `${(peaks.medianRssBytes / (1024 * 1024)).toFixed(2)} MiB`}`,
-            `- Peak CPU utilization: ${peaks.peakCpuPercent === null ? "UNAVAILABLE (needs ≥2 valid samples)" : `${peaks.peakCpuPercent.value.toFixed(1)}% at ${peaks.peakCpuPercent.atTimeMs}ms`} (DERIVED from tick deltas)`,
+            `- Peak CPU utilization: ${peaks.peakCpuPercent === null ? "UNAVAILABLE (needs ≥2 valid samples)" : `${peaks.peakCpuPercent.value.toFixed(1)}% at ${peaks.peakCpuPercent.atTimeMs}ms`} (DERIVED from tick deltas, percentage of one core)`,
             `- Total CPU time (user+system, final sample): ${peaks.cpuTimeMs === null ? "UNAVAILABLE" : `${(peaks.cpuTimeMs / 1000).toFixed(2)}s`}`,
+            `- Peak page faults: minor ${peaks.peakMinorFaults === null ? "UNAVAILABLE" : peaks.peakMinorFaults.value} · major ${peaks.peakMajorFaults === null ? "UNAVAILABLE" : peaks.peakMajorFaults.value} (OBSERVED /proc/${session.pid ?? "?"}/stat)`,
+            `- Peak fault rates: minor ${peaks.peakMinorFaultsPerSec === null ? "UNAVAILABLE" : `${peaks.peakMinorFaultsPerSec.value}/s`} · major ${peaks.peakMajorFaultsPerSec === null ? "UNAVAILABLE" : `${peaks.peakMajorFaultsPerSec.value}/s`} (DERIVED)`,
+            `- Syscall I/O totals (rchar/wchar): ${mib(peaks.totalRcharBytes)} / ${mib(peaks.totalWcharBytes)} (OBSERVED /proc/${session.pid ?? "?"}/io; characters, not disk throughput)`,
+            `- Block-device I/O totals (read_bytes/write_bytes): ${mib(peaks.totalReadBytes)} / ${mib(peaks.totalWriteBytes)} (OBSERVED /proc/${session.pid ?? "?"}/io)`,
+            `- Peak I/O rates: rchar ${kibPerSec(peaks.peakRcharBytesPerSec?.value ?? null)} · wchar ${kibPerSec(peaks.peakWcharBytesPerSec?.value ?? null)} (DERIVED)`,
           ]),
       "",
       "## Lifecycle observations",
@@ -577,13 +581,17 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
       exited ? `- Process exited: exit \`${exited.payload.exitCode ?? "UNAVAILABLE"}\` at ${exited.timestamp}` : signalEv ? `- Signal received: \`${signalEv.payload.signal ?? "UNAVAILABLE"}\` at ${signalEv.timestamp}` : "UNAVAILABLE",
       "",
       "## Provenance",
-      "- Process snapshots come from `/proc/<tracked-pid>/stat` and `status`; CPU utilization and CPU time are derived from kernel tick counters and the system clock-tick rate.",
+      "- Process snapshots come from `/proc/<tracked-pid>/stat`, `status`, and `io`; CPU utilization and every per-second rate are derived by differencing two valid samples over a measured interval.",
+      "- The first sample of a process reports every rate as UNAVAILABLE with a reason, because a rate needs two valid samples; it is never invented or zero-filled.",
+      "- rchar/wchar count characters passed to read()/write(), including page-cache hits. read_bytes/write_bytes count bytes that reached the block layer. Character counters are not disk throughput.",
+      "- A sampled PID is accepted only while its procfs PPID matches the gateway-spawned CAPS process and its start ticks stay constant.",
       "- Event timestamps are gateway receive times, not kernel timestamps. Session duration uses the gateway clock; an engine monotonic duration may differ.",
       "- Missing values are UNAVAILABLE rather than filled with zero.",
       "",
       "## Limits of this report",
       "- stderr redirection and low-level `open()`/`dup2()`/`close()` events are unsupported.",
       "- Only the CAPS-owned child PID is sampled; arbitrary descendants are not discovered.",
+      "- Syscall tracing, eBPF, cgroup accounting, network I/O, and file-descriptor counts are not collected.",
       "- This is a summary of the persisted event store; it does not re-execute the command.",
     ].join("\n");
 

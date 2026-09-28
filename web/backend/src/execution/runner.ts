@@ -1,12 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
-import { performance } from "node:perf_hooks";
 
 import type { CapsConfig } from "../config/env.js";
 import type { EventRepository } from "../db/repositories/events.js";
 import type { SessionRepository } from "../db/repositories/sessions.js";
 import type { EventBus } from "../events/bus.js";
+import { TelemetrySampler, type TelemetrySample } from "../telemetry/sampler.js";
+import type { ProcessSnapshot } from "../telemetry/types.js";
 import type { CanonicalEvent, RedirectionSpec } from "../types/observability.js";
 import { logger } from "../utils/logger.js";
 import { newId } from "../utils/ids.js";
@@ -14,7 +15,6 @@ import { parseCapsLine, repairLineChunks } from "./parser.js";
 import { gatewayEvent, normalizeCapsEvent } from "./normalizer.js";
 import { ExecutionRegistry, type ActiveSession } from "./registry.js";
 import { signalChild } from "./terminator.js";
-import { readProcessSnapshot, type Metric, type ProcessSnapshot } from "./procfs.js";
 
 const REDIR_FLAGS: Record<keyof RedirectionSpec, string> = {
   in: "O_RDONLY",
@@ -60,10 +60,12 @@ function sanitizedEnv(executable: string): NodeJS.ProcessEnv {
 export class ExecutionRunner {
   /** "stdout:<id>" and "stderr:<id>" bounded text channels. */
   private readonly buffers = new Map<string, string>();
-  private readonly lastSnapshots = new Map<string, ProcessSnapshot>();
-  private readonly processIdentity = new Map<string, number | null>();
-  private readonly lastSampleMonotonic = new Map<string, number>();
-  private readonly sampler: NodeJS.Timeout;
+  /**
+   * Cadence and procfs access belong to the telemetry layer. The runner only
+   * hands it a verified target on process.started and takes finished
+   * snapshots back so it can assign a sequence and persist before publishing.
+   */
+  private readonly telemetry: TelemetrySampler;
 
   constructor(
     private readonly config: CapsConfig,
@@ -73,15 +75,14 @@ export class ExecutionRunner {
     private readonly registry: ExecutionRegistry,
   ) {
     mkdirSync(config.workspace, { recursive: true });
-    this.sampler = setInterval(() => this.sampleTrackedProcesses(), 500);
-    this.sampler.unref();
+    this.telemetry = new TelemetrySampler({
+      emit: (sample) => this.publishSnapshot(sample),
+    });
   }
 
   close(): void {
-    clearInterval(this.sampler);
-    this.lastSnapshots.clear();
-    this.processIdentity.clear();
-    this.lastSampleMonotonic.clear();
+    this.telemetry.close();
+    this.buffers.clear();
   }
 
   start(input: StartExecutionInput): StartResult {
@@ -278,10 +279,18 @@ export class ExecutionRunner {
         active.childPid = ev.pid;
         active.processStartedAt = ev.timestamp;
         active.processReaped = false;
-        this.processIdentity.delete(sessionId);
-        this.lastSampleMonotonic.delete(sessionId);
         if (ev.pid) this.sessions.setPid(sessionId, ev.pid);
-        this.sampleProcess(sessionId, ev.pid);
+        if (typeof ev.pid === "number") {
+          // One sampler loop for this execution, started with an immediate
+          // first sample so even a very short process is observed once.
+          this.telemetry.start({
+            sessionId,
+            pid: ev.pid,
+            capsEnginePid: active.process?.pid ?? null,
+            processStartedAt: ev.timestamp,
+            isFinalized: () => active.finalized,
+          });
+        }
         break;
       case "signal.received":
         if (typeof ev.payload.signal === "number") active.signal = ev.payload.signal;
@@ -289,15 +298,11 @@ export class ExecutionRunner {
       case "process.exited":
         if (typeof ev.payload.exitCode === "number") active.exitCode = ev.payload.exitCode;
         active.processReaped = true;
-        this.lastSnapshots.delete(sessionId);
-        this.processIdentity.delete(sessionId);
-        this.lastSampleMonotonic.delete(sessionId);
+        this.telemetry.stop(sessionId);
         break;
       case "process.exec_error":
         active.processReaped = true;
-        this.lastSnapshots.delete(sessionId);
-        this.processIdentity.delete(sessionId);
-        this.lastSampleMonotonic.delete(sessionId);
+        this.telemetry.stop(sessionId);
         break;
       case "session.summary":
         active.sawSummary = true;
@@ -307,61 +312,16 @@ export class ExecutionRunner {
     }
   }
 
-  private sampleTrackedProcesses(): void {
-    for (const target of this.registry.listTelemetryTargets()) this.sampleProcess(target.sessionId, target.pid);
-  }
-
-  private sampleProcess(sessionId: string, pid: number | null): void {
-    if (pid === null) return;
+  /**
+   * Persist one finished telemetry sample as a canonical event. The event row
+   * is written before the bus publishes, and a finalized execution is never
+   * given another snapshot.
+   */
+  private publishSnapshot({ sessionId, pid, snapshot }: TelemetrySample): void {
     const active = this.registry.get(sessionId);
-    if (!active || active.childPid !== pid || active.processStartedAt === null || active.finalized) return;
-    if (this.processIdentity.has(sessionId) && this.processIdentity.get(sessionId) === null) return;
-
-    let snapshot = readProcessSnapshot(pid);
-    const capsEnginePid = active.process?.pid;
-    snapshot.capsEnginePid = typeof capsEnginePid === "number"
-      ? { value: capsEnginePid, provenance: "OBSERVED", source: "gateway child_process.spawn" }
-      : { value: null, provenance: "UNAVAILABLE", source: "gateway child_process.spawn", reason: "CAPS child PID was not returned by the host runtime" };
-    const procStartTicks = snapshot.identityStartTicks;
-    const priorIdentity = this.processIdentity.get(sessionId);
-    const capsParentPid = typeof capsEnginePid === "number" ? capsEnginePid : null;
-    if (procStartTicks !== null && (capsParentPid === null || snapshot.ppid.value !== capsParentPid)) {
-      snapshot = makeUnavailable(snapshot, "procfs PPID does not match the gateway-spawned CAPS process; this PID is not accepted as the tracked child");
-      this.processIdentity.set(sessionId, null);
-    }
-    if (procStartTicks !== null && !this.processIdentity.has(sessionId) && priorIdentity === undefined) {
-      const procStartMs = Date.parse(snapshot.startTime.value ?? "");
-      const capsStartMs = Date.parse(active.processStartedAt);
-      if (!Number.isFinite(procStartMs) || !Number.isFinite(capsStartMs) || Math.abs(procStartMs - capsStartMs) > 2000) {
-        snapshot = makeUnavailable(snapshot, "The procfs PID start time does not match this CAPS process-start event; possible PID reuse");
-        this.processIdentity.set(sessionId, null);
-      } else {
-        this.processIdentity.set(sessionId, procStartTicks);
-      }
-    } else if (procStartTicks !== null && this.processIdentity.get(sessionId) !== null && priorIdentity !== procStartTicks) {
-      snapshot = makeUnavailable(snapshot, "The tracked PID identity changed during execution; procfs sampling stopped");
-      this.processIdentity.set(sessionId, null);
-    }
-
-    if (procStartTicks === null && !this.processIdentity.has(sessionId)) this.processIdentity.set(sessionId, null);
-
-    const previous = this.lastSnapshots.get(sessionId);
-    if (snapshot.identityStartTicks !== null && previous) {
-      const previousCpu = (previous.cpuUserMs.value ?? 0) + (previous.cpuSystemMs.value ?? 0);
-      const currentCpu = (snapshot.cpuUserMs.value ?? 0) + (snapshot.cpuSystemMs.value ?? 0);
-      const wallMs = performance.now() - (this.lastSampleMonotonic.get(sessionId) ?? performance.now());
-      if (previous.cpuUserMs.value !== null && previous.cpuSystemMs.value !== null && snapshot.cpuUserMs.value !== null && snapshot.cpuSystemMs.value !== null && wallMs > 0) {
-        snapshot.cpuPercent = { value: Math.max(0, ((currentCpu - previousCpu) / wallMs) * 100), provenance: "DERIVED", source: "delta(/proc stat utime+stime) / delta(sample wall time)" };
-      }
-    }
-
-    const { identityStartTicks: _identity, ...payload } = snapshot;
-    const event = gatewayEvent({ sessionId, sequence: active.nextSeq, evId: newId }, "gateway", "process.snapshot", payload, { pid });
-    this.emit(event);
-    if (snapshot.identityStartTicks !== null) {
-      this.lastSnapshots.set(sessionId, snapshot);
-      this.lastSampleMonotonic.set(sessionId, performance.now());
-    }
+    if (!active || active.finalized) return;
+    const { identityStartTicks: _identityStartTicks, ...payload } = snapshot;
+    this.emit(gatewayEvent({ sessionId, sequence: active.nextSeq, evId: newId }, "gateway", "process.snapshot", payload, { pid }));
   }
 
   private append(channel: "stdout" | "stderr", sessionId: string, text: string): void {
@@ -421,12 +381,12 @@ export class ExecutionRunner {
           ? { reason: `caps exited with code ${code ?? "?"}`, exitCode: exitCode ?? code }
           : { status, exitCode, signal: active.signal, durationMs, isSuccess };
 
+    // Sampling is stopped before the terminal event is emitted, so a
+    // process.snapshot can never follow execution.completed/timeout/failed.
+    this.telemetry.stop(sessionId);
     this.emit(gatewayEvent({ sessionId, sequence: active.nextSeq, evId: newId }, "gateway", finalType, payload));
 
     this.registry.delete(sessionId);
-    this.lastSnapshots.delete(sessionId);
-    this.processIdentity.delete(sessionId);
-    this.lastSampleMonotonic.delete(sessionId);
     logger.info("EXECUTION", "finalized", { sessionId, status, exitCode, signal: active.signal, durationMs });
   }
 
@@ -438,11 +398,9 @@ export class ExecutionRunner {
       status: "FAILED", exitCode: null, signal: null, isSuccess: false,
       durationMs: null, pid: null, error: reason,
     });
+    this.telemetry.stop(sessionId);
     this.emit(gatewayEvent({ sessionId, sequence: active.nextSeq, evId: newId }, "gateway", "execution.failed", { reason }));
     this.registry.delete(sessionId);
-    this.lastSnapshots.delete(sessionId);
-    this.processIdentity.delete(sessionId);
-    this.lastSampleMonotonic.delete(sessionId);
   }
 
   stdoutFor(sessionId: string): string {
@@ -470,27 +428,4 @@ function recordRedirections(sessions: SessionRepository, sessionId: string, redi
   if (redirs.in) sessions.recordRedirection(sessionId, "in", redirs.in, REDIR_FLAGS.in);
   if (redirs.out) sessions.recordRedirection(sessionId, "out", redirs.out, REDIR_FLAGS.out);
   if (redirs.append) sessions.recordRedirection(sessionId, "append", redirs.append, REDIR_FLAGS.append);
-}
-
-function makeUnavailable(snapshot: ProcessSnapshot, reason: string): ProcessSnapshot {
-  const missing = <T>(metric: Metric<T>): Metric<T> => ({ value: null, provenance: "UNAVAILABLE", source: metric.source, reason });
-  return {
-    ...snapshot,
-    command: missing(snapshot.command),
-    ppid: missing(snapshot.ppid),
-    processGroupId: missing(snapshot.processGroupId),
-    sessionId: missing(snapshot.sessionId),
-    state: missing(snapshot.state),
-    startTime: missing(snapshot.startTime),
-    elapsedMs: missing(snapshot.elapsedMs),
-    cpuUserMs: missing(snapshot.cpuUserMs),
-    cpuSystemMs: missing(snapshot.cpuSystemMs),
-    cpuPercent: missing(snapshot.cpuPercent),
-    rssBytes: missing(snapshot.rssBytes),
-    virtualMemoryBytes: missing(snapshot.virtualMemoryBytes),
-    threadCount: missing(snapshot.threadCount),
-    voluntaryContextSwitches: missing(snapshot.voluntaryContextSwitches),
-    nonVoluntaryContextSwitches: missing(snapshot.nonVoluntaryContextSwitches),
-    identityStartTicks: null,
-  };
 }

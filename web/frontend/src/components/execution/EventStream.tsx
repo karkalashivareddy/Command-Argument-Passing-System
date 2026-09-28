@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { Check, ChevronDown, Copy, RadioTower } from "lucide-react";
+import { Check, ChevronDown, Copy, Crosshair, RadioTower } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { EVENT_LABELS } from "../../lib/stages";
@@ -17,9 +17,12 @@ function eventTone(type: CanonicalEvent["type"]): string {
 interface EventRowProps {
   ev: CanonicalEvent;
   index: number;
+  selected: boolean;
+  onSelect: (ev: CanonicalEvent) => void;
+  registerRow?: (sequence: number, element: HTMLLIElement | null) => void;
 }
 
-function EventRow({ ev, index }: EventRowProps) {
+function EventRow({ ev, index, selected, onSelect, registerRow }: EventRowProps) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const ll = open;
@@ -31,9 +34,12 @@ function EventRow({ ev, index }: EventRowProps) {
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18 }}
-      className="cursor-pointer border-b border-[var(--line-0)] px-2 py-1.5 hover:bg-[var(--bg-2)]"
+      className={`cursor-pointer border-b border-[var(--line-0)] px-2 py-1.5 ${selected ? "bg-[var(--violet-soft)]" : "hover:bg-[var(--bg-2)]"}`}
       onClick={() => setOpen(!open)}
       data-testid={`event-row-${index}`}
+      data-selected={selected ? "true" : undefined}
+      aria-current={selected ? "true" : undefined}
+      ref={(element: HTMLLIElement | null) => registerRow?.(ev.sequence, element)}
     >
       <div className="flex items-center gap-2.5 font-mono text-[11.5px]">
         <span className="w-10 shrink-0 text-right tabular-nums text-[var(--fg-3)]">#{ev.sequence}</span>
@@ -46,6 +52,21 @@ function EventRow({ ev, index }: EventRowProps) {
         ) : (
           <span className="flex-1 text-[var(--fg-4)]">—</span>
         )}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelect(ev);
+          }}
+          aria-pressed={selected}
+          title={selected ? "This event is selected; it is highlighted in the timeline, the inspector, and the 3D view" : "Select this event: move the shared cursor here and correlate its process"}
+          className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)] ${
+            selected ? "bg-[var(--violet-soft)] text-[var(--violet)]" : "text-[var(--fg-4)] hover:text-[var(--violet)]"
+          }`}
+        >
+          <Crosshair className="h-3 w-3" />
+          <span className="sr-only">Select event #{ev.sequence}</span>
+        </button>
         <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-[var(--fg-3)] transition-transform ${ll ? "rotate-180" : ""}`} />
       </div>
       <AnimatePresence>
@@ -87,24 +108,54 @@ function EventRow({ ev, index }: EventRowProps) {
 /**
  * Chronological event stream. Sequences always ascend (server-guaranteed);
  * entries animate in one at a time so motion is driven by real data.
+ *
+ * Each row can also be *selected*. Selection is event selection, not expansion:
+ * it hands the canonical sequence to the shared store, which moves the cursor
+ * to the event's own recorded timestamp and correlates the process it belongs
+ * to. The selected row stays visible even while auto-follow is on, so a reader
+ * can see what they selected.
  */
 export function EventStream({
   events,
   status,
   live = false,
   emptyLabel = "No events for this session yet.",
+  selectedSequence = null,
+  onSelect,
+  onClearSelection,
 }: {
   events: CanonicalEvent[];
   status?: SessionStatus;
   live?: boolean;
   emptyLabel?: string;
+  selectedSequence?: number | null;
+  onSelect?: (ev: CanonicalEvent) => void;
+  onClearSelection?: () => void;
 }) {
   const stickEl = useRef<HTMLDivElement>(null);
   const [stick, setStick] = useState(true);
   const [tick, setTick] = useState(Date.now());
   const [filter, setFilter] = useState<CanonicalEvent["type"] | "ALL">("ALL");
+  const rows = useRef(new Map<number, HTMLLIElement>());
 
   const filteredEvents = useMemo(() => (filter === "ALL" ? events : events.filter((e) => e.type === filter)), [events, filter]);
+
+  const registerRow = useMemo(
+    () => (sequence: number, element: HTMLLIElement | null) => {
+      if (element === null) rows.current.delete(sequence);
+      else rows.current.set(sequence, element);
+    },
+    [],
+  );
+
+  // A selection made elsewhere (the 3D view, the timeline) is scrolled into
+  // view here, so the list and the scene never disagree about what is selected.
+  useEffect(() => {
+    if (selectedSequence === null) return;
+    const element = rows.current.get(selectedSequence);
+    if (element === undefined) return;
+    element.scrollIntoView({ block: "nearest", behavior: "auto" });
+  }, [selectedSequence, filteredEvents]);
 
   useEffect(() => {
     if (filter !== "ALL" && !events.some((e) => e.type === filter)) setFilter("ALL");
@@ -118,7 +169,7 @@ export function EventStream({
   useEffect(() => {
     if (!stick) return;
     stickEl.current?.scrollIntoView({ block: "nearest", behavior: "auto" });
-  }, [events.length, stick]);
+  }, [events.length, stick, selectedSequence]);
 
   const counts = useMemo(() => {
     const c = new Map<string, number>();
@@ -139,6 +190,18 @@ export function EventStream({
           {stick ? "auto-follow ▲" : "paused ▼"}
         </button>
       </div>
+      {selectedSequence !== null ? (
+        <div className="flex flex-wrap items-center gap-2 border-b border-[var(--line-0)] bg-[var(--violet-soft)] px-2 py-1 text-[10.5px] text-[var(--violet)]">
+          <Crosshair className="h-3 w-3" />
+          <span className="font-mono">selected event #{selectedSequence}</span>
+          <span className="text-[var(--fg-3)]">the shared cursor and every synchronized view follow this event</span>
+          {onClearSelection ? (
+            <button type="button" onClick={onClearSelection} className="ml-auto underline decoration-dotted underline-offset-2 hover:text-[var(--fg-0)]">
+              clear event selection
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {Object.keys(counts).length > 0 ? (
         <div className="flex flex-wrap gap-1 border-b border-[var(--line-0)] px-2 py-1.5">
           <button
@@ -169,7 +232,14 @@ export function EventStream({
       ) : (
         <ul className="max-h-[420px] overflow-y-auto" onScroll={() => setStick(true)}>
           {filteredEvents.map((ev, i) => (
-            <EventRow key={`${ev.sequence}-${ev.type}`} ev={ev} index={i} />
+            <EventRow
+              key={`${ev.sequence}-${ev.type}`}
+              ev={ev}
+              index={i}
+              selected={ev.sequence === selectedSequence}
+              onSelect={(event) => onSelect?.(event)}
+              registerRow={registerRow}
+            />
           ))}
           <div ref={stickEl} />
         </ul>

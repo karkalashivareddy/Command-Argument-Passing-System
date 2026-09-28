@@ -21,8 +21,21 @@ function snapshotEvent(sequence: number, timestamp: string, rss: number | null, 
   return { id: `ev-${sequence}`, sessionId: "s", sequence, type: "process.snapshot", source: "gateway", timestamp, monotonicMs: null, pid: 100, payload };
 }
 
-const mkSession = (id: string, command: string, status: SessionRecord["status"], exitCode: number | null, signal: number | null, durationMs: number, args: string[] = []): SessionRecord => ({
-  id,
+/** A snapshot carrying the fault and I/O counters that are now first class. */
+function telemetrySnapshot(sequence: number, timestamp: string, fields: Record<string, number | null>): CanonicalEvent {
+  const payload: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    payload[key] = {
+      value,
+      provenance: value === null ? "UNAVAILABLE" : key.endsWith("PerSec") ? "DERIVED" : "OBSERVED",
+      source: key.startsWith("minor") || key.startsWith("major") ? "/proc/100/stat" : "/proc/100/io",
+      reason: value === null ? "no data" : undefined,
+    };
+  }
+  return { id: `io-${sequence}`, sessionId: "s", sequence, type: "process.snapshot", source: "gateway", timestamp, monotonicMs: null, pid: 100, payload };
+}
+
+const mkSession = (id: string, command: string, status: SessionRecord["status"], exitCode: number | null, signal: number | null, durationMs: number, args: string[] = []): SessionRecord => ({  id,  id,
   command,
   args,
   argv: [command, ...args],
@@ -73,6 +86,68 @@ describe("computeRuntimePeaks", () => {
     const peaks = computeRuntimePeaks([snapshotEvent(1, "2026-01-01T10:00:00.100Z", 120, null, null, null, null)]);
     expect(peaks.peakRssBytes?.value).toBe(120);
     expect(peaks.medianRssBytes).toBeNull();
+  });
+});
+
+describe("runtime fault and I/O aggregates", () => {
+  const events: CanonicalEvent[] = [
+    telemetrySnapshot(1, "2026-01-01T10:00:00.100Z", { minorFaults: 100, majorFaults: 0, rcharBytes: 1_000, wcharBytes: 500, readBytes: 0, writeBytes: 0 }),
+    telemetrySnapshot(2, "2026-01-01T10:00:00.600Z", {
+      minorFaults: 900, majorFaults: 12, rcharBytes: 3_000, wcharBytes: 1_500, readBytes: 4_096, writeBytes: 8_192,
+      minorFaultsPerSec: 1_600, majorFaultsPerSec: 24, rcharBytesPerSec: 4_000, wcharBytesPerSec: 2_000,
+    }),
+    telemetrySnapshot(3, "2026-01-01T10:00:01.100Z", {
+      minorFaults: 950, majorFaults: 12, rcharBytes: 3_500, wcharBytes: 1_500, readBytes: 4_096, writeBytes: 8_192,
+      minorFaultsPerSec: 100, majorFaultsPerSec: 0, rcharBytesPerSec: 1_000, wcharBytesPerSec: 0,
+    }),
+  ];
+
+  it("peaks faults, peaks rates, and totals cumulative I/O counters", () => {
+    const peaks = computeRuntimePeaks(events);
+    expect(peaks.peakMinorFaults).toMatchObject({ value: 950, atTimeMs: 1_000 });
+    expect(peaks.peakMajorFaults).toMatchObject({ value: 12, atTimeMs: 500 });
+    expect(peaks.peakMinorFaultsPerSec).toMatchObject({ value: 1_600, atTimeMs: 500 });
+    expect(peaks.peakRcharBytesPerSec).toMatchObject({ value: 4_000 });
+    // A flat counter is a real measured rate of zero, not a missing value.
+    expect(peaks.peakWcharBytesPerSec).toMatchObject({ value: 2_000 });
+    // Cumulative counters: the last valid observation is the session total.
+    expect(peaks.totalRcharBytes).toBe(3_500);
+    expect(peaks.totalWcharBytes).toBe(1_500);
+    expect(peaks.totalReadBytes).toBe(4_096);
+    expect(peaks.totalWriteBytes).toBe(8_192);
+  });
+
+  it("keeps the last valid total when the final sample is unavailable", () => {
+    const peaks = computeRuntimePeaks([
+      ...events,
+      telemetrySnapshot(4, "2026-01-01T10:00:01.600Z", { minorFaults: null, majorFaults: null, rcharBytes: null, wcharBytes: null, readBytes: null, writeBytes: null }),
+    ]);
+    expect(peaks.sampleCount).toBe(4);
+    expect(peaks.totalRcharBytes).toBe(3_500);
+    expect(peaks.totalWcharBytes).toBe(1_500);
+    expect(peaks.peakMinorFaults?.value).toBe(950);
+  });
+
+  it("adds fault and I/O deltas to a session comparison", () => {
+    const cmp = compareSessions(
+      mkSession("a", "workload", "COMPLETED", 0, null, 1_200),
+      mkSession("b", "workload", "COMPLETED", 0, null, 2_200),
+      events,
+      events,
+    );
+    expect(cmp.left.peakMajorFaults).toBe(12);
+    expect(cmp.left.totalWcharBytes).toBe(1_500);
+    expect(cmp.deltas.majorFaultsDelta).toBe(0);
+    expect(cmp.deltas.wcharDeltaBytes).toBe(0);
+    // Missing telemetry stays null instead of collapsing to a zero delta.
+    const noTelemetry = compareSessions(
+      mkSession("a", "workload", "COMPLETED", 0, null, 1_200),
+      mkSession("b", "workload", "COMPLETED", 0, null, 2_200),
+      [snapshotEvent(1, "2026-01-01T10:00:00.100Z", 10, null, null, null, 100)],
+      events,
+    );
+    expect(noTelemetry.deltas.majorFaultsDelta).toBeNull();
+    expect(noTelemetry.deltas.rcharDeltaBytes).toBeNull();
   });
 });
 

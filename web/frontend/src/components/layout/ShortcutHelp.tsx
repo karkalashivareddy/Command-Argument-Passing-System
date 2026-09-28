@@ -14,6 +14,11 @@ const SHORTCUTS: Array<{ keys: string[]; label: string }> = [
   { keys: ["G"], label: "Go to Playground" },
   { keys: ["K"], label: "Command palette" },
   { keys: ["?"], label: "Show this help" },
+  { keys: ["R"], label: "3D: reset camera" },
+  { keys: ["F"], label: "3D: focus the selected process" },
+  { keys: ["Space"], label: "3D: toggle replay playback" },
+  { keys: ["←", "→"], label: "3D: step between recorded samples" },
+  { keys: ["Esc"], label: "3D: clear the selection" },
 ];
 
 export function ShortcutHelp() {

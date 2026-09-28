@@ -29,6 +29,16 @@ const NAV_ACTIONS: Action[] = [
   { id: "st", kind: "navigate", label: "Settings", hint: "/settings", to: "/settings", category: "Navigate" },
 ];
 
+/**
+ * 3D entry points. The execution-specific ones are resolved from the current
+ * URL, so the palette never invents a session id.
+ */
+const SPACE_ACTIONS: Action[] = [
+  { id: "sp-latest", kind: "navigate", label: "Open 3D Process Space", hint: "this execution", to: "", category: "3D space" },
+  { id: "sp-topology", kind: "navigate", label: "Switch to 3D topology mode", hint: "lanes and process-tree depth", to: "?mode=topology", category: "3D space" },
+  { id: "sp-timeline", kind: "navigate", label: "Switch to 3D timeline mode", hint: "execution time on the Z axis", to: "?mode=timeline", category: "3D space" },
+];
+
 const EXEC_ACTIONS: Action[] = [
   { id: "e-argv", kind: "execute", label: "echo Hello Shiva", hint: "argument passing", command: { command: "echo", args: ["Hello", "Shiva"] }, category: "Run" },
   { id: "e-sleep", kind: "execute", label: "sleep 4", hint: "running process lifecycle", command: { command: "sleep", args: ["4"] }, category: "Run" },
@@ -54,12 +64,28 @@ export function CommandPalette() {
   const [idx, setIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  /**
+   * 3D commands resolve against the URL the reader is already on, so they work
+   * from any execution without carrying a session id in the palette.
+   */
+  const spaceActions = useMemo<Action[]>(() => {
+    const match = window.location.pathname.match(/^\/execution\/([^/]+)/);
+    const sessionId = match?.[1] ?? null;
+    if (sessionId === null) return [];
+    const isSpace = window.location.pathname.endsWith("/3d");
+    const base = isSpace ? `/execution/${sessionId}/3d` : `/execution/${sessionId}/3d`;
+    return SPACE_ACTIONS.map((action) => ({
+      ...action,
+      to: action.to === "" ? base : `${base}${action.to}`,
+    }));
+  }, [open]);
+
   const actions = useMemo(() => {
-    const all = [...EXEC_ACTIONS, ...NAV_ACTIONS];
+    const all = [...EXEC_ACTIONS, ...NAV_ACTIONS, ...spaceActions];
     const needle = q.trim().toLowerCase();
     if (!needle) return all;
     return all.filter((a) => `${a.label} ${a.hint} ${a.category}`.toLowerCase().includes(needle));
-  }, [q]);
+  }, [q, spaceActions]);
 
   useEffect(() => {
     if (open) {
@@ -71,7 +97,7 @@ export function CommandPalette() {
 
   function run(action: Action) {
     setOpen(false);
-    if (action.kind === "navigate" && action.to) {
+    if (action.kind === "navigate" && action.to !== undefined) {
       navigate(action.to);
       return;
     }
