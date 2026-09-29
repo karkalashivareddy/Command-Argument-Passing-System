@@ -3,6 +3,21 @@
 # Grouped so a routine bump is one reviewable change instead of a dozen, and
 # kept in lockstep with the CI matrix so an update is verified by the same
 # jobs that would have caught a regression.
+#
+# Semver-major npm bumps cannot be suppressed from this file. Both obvious
+# ways were tried and Dependabot's own config check rejected each one:
+#
+#   version-updates.ignore -> "contains additional properties
+#                             [\"version-updates\"] outside of the schema"
+#   ignore + update-type   -> "contains additional properties
+#                             [\"update-type\"] outside of the schema"
+#
+# So majors are handled by review instead of by config. In practice that
+# means: a major bump arrives as a pull request whose checks fail, because a
+# breaking change cannot be a lockfile edit. Close it, then raise the major
+# deliberately by hand. The `dependency audit` job is the real control, and
+# it fails the build on any known high or critical advisory, so an
+# unreviewed major cannot quietly land an unpatched dependency.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -10,16 +25,6 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-    # A semver-major npm bump is a migration, not a patch, and Dependabot
-    # cannot make that change here: zod 3 -> 4 alone changed how schemas are
-    # built. Every major bump attempted so far failed the same jobs that
-    # verify main, so majors are raised deliberately by hand instead.
-    #
-    # `ignore` is used rather than `version-updates.ignore` because the latter
-    # is rejected by Dependabot's own config schema for this file.
-    ignore:
-      - dependency-name: "*"
-        update-type: "version-update:semver-major"
     groups:
       fastify:
         patterns: ["fastify", "@fastify/*"]
@@ -35,11 +40,6 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-    # Same reasoning as the gateway: lucide-react 0 -> 1, jsdom 29 -> 30 and
-    # motion 12 -> 13 were all proposed and all broke the frontend build.
-    ignore:
-      - dependency-name: "*"
-        update-type: "version-update:semver-major"
     groups:
       react:
         patterns: ["react", "react-dom", "react-router-dom", "@types/react", "@types/react-dom"]
