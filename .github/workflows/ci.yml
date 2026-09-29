@@ -307,7 +307,11 @@ jobs:
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.language == 'c-cpp' && 'none' || 'autobuild' }}
+          # Both languages are extracted without a build. C is traced by the
+          # extractor over the source rather than a traced compile, and
+          # JavaScript/TypeScript extraction is buildless by nature: the
+          # autobuild mode is rejected outright for it.
+          build-mode: none
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@v3
