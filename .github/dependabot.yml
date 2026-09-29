@@ -10,6 +10,14 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # A semver-major npm bump is a migration, not a patch, and Dependabot
+    # cannot make that change here: zod 3 -> 4 alone changed how schemas are
+    # built. Every major bump attempted so far failed the same jobs that
+    # verify main, so majors are raised deliberately by hand instead.
+    version-updates:
+      - ignore:
+          - dependency-name: "*"
+            update-type: "version-update:semver-major"
     groups:
       fastify:
         patterns: ["fastify", "@fastify/*"]
@@ -25,6 +33,12 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # Same reasoning as the gateway: lucide-react 0 -> 1, jsdom 29 -> 30 and
+    # motion 12 -> 13 were all proposed and all broke the frontend build.
+    version-updates:
+      - ignore:
+          - dependency-name: "*"
+            update-type: "version-update:semver-major"
     groups:
       react:
         patterns: ["react", "react-dom", "react-router-dom", "@types/react", "@types/react-dom"]
