@@ -17,6 +17,9 @@ export type CanonicalEventType =
   | "process.snapshot"
   | "process.exited"
   | "process.exec_error"
+  | "process.wait_failed"
+  | "process.launch_failed"
+  | "execution.cancelled"
   | "signal.received"
   | "session.summary";
 
@@ -166,10 +169,11 @@ export interface AnalyticsOverview {
 }
 
 export interface HealthResponse {
-  status: "ok";
-  engine: { available: boolean; path: string };
+  /** Liveness only: the gateway process is running. */
+  status: string;
   version: string;
   platform: string;
+  uptimeSeconds: number;
 }
 
 export interface WorkloadArgSpec {
@@ -196,14 +200,24 @@ export interface WorkloadProfileCapability {
 }
 
 export interface CapabilitiesResponse {
+  version: string;
   platform: string;
   engineAvailable: boolean;
-  capsPath: string;
+  /** Repository-relative path of the engine binary, when inside the repository. */
+  enginePath: string;
   allowlist: string[];
   limits: { maxConcurrent: number; defaultTimeoutMs: number; maxTimeoutMs: number; maxOutputBytes: number };
   workspace: string;
-  redirection: { supported: boolean; modes: string[] };
-  signals: { supported: boolean };
+  workspaceAvailable: boolean;
+  security: {
+    bindMode: "local" | "remote";
+    loopbackOnly: boolean;
+    authentication: string;
+    executableResolution: string;
+    redirectionHardening: string;
+  };
+  redirection: { supported: boolean; modes: string[]; stderr: boolean };
+  signals: { supported: string[]; identityVerified: boolean };
   workloads: {
     count: number;
     available: number;
@@ -216,19 +230,31 @@ export interface CapabilitiesResponse {
     source: string;
     /** Every metric key a persisted process.snapshot can carry. */
     metrics: string[];
+    /**
+     * Metrics read from procfs on the sample that reports them. A rate is NOT
+     * here: it is computed from two samples, and the previous single
+     * `collectedMetrics` list conflated the two, which let a reader conclude
+     * `cpuPercent` was a procfs field.
+     */
+    observedMetrics: string[];
+    /** Metrics computed from observations rather than read. */
+    derivedMetrics: string[];
+    /** Metrics taken from the gateway's own child-process handle. */
+    gatewayMetrics: string[];
+    /** Per-metric classification, so nothing has to be inferred client-side. */
+    metricProvenance: Record<string, "OBSERVED" | "DERIVED" | "GATEWAY">;
     perMetricProvenance: string;
     /** Collected elsewhere or not at all. The UI must not imply coverage. */
     notCollected: string[];
-    /** Metric keys the collector actually reads out of procfs. */
-    collectedMetrics: string[];
     /** Metric keys derived by differencing two valid samples. */
     derivedRateMetrics: string[];
     firstSampleRule: string;
+    counterResetRule: string;
     identityVerification: string;
     categories: TelemetryCategoryCapability[];
     unsupported: TelemetryCategoryCapability[];
   };
-  bind: string;
+  bind: { mode: string; host: string; port: number };
 }
 
 export interface TelemetryCategoryCapability {
@@ -237,6 +263,8 @@ export interface TelemetryCategoryCapability {
   detail: string;
   supported: boolean;
   metrics: string[];
+  observed?: string[];
+  derived?: string[];
   reason?: string;
 }
 

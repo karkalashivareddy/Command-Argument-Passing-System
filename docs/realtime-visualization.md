@@ -19,7 +19,7 @@ The browser treats stored and streamed canonical events as the lifecycle source 
 
 ## Motion policy
 
-Motion can follow newly received rows or changed event-backed state. No infinite pipeline sweep or simulated execution progress is used. Reduced-motion preferences are handled globally in `src/styles/index.css`.
+Motion can follow newly received rows or changed event-backed state. No infinite pipeline sweep or simulated execution progress is used. Reduced-motion preferences are handled globally in `web/frontend/src/styles/index.css`.
 
 ## Procfs sampling and replay
 

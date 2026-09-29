@@ -24,26 +24,34 @@ int parser_parse(const char *line, char ***out_argv, int *out_argc);
 /*
  * Remove I/O redirection tokens from an argv built by parser_parse().
  *
- * A redirection is written as three understood spellings, each as a
- * whole token:  ">"  ">>"  "<".  Concretely:
+ * CAPS IS NOT A SHELL.  There is no quoting, no globbing, no expansion, no
+ * pipe, no command substitution, and no job control.  A command line is a
+ * sequence of whitespace-separated tokens, and only the three redirections
+ * below are understood:
  *   - ">"       truncating output
  *   - ">>"      appending output
  *   - "<"       input
- * each followed by exactly one file-name token.
+ * each of which must be a whole token followed by exactly one file-name
+ * token.  Anything glued to an operator ("cmd>file") is an ordinary token,
+ * because CAPS has no lexer that could split it.
  *
  * Operation is validation-first and then mutation:
- *   - the token count is validated before anything is removed, so on
- *     any error the original argv is left untouched;
+ *   - the token count is validated before anything is removed, so on any
+ *     error the original argv is left untouched;
+ *   - a redirection operator may never occupy the file-name slot, so
+ *     "echo hi > > out.txt" is a syntax error rather than a write to a file
+ *     named ">";
  *   - the file token's ownership is *transferred* into the returned
- *     redirection array (arcv no longer references it);
+ *     redirection array (argv no longer references it);
  *   - operator tokens are freed; the remaining argv is compacted in
  *     place and argv[argc] == NULL is re-established.
  *
  * Returns:
  *   0  on success (out_redirs may be NULL with *out_n == 0),
  *  -1 on allocation failure (argv untouched),
- *  -2 on a syntax error (missing file, already reported to stderr;
- *     argv untouched, *out_redirs is NULL and *out_n is 0).
+ *  -2 on a syntax error (missing file, or an operator in the file slot;
+ *     already reported to stderr; argv untouched, *out_redirs is NULL
+ *     and *out_n is 0).
  */
 int parser_split_redirections(char **argv, int *argc,
                               redirection_t **out_redirs, int *out_n);

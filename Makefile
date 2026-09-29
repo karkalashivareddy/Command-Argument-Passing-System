@@ -6,6 +6,7 @@ LDLIBS  :=
 
 BUILD   := build
 TARGET  := caps
+VERSION_HEADER := include/version.h
 
 SRCS    := $(wildcard src/*.c)
 OBJS    := $(SRCS:src/%.c=$(BUILD)/%.o)
@@ -32,7 +33,9 @@ TESTS   := tests/test_smoke.sh \
            tests/test_exit_parse.sh \
            tests/test_fd_edge.sh \
            tests/test_monitor.sh \
-           tests/test_waitpolicy.sh
+           tests/test_lifecycle.sh \
+           tests/test_waitpolicy.sh \
+           tests/test_wait_failure.sh
 HELPER  := $(BUILD)/status_probe
 
 # Controlled-workload tests (run the real workload binaries)
@@ -41,9 +44,9 @@ WL_TESTS := tests/workloads/test_workloads.sh
 # Tests that need the status_probe helper binary
 HELPER_TESTS := *execution*|*exit_status*|*signals*|*monitor*
 
-# waitpid() failure-policy probe (links the non-main objects directly)
+# waitpid() failure-policy probes (link the non-main objects directly)
 WAIT_HELPER := $(BUILD)/wait_probe
-WAIT_TESTS  := *waitpolicy*
+WAIT_TESTS  := *waitpolicy*|*wait_failure*
 
 # Sanitizer build (AddressSanitizer + UndefinedBehaviorSanitizer)
 SAN_TARGET := caps-asan
@@ -53,20 +56,33 @@ SAN_FLAGS  := -fsanitize=address,undefined -fno-omit-frame-pointer
 WL_SAN_DIR   := build/workloads-asan
 WL_SAN_BINS  := $(patsubst $(WORKLOAD_DIR)/%.c,$(WL_SAN_DIR)/%,$(WORKLOAD_SRCS))
 
+# The lifecycle suite needs no helper binary, but the parser cases chdir into
+# a scratch directory and must be able to find the engine again afterwards.
+LIFECYCLE_TESTS := *lifecycle*
+
+# The product version has one canonical source (PRODUCT_VERSION in
+# web/backend/src/config/env.ts).  It is projected into the C engine so
+# caps --version and the running gateway cannot describe different products.
+VERSION_SRC := web/backend/src/config/env.ts
+
 all: $(TARGET) workloads
+
+version:
+	@sh scripts/generate-version.sh
+
+$(VERSION_HEADER): $(VERSION_SRC) scripts/generate-version.sh
+	@sh scripts/generate-version.sh
 
 $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 
-$(BUILD)/%.o: src/%.c | $(BUILD)
+$(BUILD)/%.o: src/%.c $(VERSION_HEADER) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 # ---------------------------------------------------------------- workloads
 # Each workload is an independent binary: no shared library, no coupling
 # to the CAPS engine.  `make` builds them so the gateway's capability
 # probe reports the truth instead of a guess.
-
-caps: $(TARGET)
 
 workloads: $(WORKLOAD_BINS)
 
@@ -113,7 +129,7 @@ test-workloads: workloads
 	echo "ALL WORKLOAD TESTS PASSED"
 
 # AddressSanitizer + UBSan build (rebuilds sources directly into one binary)
-$(SAN_TARGET): $(SRCS) include/*.h
+$(SAN_TARGET): $(SRCS) include/*.h $(VERSION_HEADER)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN_FLAGS) -o $@ $(SRCS)
 
 test-asan: $(SAN_TARGET) $(HELPER) $(WAIT_HELPER)
@@ -142,7 +158,7 @@ clean:
 
 -include $(DEPS)
 
-.PHONY: all caps workloads run test test-workloads test-asan \
+.PHONY: all version workloads run test test-workloads test-asan \
         test-workloads-asan clean web web-backend web-frontend web-install
 
 $(WL_SAN_DIR):

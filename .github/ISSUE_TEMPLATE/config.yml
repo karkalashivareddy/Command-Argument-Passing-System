@@ -1,0 +1,10 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/karkalashivareddy/Command-Argument-Passing-System/blob/main/docs/SECURITY.md
+    about: >
+      Report a vulnerability privately. Do not open a public issue for an
+      unauthenticated-execution or sandbox-escape finding.
+  - name: What CAPS observes and does not
+    url: https://github.com/karkalashivareddy/Command-Argument-Passing-System/blob/main/docs/observability-model.md
+    about: Read this before reporting a "missing metric"; it may be a documented scope limit.

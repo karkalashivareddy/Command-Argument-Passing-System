@@ -55,7 +55,7 @@ re-executed during replay, export, comparison, or report generation.
 The replay cursor is the only time-driven motion in these views. Curves
 grow when real `process.snapshot` events arrive; annotations appear when
 their lifecycle events arrive. No entering/updating animation fakes live
-progress. Reduced-motion is handled globally in `src/styles/index.css`.
+progress. Reduced-motion is handled globally in `web/frontend/src/styles/index.css`.
 
 ## Implementation map
 

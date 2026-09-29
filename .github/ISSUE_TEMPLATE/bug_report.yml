@@ -1,0 +1,55 @@
+name: Bug report
+description: Something the system does is wrong or misleading.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        CAPS is a process-execution observatory. A report is strongest when it
+        states what the system *claimed* and what the kernel actually did.
+  - type: textarea
+    id: expected
+    attributes:
+      label: What the system showed
+      description: The value, label, or status the UI or API presented.
+      placeholder: "`cpuPercent: 0%` on a process that was definitely using CPU"
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What should have been shown, and why
+      description: The correct value or wording, and the evidence for it.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Session id, event sequence, and platform
+      description: >
+        The session id and the event sequence number make this reproducible
+        without guessing. Platform and whether it is WSL2 matters for anything
+        involving procfs.
+      placeholder: "session exec_... , sequence 12, Ubuntu 24.04 on WSL2"
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Which layer
+      options:
+        - C engine (fork/exec/wait, parser, signals, redirection)
+        - Gateway (allowlist, execution, persistence, SSE)
+        - Telemetry (procfs sampling, provenance, identity)
+        - Frontend (correlation, views, replay)
+        - Build, CI, or documentation
+    validations:
+      required: true

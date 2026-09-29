@@ -1,197 +1,237 @@
-# CAPS Observatory — Web Architecture
+# CAPS — Web Architecture
+
+> **Scope.** This document covers the gateway: module layout, the event model,
+> storage, and transport. For the whole system — including the C engine, the
+> trust boundaries, and the thirteen event-stream invariants — see
+> [architecture.md](architecture.md), which is the reference. For what is and is
+> not observed, see [observability-model.md](observability-model.md).
 
 ## 1. System overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Browser — React + TypeScript + Vite                        │
-│  (feature-oriented pages, SSE store, motion library)        │
-└───────────────┬───────────────────────────────┬─────────────┘
-                │ HTTP (REST)                   │ GET /api/sessions/:id/events (SSE)
-                ▼                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Web Gateway — Node.js 22 + TypeScript + Fastify            │
-│                                                            │
-│  validation (Zod)      session registry       SSE bus       │
-│  execution runner      security layer          analytics    │
-│  event parser          event normalizer        SQLite       │
-└───────────────┬───────────────────────────────┬─────────────┘
-                │ structured argv               │ JSON events per line + stdout
-                ▼                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│  CAPS — existing C11/POSIX engine (./caps)                 │
-│  --monitor --json [--redir-in/out/append] <cmd> <args...>  │
-│                                                            │
-│  getline → parser → argv[] → fork() → dup2() → execvp()    │
-│          → waitpid() → status macros → monitor JSON        │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Browser — React 19 + TypeScript + Vite                          │
+│  pages · components/space (3D observatory) · lib (pure models)   │
+└───────────────┬──────────────────────────────┬───────────────────┘
+                │ REST                         │ SSE
+                │ POST /api/sessions           │ /api/sessions/:id/events
+                │ GET  /api/...                │ /api/live/stream
+                ▼                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Gateway — Node.js 22 + TypeScript + Fastify 5                  │
+│                                                                  │
+│  SECURITY    allowlist → verified absolute path, workspace policy │
+│  EXECUTION   runner · registry · terminator · output classifier  │
+│  STORAGE     versioned migrations · transactions · repositories  │
+│  TRANSPORT   EventBus (buffered) · SseStream                     │
+│  TELEMETRY   procfs collector · sampler · provenance             │
+│  ANALYTICS   percentiles · peaks · comparison                    │
+└───────────────┬──────────────────────────────────────────────────┘
+                │ spawn(argv, shell: false)
+                ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  CAPS — C11/POSIX engine (./caps)                                │
+│  --monitor --json [--redir-in|out|append F] <absolute> <args…>  │
+│                                                                  │
+│  parser.c → process.c → fork() · execvp() · waitpid() → monitor.c│
+└───────────────┬──────────────────────────────────────────────────┘
+                │ one JSON object per line on stderr
+                ▼
+        Linux kernel — the real target process, the real /proc
 ```
 
-**Rule:** the C engine is the sole process executor. The gateway only
-spawns `./caps` with an explicit `argv` array, `shell: false`, and
-passes the requested command and arguments through verbatim.
+**The rule that keeps the layers honest:** the C engine is the *only* process
+executor. The gateway never calls `fork()` or `execvp()`; it spawns `./caps`
+with an explicit argv array and `shell: false`, and the engine runs the
+requested command. The browser executes nothing.
 
-## 2. The execution path (end to end)
+## 2. The execution path, end to end
 
 1. The frontend posts a **structured request**:
-   `{ command, args, redirections?, timeoutMs? }`.
-2. The gateway validates with Zod (allowlist, path policy, limits) and
-   creates a session row + `execution.created` event.
-3. The gateway builds the CAPS argv:
+   `{ command, args, redirections?, timeoutMs? }`. There is no command string
+   for a shell to interpret.
+2. `zod` validates shape, size, and semantics. A redirection target that is
+   empty or whitespace-only is a 400, not a silently ignored field.
+3. The allowlist resolves `command` to a **verified absolute path**:
+   `realpath` → `lstat` (regular file, not a symlink) → `access(X_OK)`. `PATH`
+   is never consulted.
+4. The session row, its redirection rows, and the `execution.created` event are
+   written in **one transaction**.
+5. The gateway builds the CAPS argv and spawns it with `cwd` = the workspace,
+   `shell: false`, and an environment of `PATH`/`LANG`/`HOME`/`TERM` only.
+6. CAPS runs the real lifecycle and writes one JSON object per line to stderr.
+   The command's own output goes to stdout.
+7. The gateway classifies **each stderr line exactly once** into
+   monitor-protocol / CAPS-diagnostic / target-output, normalizes the monitor
+   lines, assigns the next sequence, persists, and publishes.
+8. The frontend receives `caps.event` frames and updates only what changed.
 
-   ```
-   [<caps>, "--monitor", "--json", ("--redir-in"|"--redir-out"|"--redir-append"|<file>)*, command, ...args]
-   ```
-
-   and `spawn()`s it with `cwd` = the safe workspace and `shell: false`.
-4. CAPS runs the real lifecycle and writes **one JSON object per line to
-   stderr**; the command's own output goes to stdout.
-5. The gateway reads stderr line-by-line, validates JSON, normalizes each
-   event, assigns a monotonic `sequence`, persists it, and broadcasts it.
-6. The frontend receives events over an SSE stream and updates only the
-   affected parts of its store.
-
-## 3. Web Gateway module layout (`web/backend`)
+## 3. Module layout (`web/backend/src`)
 
 ```
-src/
-  server.ts            Fastify bootstrap, route registration, shutdown
-  config/env.ts        typed environment/config (Zod-validated)
-  config/paths.ts      caps executable & workspace resolution
-  db/database.ts       better-sqlite3 connection + migrations
-  db/repositories/     sessions, events, analytics queries
-  api/routes.ts        REST route wiring
-  api/health.ts        /api/health
-  api/capabilities.ts  /api/capabilities
-  api/sessions.ts      POST/GET sessions, history
-  api/session-detail.ts GET /api/sessions/:id, argv, output, replay
-  api/events.ts        SSE endpoint
-  api/terminate.ts     POST /api/sessions/:id/terminate
-  api/processes.ts     GET /api/processes
-  api/analytics.ts     aggregated real metrics
-  execution/runner.ts  spawn ./caps, wire pipes, lifecycle
-  execution/parser.ts  stderr line → raw JSON event
-  execution/normalizer.ts raw CAPS event → canonical envelope
-  execution/registry.ts active-session map + concurrency control
-  execution/terminator.ts safe signal delivery + timeout policy
-  events/bus.ts        topic publish/subscribe for SSE
-  events/sse.ts        SSE client management, replay-on-reconnect
-  analytics/service.ts percentile/aggregate computation
-  security/policy.ts   allowlist, path policy, limits, threat model
+server.ts              Fastify bootstrap, request boundary, shutdown sequence
+config/env.ts          validated configuration, bind mode, cross-field checks
+db/database.ts         open, pragmas, versioned migrations, transactions
+db/repositories/       sessions.ts, events.ts
+events/bus.ts          in-process pub/sub with a buffered subscription
+events/sse.ts          SSE frames, keep-alive, Last-Event-ID parsing
+events/invariants.ts   validateEventStream() — the thirteen rules
+execution/runner.ts    spawn, stderr classification, lifecycle, finalization
+execution/registry.ts  active-session map, concurrency, stale sweep
+execution/terminator.ts signal delivery with PID-reuse identity checks
+execution/normalizer.ts raw CAPS event → canonical envelope
+execution/parser.ts    one stderr line → event or diagnostic
+execution/output.ts    line classification for the three output channels
+execution/workloadCatalog.ts  bounded workload profiles and their scope
+telemetry/collector.ts the only place that reads /proc
+telemetry/sampler.ts   cadence, identity verification, rate derivation
+telemetry/derive.ts    cross-sample rates and counter-reset policy
+telemetry/capabilities.ts  the published provenance classification
+telemetry/types.ts     the snapshot contract and its key lists
+analytics/service.ts   percentiles, runtime peaks, comparison, aggregates
+security/policy.ts     allowlist, executable resolution, path policy, limits
+types/observability.ts the canonical event and session contract
+utils/logger.ts        structured, bounded logging from validated config
+utils/ids.ts           id generation
 ```
+
+There is no `config/paths.ts` and no `api/health.ts` / `api/sessions.ts` split:
+routes are registered from a single `api/routes.ts`, and path resolution moved
+into `config/env.ts` when the bind boundary became cross-field.
 
 ## 4. Event model
 
-### Raw CAPS monitor events (stderr, JSON line)
+### Raw CAPS monitor events (stderr, one JSON object per line)
 
-| Raw event              | Carries                                                      |
-| ---------------------- | ------------------------------------------------------------ |
-| `COMMAND_RECEIVED`     | `command` label                                              |
-| `PARSED`               | `command` label                                              |
-| `COMMAND_PARSE_ERROR`  | `command`                                                    |
-| `REDIRECTION_OPENED`   | `command`                                                    |
-| `REDIRECTION_FAILED`   | `command`                                                    |
-| `PROCESS_STARTED`      | `pid`, `command`                                             |
-| `PROCESS_EXITED`       | `pid`, `exit_code`, `duration_ms` (monotonic), `command`     |
-| `SIGNAL_RECEIVED`      | `pid`, `signal`, `command`                                   |
-| `EXEC_ERROR`           | `pid`, `command` (child reported saved `execvp()` errno)       |
-| `SESSION_SUMMARY`      | counters + `average_duration_ms`                             |
+| Raw event | Carries |
+| --- | --- |
+| `COMMAND_RECEIVED` | `command` label |
+| `PARSED` | `command` label |
+| `COMMAND_PARSE_ERROR` | `command` label |
+| `REDIRECTION_OPENED` / `REDIRECTION_FAILED` | `command` label |
+| `PROCESS_STARTED` | `pid`, `command` |
+| `PROCESS_EXITED` | `pid`, `exit_code`, `duration_ms`, `outcome` |
+| `SIGNAL_RECEIVED` | `pid`, `signal`, `outcome` |
+| `EXEC_ERROR` | `pid`, `exit_code` (126/127), `errno`, `errno_name`, `reason`, `outcome` |
+| `WAIT_FAILED` | `pid`, `errno`, `reason`, `outcome` |
+| `EXECUTION_FAILED` | `errno`, `reason`, `outcome` |
+| `SESSION_SUMMARY` | counters, `exec_errors`, `launch_errors`, `observed_cleanly` |
 
-The gateway **does not invent C-side events**. Anything the C engine
-cannot observe (e.g. an explicit `execvp()` success event) is either
-derived honestly from surrounding events or labeled as inferred in the UI.
+### Canonical event types
 
-### Canonical envelope (stored + streamed)
+| Type | Source | Terminal |
+| --- | --- | --- |
+| `execution.created` | gateway | |
+| `execution.started` | gateway | |
+| `process.started` | caps | |
+| `process.snapshot` | gateway | |
+| `signal.received` | caps | |
+| `process.exited` | caps | |
+| `process.exec_error` | caps | |
+| `process.wait_failed` | caps | |
+| `process.launch_failed` | caps | |
+| `command.*`, `redirection.*` | caps | |
+| `session.summary` | caps | |
+| `execution.completed` | gateway | ✔ |
+| `execution.failed` | gateway | ✔ |
+| `execution.timeout` | gateway | ✔ |
+| `execution.cancelled` | gateway | ✔ |
+
+One terminal event type per terminal session status, so the row and the stream
+can never describe the same ending differently.
+
+### Envelope
 
 ```json
 {
-  "id": "evt_01J4Q...",
-  "sessionId": "exec_01J4Q...",
+  "id": "evt_…",
+  "sessionId": "exec_…",
   "sequence": 7,
   "type": "process.exited",
   "source": "caps",
-  "timestamp": "2026-09-24T10:30:20.125Z",
-  "monotonicMs": 1842,
-  "pid": 12345,
-  "payload": { "exitCode": 0, "label": "echo Hello Shiva" }
+  "timestamp": "2026-03-01T12:00:03.412Z",
+  "monotonicMs": 3097,
+  "pid": 1944,
+  "payload": { "exitCode": 0, "durationMs": 3097, "outcome": "COMPLETED", "…": "…" }
 }
 ```
 
-Canonical types map 1:1 from raw events plus honest gateway lifecycle
-events:
+`sequence` is contiguous from 0 within a session, and is the only value
+`Last-Event-ID` may carry.
 
-- `execution.created`, `execution.started`, `execution.completed`,
-  `execution.failed`, `execution.timeout` (gateway facts)
-- `command.received`, `command.parsed`, `command.parse_error`
-- `redirection.opened`, `redirection.failed`
-- `process.started`, `process.exited`, `process.exec_error`
-- `signal.received`
-- `session.summary`
+## 5. Storage
 
-**Ordering:** `sequence` is authoritative; wall-clock timestamps are for
-display. `(sessionId, sequence)` is unique.
+SQLite through Node's built-in `node:sqlite`, in WAL mode, with foreign keys on
+and a busy timeout so an operator inspecting the file does not turn the next
+request into an immediate `SQLITE_BUSY`.
 
-## 5. State model
+```sql
+sessions(id PK, command, args, redirections, status, started_at, ended_at,
+         duration_ms, exit_code, signal, is_success, pid, stdout, stderr,
+         error, timeout_ms, created_at)
 
-### Session lifecycle
+events(id PK, session_id FK → sessions ON DELETE CASCADE, sequence, type,
+       source, timestamp, monotonic_ms, pid, payload,
+       payload_corrupt, payload_error, UNIQUE(session_id, sequence))
 
-```
-CREATED → STARTING → RUNNING → COMPLETED
-                    → FAILED       (caps crashed / spawn error)
-                    → TIMED_OUT    (gateway killed the child)
-                    → CANCELLED    (user requested termination → observed)
+redirections(id PK, session_id FK → sessions ON DELETE CASCADE, slot, target, flags)
+
+schema_version(version PK, name, applied_at)
 ```
 
-The terminal state is derived from observed events, never guessed.
+The event store is canonical. `sessions` is a query index over it, not a second
+source of truth. A `processes` table existed, was never written to, and was
+**removed** in migration 2 — leaving it would have implied a second truth.
 
-### Frontend store
+Migrations are ordered, transactional, and idempotent. A database from a newer
+build is refused rather than downgraded.
 
-A dedicated execution store (Zustand) holds `session`, `events[]`,
-`processes[]`, `argv`, `redirections`, and `streamState`. Components
-consume derived selectors. Router params (`/execution/:id`) rehydrate
-from history when not already present.
+## 6. Transport
 
-## 6. Real-time transport
+### Frame semantics
 
-- **Server-Sent Events** (`GET /api/sessions/:id/events`). The gateway
-  sends persisted events on connect (so a reconnecting client never
-  misses data — `Last-Event-ID` / `sequence` based), then broadcasts live
-  events.
-- No polling for execution events.
-- A global `/api/events/global`-style awareness is avoided; the Overview
-  reads live state via `GET /api/processes` + history list with a
-  client-side refresh channel when a local execution completes.
+Three separate concepts, deliberately not conflated:
 
-## 7. Persistence (SQLite)
+| Concept | Form | Meaning |
+| --- | --- | --- |
+| canonical event id | `evt_…` | unique identity of one event, database-wide |
+| canonical sequence | `0, 1, 2, …` | position within one session; what `Last-Event-ID` means |
+| transport frame | `caps.event` / `stream.end` | what is on the wire |
 
-- `sessions` — id, command, args JSON, redirections JSON, status,
-  started_at, ended_at, duration_ms, exit_code, signal, is_success,
-  variant (external/builtin), created_at.
-- `events` — id, session_id, sequence, type, source, timestamp,
-  monotonic_ms, pid, payload JSON.
-- `processes` — pid, session_id, command, state, started_at, ended_at,
-  duration_ms, exit_code, signal.
-- `redirections` — session_id, slot, target, mode, flags.
-- Indexes on `events(session_id, sequence)`, `sessions(created_at)`,
-  `sessions(status)`.
+Only `caps.event` carries an `id:`. `stream.end` carries none, so a reconnect
+can never resume from a position that does not exist.
 
-## 8. Security model
+### Race-free delivery order
 
-See `docs/security.md`. Summary:
+```
+1. subscribe to the bus WITH A BUFFER   (listener exists, delivery paused)
+2. read the persisted backlog
+3. send the backlog
+4. flush the buffer, dropping anything already sent
+```
 
-- Bind `127.0.0.1` only (allows WSL localhost forwarding for dev).
-- Command allowlist (safe binaries only, structured argv, `shell:false`).
-- Safe working directory; redirection file paths validated (no `..`, no
-  absolute, no NUL).
-- Timeouts, output caps, max concurrent sessions (default 4),
-  abandoned-session cleanup.
-- No secrets in env → never accepted/logged; docs warn about exposing the
-  gateway to untrusted networks.
+The previous order — read, compute the last sequence, then subscribe — left a
+window in which an event could be both persisted and published with no listener
+attached. The guarantee now implemented and tested: *a client never misses a
+persisted event because it connected at the wrong moment.*
 
-## 9. Performance
+## 7. Shutdown
 
-- Every event updates one store; React components subscribe selectively.
-- The event timeline is capped in the UI (tail window) while the full
-  event history stays in SQLite.
-- SSE clients are removed on socket close; completed sessions are pruned
-  from the registry memory but persisted.
+Deterministic, each step awaited before the next: stop accepting new
+executions → signal every active child (identity captured) → graceful window
+with identity-verified escalation → finalize every session so the database and
+the event stream agree → stop telemetry → close SSE and HTTP → close the
+database.
+
+Boot recovery applies the same mechanism to sessions left in flight by a
+previous process, so a recovered session gets a real terminal event rather than
+only a database row.
+
+## 8. Analytics
+
+Per-session work (runtime peaks, command profiles, comparison) runs over the
+events of the sessions it needs. The overview's cross-session telemetry
+aggregate is computed in SQL with `json_extract` over the same persisted rows,
+so every number remains traceable to evidence without materialising an object
+per snapshot. See [architecture.md](architecture.md#8-persistence) for the
+retention policy that keeps that cost bounded.

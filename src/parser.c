@@ -94,12 +94,32 @@ int parser_split_redirections(char **argv, int *argc,
 {
     int i, j, n_ops = 0;
 
+    /*
+     * Validation pass.  Two independent conditions must hold for every
+     * operator, and both are checked here, before any mutation, so a rejected
+     * line leaves the caller's argv byte-for-byte unchanged:
+     *
+     *   1. a file token must follow the operator;
+     *   2. that file token must not itself be a redirection operator.
+     *
+     * Condition 2 is what stops `echo hi > > out.txt` from silently creating
+     * a file literally named ">" while "out.txt" is demoted to an argument.
+     * CAPS is not a shell, so an operator is never a file name.
+     */
     for (i = 0; i < *argc; i++) {
         if (!is_redir_op(argv[i]))
             continue;
         n_ops++;
         if (i + 1 >= *argc) {
             caps_error("syntax error: '%s' requires a file name", argv[i]);
+            *out_redirs = NULL;
+            *out_n = 0;
+            return -2;
+        }
+        if (is_redir_op(argv[i + 1])) {
+            caps_error("syntax error: '%s' requires a file name, but '%s' is "
+                       "another redirection operator",
+                       argv[i], argv[i + 1]);
             *out_redirs = NULL;
             *out_n = 0;
             return -2;

@@ -56,18 +56,28 @@ export interface ProcessIdentity {
 export type IdentityConfidence = "session+pid+start" | "session+pid";
 
 /**
- * The stable scene key for an identity.
+ * The stable index key for an identity.
  *
- * A PID is unique within one execution record, so the scene key stays readable
- * and stable across renders. It is a *view* key, not a correlation identity:
- * all correlation goes through `sameProcess`, which applies the start-time
- * guard.
+ * This is the *semantic* identity key, and it includes the kernel start time
+ * whenever the record has one. A PID is not an identity: Linux recycles them,
+ * and a record that saw PID 4242 twice with two different start times holds
+ * two different processes. Keying the index by `role:pid` merged them, and the
+ * second start time silently overwrote the first, so a reader could be shown
+ * one process's numbers labelled with the other's start time.
+ *
+ * Before the start time is known (a `process.started` event carries no procfs
+ * data yet) the key uses `?`, and `promoteNodeKey` moves the record to its
+ * permanent key as soon as the first sample arrives. `role:pid` remains a
+ * lookup accelerator through `pidIndex`, never the identity itself.
+ *
+ * The value is opaque: it is an index key, not something to display.
  */
-export function nodeKeyFor(identity: Pick<ProcessIdentity, "pid" | "role"> | null): string | null {
+export function nodeKeyFor(identity: Pick<ProcessIdentity, "pid" | "role" | "processStartTime"> | null): string | null {
   if (identity === null) return null;
-  return `${identity.role}:${identity.pid}`;
+  return `${identity.role}:${identity.pid}@${identity.processStartTime ?? "?"}`;
 }
 
+/** Lookup accelerator: the unscoped `role:pid` form, used to find a record fast. */
 export function nodeKeyForRole(role: EvidenceRole, pid: number | null): string {
   return `${role}:${pid ?? "unknown"}`;
 }
@@ -155,6 +165,17 @@ export interface ObservedProcess {
   execSequence: number | null;
   execAtMs: number | null;
   imageBefore: string | null;
+  /**
+   * The signal number that terminated THIS process, or null.
+   *
+   * Per identity, never record-wide. A record-wide "any signal exists" flag
+   * caused every ended process in a multi-process record to be presented as
+   * signal-terminated, which is a fabricated observation about processes that
+   * exited normally.
+   */
+  signalNumber: number | null;
+  /** Sequence of this process's own signal event. */
+  signalSequence: number | null;
 }
 
 export interface EvidenceIndex {
@@ -165,7 +186,14 @@ export interface EvidenceIndex {
   bySequence: Map<number, CanonicalEvent>;
   /** Every observed process, in the order the record established it. */
   processes: ObservedProcess[];
+  /** The semantic index, keyed by role + pid + start time. */
   byNodeKey: Map<string, ObservedProcess>;
+  /**
+   * Lookup accelerator from `role:pid` to the records that carry that pid.
+   * More than one entry means the record cannot disambiguate them by PID
+   * alone, which is a real fact about the record and not a defect.
+   */
+  byRolePid: Map<string, ObservedProcess[]>;
   samples: TelemetrySample[];
   /** First and last procfs sample per PID, for inspector placement. */
   sampleRangeByPid: Map<number, { first: TelemetrySample; last: TelemetrySample }>;
@@ -177,6 +205,24 @@ export interface EvidenceIndex {
   pidCollisions: Array<{ pid: number; startTimes: string[] }>;
   /** Real reasons correlation could not be established, with no guess attached. */
   limitations: string[];
+}
+
+/**
+ * Resolve an identity to the record that describes it.
+ *
+ * When the identity carries a start time the lookup is exact. When it does
+ * not, a `role:pid` match is accepted only if the record holds exactly one
+ * process for that pid; if it holds more than one, the record genuinely
+ * cannot say which process was meant, and `null` is returned rather than
+ * picking the first.
+ */
+export function recordFor(identity: ProcessIdentity | null, index: EvidenceIndex): ObservedProcess | null {
+  if (identity === null) return null;
+  if (identity.processStartTime !== null) {
+    return index.byNodeKey.get(`${identity.role}:${identity.pid}@${identity.processStartTime}`) ?? null;
+  }
+  const candidates = index.byRolePid.get(nodeKeyForRole(identity.role, identity.pid)) ?? [];
+  return candidates.length === 1 ? candidates[0]! : null;
 }
 
 function eventStartTime(payload: Record<string, unknown>): string | null {
@@ -198,18 +244,37 @@ export function buildEvidenceIndex(events: CanonicalEvent[]): EvidenceIndex {
   const bySequence = new Map<number, CanonicalEvent>();
   const order: ObservedProcess[] = [];
   const byNodeKey = new Map<string, ObservedProcess>();
+  const byRolePid = new Map<string, ObservedProcess[]>();
   const startTimesByPid = new Map<number, Set<string>>();
   const samples = collectSamples(events);
   const sampleRangeByPid = new Map<number, { first: TelemetrySample; last: TelemetrySample }>();
 
   for (const event of events) bySequence.set(event.sequence, event);
 
-  const touch = (identity: ProcessIdentity, event: CanonicalEvent): ObservedProcess => {
-    const key = nodeKeyFor(identity)!;
+  /**
+   * Register a process under its semantic key and keep the pid accelerator in
+   * step. A second, different process with the same pid gets its own entry
+   * rather than overwriting the first, which is the collision the record
+   * cannot resolve and therefore has to report.
+   */
+  const register = (record: ObservedProcess): ObservedProcess => {
+    const key = nodeKeyFor(record.identity)!;
+    const rolePid = nodeKeyForRole(record.identity.role, record.identity.pid);
     const existing = byNodeKey.get(key);
     if (existing !== undefined) return existing;
-    const created: ObservedProcess = {
-      identity,
+    byNodeKey.set(key, record);
+    const list = byRolePid.get(rolePid) ?? [];
+    list.push(record);
+    byRolePid.set(rolePid, list);
+    order.push(record);
+    return record;
+  };
+
+  const touch = (identity: ProcessIdentity, event: CanonicalEvent): ObservedProcess => {
+    const existing = byNodeKey.get(nodeKeyFor(identity)!);
+    if (existing !== undefined) return existing;
+    return register({
+      identity: { ...identity },
       firstSequence: event.sequence,
       firstAtMs: atMsOf(event),
       firstEventType: event.type,
@@ -223,10 +288,79 @@ export function buildEvidenceIndex(events: CanonicalEvent[]): EvidenceIndex {
       execSequence: null,
       execAtMs: null,
       imageBefore: null,
-    };
-    byNodeKey.set(key, created);
-    order.push(created);
-    return created;
+      signalNumber: null,
+      signalSequence: null,
+    });
+  };
+
+  /**
+   * Move a record from the provisional `role:pid@?` key to its permanent
+   * `role:pid@<start>` key once the kernel start time is known.
+   *
+   * The role and pid do not change, so the lookup accelerator is left alone:
+   * removing and re-adding the record there would be a no-op at best and a
+   * silent loss of the index at worst.
+   */
+  const promote = (record: ObservedProcess, startTime: string): void => {
+    if (record.identity.processStartTime === startTime) return;
+    const provisional = nodeKeyFor(record.identity)!;
+    record.identity = { ...record.identity, processStartTime: startTime };
+    const permanent = nodeKeyFor(record.identity)!;
+    if (provisional === permanent) return;
+    byNodeKey.delete(provisional);
+    // If a different process already owns this permanent key they are two
+    // genuinely distinct processes; the existing one keeps the key and the
+    // collision is reported below.
+    if (!byNodeKey.has(permanent)) byNodeKey.set(permanent, record);
+  };
+
+  /** Find the child record for a pid when the record holds exactly one. */
+  const childRecord = (pid: number): ObservedProcess | null => {
+    const list = byRolePid.get(nodeKeyForRole("child", pid)) ?? [];
+    return list.length === 1 ? list[0]! : null;
+  };
+
+  /**
+   * The record a snapshot belongs to, given its pid, role, and start time.
+   *
+   * A start time that matches neither an exact key nor the provisional one,
+   * while the record already holds a process with that pid, means the kernel
+   * recycled the PID: this is a *different* process. It is registered as its
+   * own record so the two are never merged, and the collision is reported. The
+   * previous code fell back to the provisional key's identity, overwriting the
+   * first process's start time with the second's.
+   */
+  const recordForSnapshot = (role: EvidenceRole, pid: number, startTime: string | null, event: CanonicalEvent): ObservedProcess | null => {
+    if (startTime !== null) {
+      const exact = byNodeKey.get(`${role}:${pid}@${startTime}`);
+      if (exact !== undefined) return exact;
+      const provisional = byNodeKey.get(`${role}:${pid}@?`);
+      if (provisional !== undefined) {
+        promote(provisional, startTime);
+        return provisional;
+      }
+      // A new process behind a recycled PID.
+      return register({
+        identity: { sessionId: event.sessionId, pid, processStartTime: startTime, role },
+        firstSequence: event.sequence,
+        firstAtMs: atMsOf(event),
+        firstEventType: event.type,
+        firstSampleSequence: null,
+        firstSampleAtMs: null,
+        sampleCount: 0,
+        endSequence: null,
+        endAtMs: null,
+        observedPpid: null,
+        command: null,
+        execSequence: null,
+        execAtMs: null,
+        imageBefore: null,
+        signalNumber: null,
+        signalSequence: null,
+      });
+    }
+    const list = byRolePid.get(nodeKeyForRole(role, pid)) ?? [];
+    return list.length === 1 ? list[0]! : null;
   };
 
   // ---- the observed child, from the CAPS process-start event -----------------
@@ -238,8 +372,7 @@ export function buildEvidenceIndex(events: CanonicalEvent[]): EvidenceIndex {
   // ---- the gateway-spawned CAPS engine, from the engine PID in a snapshot ---
   for (const event of events) {
     if (event.type !== "process.snapshot") continue;
-    const payload = event.payload;
-    const enginePid = metricValue<number>(payload.capsEnginePid as TelemetryMetric<number> | undefined);
+    const enginePid = metricValue<number>(event.payload.capsEnginePid as TelemetryMetric<number> | undefined);
     if (enginePid !== null) touch({ sessionId: event.sessionId, pid: enginePid, processStartTime: null, role: "caps-engine" }, event);
   }
 
@@ -249,21 +382,32 @@ export function buildEvidenceIndex(events: CanonicalEvent[]): EvidenceIndex {
     const payload = event.payload;
 
     if (event.type === "process.started" && pid !== null) {
-      const record = byNodeKey.get(nodeKeyForRole("child", pid));
-      if (record !== undefined && typeof payload.label === "string") record.imageBefore = payload.label;
+      const record = childRecord(pid);
+      if (record !== null && typeof payload.label === "string") record.imageBefore = payload.label;
+    }
+
+    if (event.type === "signal.received" && pid !== null) {
+      // Attributed to this process only. A record-wide flag would mark every
+      // ended process in the record as signal-terminated.
+      const record = childRecord(pid);
+      const signal = metricValue<number>(payload.signal as TelemetryMetric<number> | undefined)
+        ?? (typeof payload.signal === "number" ? payload.signal : null);
+      if (record !== null && signal !== null && record.signalNumber === null) {
+        record.signalNumber = signal;
+        record.signalSequence = event.sequence;
+      }
     }
 
     if (event.type === "process.snapshot") {
       const enginePid = metricValue<number>(payload.capsEnginePid as TelemetryMetric<number> | undefined);
       const subjectPid = metricValue<number>(payload.pid as TelemetryMetric<number> | undefined) ?? pid;
       if (subjectPid === null) continue;
-      const key = enginePid !== null && subjectPid === enginePid ? nodeKeyForRole("caps-engine", subjectPid) : nodeKeyForRole("child", subjectPid);
-      const record = byNodeKey.get(key);
-      if (record === undefined) continue;
-
+      const role: EvidenceRole = enginePid !== null && subjectPid === enginePid ? "caps-engine" : "child";
       const startTime = eventStartTime(payload);
+      const record = recordForSnapshot(role, subjectPid, startTime, event);
+      if (record === null) continue;
+
       if (startTime !== null) {
-        record.identity.processStartTime = startTime;
         const seen = startTimesByPid.get(record.identity.pid) ?? new Set<string>();
         seen.add(startTime);
         startTimesByPid.set(record.identity.pid, seen);
@@ -287,9 +431,9 @@ export function buildEvidenceIndex(events: CanonicalEvent[]): EvidenceIndex {
       }
     }
 
-    if (pid !== null && (event.type === "process.exited" || event.type === "process.exec_error")) {
-      const record = byNodeKey.get(nodeKeyForRole("child", pid));
-      if (record !== undefined) {
+    if (pid !== null && (event.type === "process.exited" || event.type === "process.exec_error" || event.type === "process.wait_failed")) {
+      const record = childRecord(pid);
+      if (record !== null) {
         record.endSequence = event.sequence;
         record.endAtMs = atMsOf(event);
       }
@@ -328,6 +472,7 @@ export function buildEvidenceIndex(events: CanonicalEvent[]): EvidenceIndex {
     bySequence,
     processes: order,
     byNodeKey,
+    byRolePid,
     samples,
     sampleRangeByPid,
     pidCollisions,
@@ -359,14 +504,26 @@ export function eventIdentity(event: CanonicalEvent, index: EvidenceIndex): Proc
     const enginePid = metricValue<number>(event.payload.capsEnginePid as TelemetryMetric<number> | undefined);
     const subject = metricValue<number>(event.payload.pid as TelemetryMetric<number> | undefined) ?? (typeof event.pid === "number" ? event.pid : null);
     if (subject === null) return null;
-    const key = enginePid !== null && subject === enginePid ? nodeKeyForRole("caps-engine", subject) : nodeKeyForRole("child", subject);
-    return index.byNodeKey.get(key)?.identity ?? null;
+    const role: EvidenceRole = enginePid !== null && subject === enginePid ? "caps-engine" : "child";
+    const startTime = eventStartTime(event.payload);
+    if (startTime !== null) {
+      return index.byNodeKey.get(`${role}:${subject}@${startTime}`)?.identity ?? null;
+    }
+    const list = index.byRolePid.get(nodeKeyForRole(role, subject)) ?? [];
+    return list.length === 1 ? list[0]!.identity : null;
   }
 
   const pid = typeof event.pid === "number" ? event.pid : null;
   if (pid === null) return null;
-  if (event.type === "process.started" || event.type === "process.exited" || event.type === "process.exec_error" || event.type === "signal.received") {
-    return index.byNodeKey.get(nodeKeyForRole("child", pid))?.identity ?? null;
+  if (
+    event.type === "process.started" ||
+    event.type === "process.exited" ||
+    event.type === "process.exec_error" ||
+    event.type === "process.wait_failed" ||
+    event.type === "signal.received"
+  ) {
+    const list = index.byRolePid.get(nodeKeyForRole("child", pid)) ?? [];
+    return list.length === 1 ? list[0]!.identity : null;
   }
   return null;
 }
@@ -382,8 +539,8 @@ export function eventCursorMs(event: CanonicalEvent, index: EvidenceIndex): numb
 
 /** The newest event for this identity at or before `atMs`; the earliest if none. */
 export function nearestEventForIdentity(identity: ProcessIdentity, index: EvidenceIndex, atMs: number | null): CanonicalEvent | null {
-  const record = index.byNodeKey.get(nodeKeyFor(identity) ?? "");
-  if (record === undefined) return null;
+  const record = recordFor(identity, index);
+  if (record === null) return null;
 
   // Resolved once per event, not twice: the identity of an event must be asked
   // for a single time so the filter and the comparison cannot disagree.
@@ -417,10 +574,8 @@ export function nearestEventForIdentity(identity: ProcessIdentity, index: Eviden
  * the nearest arbitrary moment, and never lands on time the record lacks.
  */
 export function cursorMsForIdentity(identity: ProcessIdentity, index: EvidenceIndex): number | null {
-  const key = nodeKeyFor(identity);
-  if (key === null) return null;
-  const record = index.byNodeKey.get(key);
-  if (record === undefined) return null;
+  const record = recordFor(identity, index);
+  if (record === null) return null;
   if (record.firstSampleAtMs !== null) return record.firstSampleAtMs;
   return record.firstAtMs;
 }
@@ -456,10 +611,8 @@ export function identityMatchesSample(identity: ProcessIdentity, snapshot: Proce
 
 /** The recorded execvp() transition of an identity, or null when unrecorded. */
 export function execTransitionForIdentity(identity: ProcessIdentity, index: EvidenceIndex): { sequence: number; atMs: number } | null {
-  const key = nodeKeyFor(identity);
-  if (key === null) return null;
-  const record = index.byNodeKey.get(key);
-  if (record === undefined || record.execSequence === null || record.execAtMs === null) return null;
+  const record = recordFor(identity, index);
+  if (record === null || record.execSequence === null || record.execAtMs === null) return null;
   return { sequence: record.execSequence, atMs: record.execAtMs };
 }
 
@@ -544,7 +697,7 @@ export function resolveSelection(selection: EvidenceSelection, index: EvidenceIn
     }
   }
 
-  const record = identity === null ? null : index.byNodeKey.get(nodeKeyFor(identity)!) ?? null;
+  const record = recordFor(identity, index);
 
   // --- hierarchy: verified edges only, read from the same PPID observations
   const nodeKey = identity === null ? null : nodeKeyFor(identity);
@@ -592,7 +745,7 @@ export function resolveSelection(selection: EvidenceSelection, index: EvidenceIn
 
 /** The identity as the record holds it, so a caller's copy can be compared. */
 function indexIdentityOf(identity: ProcessIdentity, index: EvidenceIndex): ProcessIdentity | null {
-  return index.byNodeKey.get(nodeKeyFor(identity)!)?.identity ?? null;
+  return recordFor(identity, index)?.identity ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -632,7 +785,7 @@ const UNAVAILABLE = "UNAVAILABLE";
  */
 export function describeSelection(selection: EvidenceSelection, index: EvidenceIndex): EvidenceDescriptor {
   const resolution = resolveSelection(selection, index);
-  const record = resolution.identity === null ? null : index.byNodeKey.get(nodeKeyFor(resolution.identity)!) ?? null;
+  const record = recordFor(resolution.identity, index);
   const values: EvidenceValue[] = [];
 
   if (record !== null) {

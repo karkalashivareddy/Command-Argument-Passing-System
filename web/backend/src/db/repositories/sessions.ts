@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
+import { transact } from "../database.js";
 import type { RedirectionSpec, SessionRecord, SessionStatus } from "../../types/observability.js";
 
 export interface SessionRow {
@@ -22,15 +23,45 @@ export interface SessionRow {
   created_at: string;
 }
 
-function parseRow(r: SessionRow): SessionRecord {
-  const args = safeJsonArray(r.args);
-  let redirs: RedirectionSpec = {};
+export interface CorruptJsonState {
+  corrupt: boolean;
+  error: string;
+}
+
+/**
+ * Parse a persisted JSON column, reporting corruption instead of hiding it.
+ *
+ * Returning `[]` for unparsable args used to make a session look like a
+ * command with no arguments.  The caller now receives an explicit state and
+ * the session carries it, so the UI can say "the stored argv is unreadable"
+ * rather than quietly showing the wrong thing.
+ */
+function parseJsonColumn(raw: string, expect: "array" | "object"): { value: unknown; state: CorruptJsonState } {
   try {
-    redirs = JSON.parse(r.redirections) as RedirectionSpec;
-  } catch {
-    redirs = {};
+    const parsed: unknown = JSON.parse(raw);
+    const ok =
+      expect === "array"
+        ? Array.isArray(parsed)
+        : parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
+    if (!ok) {
+      return { value: expect === "array" ? [] : {}, state: { corrupt: true, error: `expected a JSON ${expect}` } };
+    }
+    return { value: parsed, state: { corrupt: false, error: "" } };
+  } catch (err) {
+    return {
+      value: expect === "array" ? [] : {},
+      state: { corrupt: true, error: err instanceof Error ? err.message : "unparsable JSON" },
+    };
   }
-  return {
+}
+
+function parseRow(r: SessionRow): SessionRecord {
+  const argsParsed = parseJsonColumn(r.args, "array");
+  const redirsParsed = parseJsonColumn(r.redirections, "object");
+  const args = (argsParsed.value as unknown[]).map(String);
+  const redirs = redirsParsed.value as RedirectionSpec;
+
+  const record: SessionRecord = {
     id: r.id,
     command: r.command,
     args,
@@ -50,19 +81,72 @@ function parseRow(r: SessionRow): SessionRecord {
     timeoutMs: r.timeout_ms,
     eventCount: 0,
   };
+
+  if (argsParsed.state.corrupt || redirsParsed.state.corrupt) {
+    record.storedJsonCorrupt = true;
+    record.storedJsonError = [
+      argsParsed.state.corrupt ? `args: ${argsParsed.state.error}` : null,
+      redirsParsed.state.corrupt ? `redirections: ${redirsParsed.state.error}` : null,
+    ]
+      .filter(Boolean)
+      .join("; ");
+  }
+  return record;
 }
 
-function safeJsonArray(s: string): string[] {
-  try {
-    const v = JSON.parse(s);
-    return Array.isArray(v) ? v.map(String) : [];
-  } catch {
-    return [];
-  }
+export interface CreateSessionInput {
+  id: string;
+  command: string;
+  args: string[];
+  redirections: RedirectionSpec;
+  redirectionsDetail: ReadonlyArray<{ slot: string; target: string; flags: string }>;
+  timeoutMs: number;
+  startedAt: string;
+  /** The first canonical event, written in the same transaction as the row. */
+  firstEvent: { id: string; sequence: number; type: string; source: string; timestamp: string; payload: Record<string, unknown> } | null;
 }
 
 export class SessionRepository {
   constructor(private readonly db: DatabaseSync) {}
+
+  /**
+   * Create a session, its redirection records, and its first event in one
+   * transaction.
+   *
+   * These three writes belong together: a session with redirection rows but no
+   * first event, or an event for a session row that was rolled away, is a
+   * state the API cannot describe and the event invariants would reject.
+   */
+  createWithFirstEvent(input: CreateSessionInput): void {
+    transact(this.db, () => {
+      this.db
+        .prepare(
+          `INSERT INTO sessions
+           (id, command, args, redirections, status, started_at, timeout_ms, created_at)
+           VALUES (?, ?, ?, ?, 'CREATED', ?, ?, ?)`,
+        )
+        .run(input.id, input.command, JSON.stringify(input.args),
+          JSON.stringify(input.redirections), input.startedAt, input.timeoutMs, input.startedAt);
+
+      const insertRedir = this.db.prepare(
+        "INSERT INTO redirections (session_id, slot, target, flags) VALUES (?, ?, ?, ?)",
+      );
+      for (const r of input.redirectionsDetail) {
+        insertRedir.run(input.id, r.slot, r.target, r.flags);
+      }
+
+      if (input.firstEvent !== null) {
+        this.db
+          .prepare(
+            `INSERT INTO events (id, session_id, sequence, type, source, timestamp, monotonic_ms, pid, payload, payload_corrupt, payload_error)
+             VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, 0, NULL)`,
+          )
+          .run(input.firstEvent.id, input.id, input.firstEvent.sequence,
+            input.firstEvent.type, input.firstEvent.source, input.firstEvent.timestamp,
+            JSON.stringify(input.firstEvent.payload));
+      }
+    });
+  }
 
   create(input: {
     id: string;
@@ -72,14 +156,7 @@ export class SessionRepository {
     timeoutMs: number;
     startedAt: string;
   }): void {
-    this.db
-      .prepare(
-        `INSERT INTO sessions
-         (id, command, args, redirections, status, started_at, timeout_ms, created_at)
-         VALUES (?, ?, ?, ?, 'CREATED', ?, ?, ?)`,
-      )
-      .run(input.id, input.command, JSON.stringify(input.args), JSON.stringify(input.redirections),
-        input.startedAt, input.timeoutMs, input.startedAt);
+    this.createWithFirstEvent({ ...input, redirectionsDetail: [], firstEvent: null });
   }
 
   setStatus(id: string, status: SessionStatus, endedAt?: string): void {
@@ -124,12 +201,13 @@ export class SessionRepository {
   }
 
   appendOutput(id: string, stdout: string, stderr: string): void {
+    if (stdout.length === 0 && stderr.length === 0) return;
     this.db
       .prepare("UPDATE sessions SET stdout=stdout || ?, stderr=stderr || ? WHERE id=?")
       .run(stdout, stderr, id);
   }
 
-  recordRedirection(id: string, slot: keyof RedirectionSpec | "in" | "out" | "append", target: string, flags: string): void {
+  recordRedirection(id: string, slot: string, target: string, flags: string): void {
     this.db
       .prepare("INSERT INTO redirections (session_id, slot, target, flags) VALUES (?, ?, ?, ?)")
       .run(id, slot, target, flags);
@@ -182,17 +260,20 @@ export class SessionRepository {
       params.push(like, like, like);
     }
     if (where.length) sql += " WHERE " + where.join(" AND ");
-    sql += " LIMIT 1";
     const r = this.db.prepare(sql).get(...params) as { n: number } | undefined;
     return Number(r?.n ?? 0);
   }
 
   deleteById(id: string): { sessions: boolean; events: boolean } {
-    const events = this.db.prepare("DELETE FROM events WHERE session_id=?").run(id).changes > 0;
-    const sessions = this.db.prepare("DELETE FROM sessions WHERE id=?").run(id).changes > 0;
-    this.db.prepare("DELETE FROM processes WHERE session_id=?").run(id);
-    this.db.prepare("DELETE FROM redirections WHERE session_id=?").run(id);
-    return { sessions, events };
+    return transact(this.db, () => {
+      const events = this.db.prepare("DELETE FROM events WHERE session_id=?").run(id).changes > 0;
+      // redirections and events cascade from the session row, but are removed
+      // explicitly so the behaviour does not depend on the foreign_keys
+      // pragma being on in whatever connection the caller holds.
+      this.db.prepare("DELETE FROM redirections WHERE session_id=?").run(id);
+      const sessions = this.db.prepare("DELETE FROM sessions WHERE id=?").run(id).changes > 0;
+      return { sessions, events };
+    });
   }
 
   listForAnalytics(): SessionRow[] {
@@ -207,9 +288,55 @@ export class SessionRepository {
       .all() as unknown as Array<{ slot: string; target: string }>;
   }
 
-  listProcessSnapshots(): Array<{ session_id: string; payload: string }> {
-    return this.db
-      .prepare("SELECT session_id, payload FROM events WHERE type='process.snapshot' ORDER BY session_id, sequence")
-      .all() as unknown as Array<{ session_id: string; payload: string }>;
+  /** Sessions that were never finalized, oldest first. Used by boot recovery. */
+  listNonTerminal(limit = 500): SessionRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM sessions
+         WHERE status IN ('CREATED','STARTING','RUNNING')
+         ORDER BY created_at ASC LIMIT ?`,
+      )
+      .all(limit) as unknown as SessionRow[];
+    return rows.map(parseRow);
+  }
+
+  /**
+   * Delete sessions (and, by cascade, their events and redirections) older
+   * than the retention window.
+   *
+   * Retention is a recorder requirement, not a surprise: it is off unless
+   * CAPS_RETENTION_DAYS is set to a positive value, and every sweep logs what
+   * it removed so an operator can see the recorder working.
+   */
+  purgeOlderThan(cutoffIso: string): { sessions: number; events: number } {
+    return transact(this.db, () => {
+      const events = this.db
+        .prepare(
+          `DELETE FROM events WHERE session_id IN (SELECT id FROM sessions WHERE created_at < ?)`,
+        )
+        .run(cutoffIso).changes;
+      this.db
+        .prepare("DELETE FROM redirections WHERE session_id IN (SELECT id FROM sessions WHERE created_at < ?)")
+        .run(cutoffIso);
+      const sessions = this.db.prepare("DELETE FROM sessions WHERE created_at < ?").run(cutoffIso).changes;
+      return { sessions: Number(sessions), events: Number(events) };
+    });
+  }
+
+  /** Total stored size, for the readiness payload and retention decisions. */
+  storageStats(): { sessions: number; events: number; dbBytes: number | null } {
+    const s = this.db.prepare("SELECT COUNT(*) AS n FROM sessions").get() as { n: number };
+    const e = this.db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number };
+    let dbBytes: number | null = null;
+    try {
+      const pageCount = this.db.prepare("PRAGMA page_count").get() as { page_count: number };
+      const pageSize = this.db.prepare("PRAGMA page_size").get() as { page_size: number };
+      if (Number.isFinite(pageCount.page_count) && Number.isFinite(pageSize.page_size)) {
+        dbBytes = pageCount.page_count * pageSize.page_size;
+      }
+    } catch {
+      dbBytes = null;
+    }
+    return { sessions: Number(s.n ?? 0), events: Number(e.n ?? 0), dbBytes };
   }
 }

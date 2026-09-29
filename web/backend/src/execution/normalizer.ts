@@ -1,10 +1,9 @@
-import type { CanonicalEvent, CanonicalEventType, EventSource } from "../types/observability.js";
+import type { CanonicalEvent, CanonicalEventType, EventSource, EngineOutcome } from "../types/observability.js";
 import type { RawCapsEvent } from "./parser.js";
 
 /**
- * Map a raw CAPS event name to its canonical type. Unknown/unknown names
- * become null; the gateway records a parser warning rather than inventing
- * a meaning.
+ * Map a raw CAPS event name to its canonical type. Unknown names become null;
+ * the gateway records a parser warning rather than inventing a meaning.
  */
 const CAPS_EVENT_NAMES: Record<string, CanonicalEventType> = {
   COMMAND_RECEIVED: "command.received",
@@ -16,43 +15,82 @@ const CAPS_EVENT_NAMES: Record<string, CanonicalEventType> = {
   PROCESS_EXITED: "process.exited",
   SIGNAL_RECEIVED: "signal.received",
   EXEC_ERROR: "process.exec_error",
+  WAIT_FAILED: "process.wait_failed",
+  EXECUTION_FAILED: "process.launch_failed",
   SESSION_SUMMARY: "session.summary",
 };
 
-const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
+/** Outcomes the engine is allowed to report; anything else is treated as unknown. */
+const OUTCOMES: readonly EngineOutcome[] = [
+  "COMPLETED",
+  "EXITED",
+  "SIGNALED",
+  "EXEC_FAILED",
+  "LAUNCH_FAILED",
+  "WAIT_FAILED",
+];
 
+const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+
+function outcomeOf(raw: RawCapsEvent): EngineOutcome | null {
+  const o = str(raw.outcome);
+  return o !== null && (OUTCOMES as readonly string[]).includes(o) ? (o as EngineOutcome) : null;
+}
+
+/**
+ * Build the payload.
+ *
+ * The failure fields (`exit_code`, `errno`, `errno_name`, `reason`, `outcome`)
+ * are carried verbatim.  They used to be dropped at this boundary, which meant
+ * the 126-vs-127 distinction and the kernel errno never survived the trip from
+ * the C engine, and a consumer could only read a human-readable diagnostic.
+ */
 function rawPayload(raw: RawCapsEvent): Record<string, unknown> {
   const payload: Record<string, unknown> = {};
-  if (typeof raw.command === "string") payload.label = raw.command;
-  if (typeof raw.pid === "number") payload.pid = raw.pid;
-  if (typeof raw.exit_code === "number") payload.exitCode = raw.exit_code;
-  if (typeof raw.duration_ms === "number") payload.durationMs = raw.duration_ms;
-  if (typeof raw.signal === "number") payload.signal = raw.signal;
-  if (typeof raw.commands === "number") payload.commands = raw.commands;
-  if (typeof raw.succeeded === "number") payload.succeeded = raw.succeeded;
-  if (typeof raw.failed === "number") payload.failed = raw.failed;
-  if (typeof raw.signals === "number") payload.signals = raw.signals;
-  if (typeof raw.timed === "number") payload.timed = raw.timed;
-  if (typeof raw.average_duration_ms === "number") payload.averageDurationMs = raw.average_duration_ms;
+  if (str(raw.command) !== null) payload.label = raw.command;
+  if (num(raw.pid) !== null) payload.pid = raw.pid;
+  if (num(raw.exit_code) !== null) payload.exitCode = raw.exit_code;
+  if (num(raw.duration_ms) !== null) payload.durationMs = raw.duration_ms;
+  if (num(raw.signal) !== null) payload.signal = raw.signal;
+
+  // Failure information. `exitCode` is explicitly allowed to be null for a
+  // launch/wait failure, which is different from "exit code 0".
+  payload.exitCode = num(raw.exit_code);
+  payload.errno = num(raw.errno) ?? 0;
+  payload.errnoName = str(raw.errno_name) ?? "";
+  payload.reason = str(raw.reason) ?? "";
+  const outcome = outcomeOf(raw);
+  if (outcome !== null) payload.outcome = outcome;
+
+  if (num(raw.commands) !== null) payload.commands = raw.commands;
+  if (num(raw.succeeded) !== null) payload.succeeded = raw.succeeded;
+  if (num(raw.failed) !== null) payload.failed = raw.failed;
+  if (num(raw.signals) !== null) payload.signals = raw.signals;
+  if (num(raw.timed) !== null) payload.timed = raw.timed;
+  if (num(raw.exec_errors) !== null) payload.exec_errors = raw.exec_errors;
+  if (num(raw.launch_errors) !== null) payload.launch_errors = raw.launch_errors;
+  if (typeof raw.observed_cleanly === "boolean") payload.observed_cleanly = raw.observed_cleanly;
+  if (num(raw.average_duration_ms) !== null) payload.averageDurationMs = raw.average_duration_ms;
   return payload;
 }
 
 /**
  * Normalize one valid raw CAPS monitor event into the canonical envelope.
- * The gateway adds the sequence number, session id, and its own monotonic
- * counter; CAPS-supplied values (pid, exit_code, duration_ms, signal,
- * command label) pass through untouched.
+ *
+ * The gateway adds the sequence number, session id, and its own timestamp;
+ * engine-supplied values (pid, exit_code, duration_ms, signal, errno, reason,
+ * outcome, command label) pass through untouched.
  */
 export function normalizeCapsEvent(
   raw: RawCapsEvent,
   ctx: { sessionId: string; sequence: number; evId: (prefix: string) => string; rawTs: number },
 ): CanonicalEvent | null {
-  const name = typeof raw.event === "string" ? raw.event : null;
+  const name = str(raw.event);
   if (name === null) return null;
   const type = CAPS_EVENT_NAMES[name];
   if (type === undefined) return null;
 
-  const isSummary = name === "SESSION_SUMMARY";
   return {
     id: ctx.evId("evt"),
     sessionId: ctx.sessionId,
@@ -71,7 +109,7 @@ export function gatewayEvent(
   source: EventSource,
   type: CanonicalEventType,
   payload: Record<string, unknown>,
-  extra?: { pid?: number | null; monotonicMs?: number | null; inMonotonicEpoch?: number },
+  extra?: { pid?: number | null; monotonicMs?: number | null; timestamp?: string },
 ): CanonicalEvent {
   const now = Date.now();
   return {
@@ -80,7 +118,7 @@ export function gatewayEvent(
     sequence: ctx.sequence,
     type,
     source,
-    timestamp: new Date(now).toISOString(),
+    timestamp: extra?.timestamp ?? new Date(now).toISOString(),
     monotonicMs: extra?.monotonicMs ?? null,
     pid: extra?.pid ?? null,
     payload,

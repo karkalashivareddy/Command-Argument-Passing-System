@@ -8,6 +8,7 @@ import type { CapabilitiesResponse } from "../types/observability";
 
 export default function SettingsPage() {
   const engine = useUi((s) => s.engine);
+const readiness = useUi((s) => s.readiness);
   const capabilities = useUi((s) => s.capabilities);
   const [sessions, setSessions] = useState<{ total: number } | null>(null);
 
@@ -29,10 +30,10 @@ export default function SettingsPage() {
             <EmptyState icon={<Cog className="h-5 w-5" />} title="No engine info" body="The gateway did not report health." />
           ) : (
             <dl className="space-y-2 text-[13px]">
-              <div className="flex justify-between gap-3"><dt className="text-[var(--fg-3)]">Status</dt><dd className="font-mono text-[var(--green)]">{engine.engine.available ? "available" : "unavailable"}</dd></div>
+              <div className="flex justify-between gap-3"><dt className="text-[var(--fg-3)]">Status</dt><dd className="font-mono text-[var(--green)]">{readiness?.checks.engine.available ? "available" : "unavailable"}</dd></div>
               <div className="flex justify-between gap-3"><dt className="text-[var(--fg-3)]">Version</dt><dd className="font-mono">{engine.version}</dd></div>
               <div className="flex justify-between gap-3"><dt className="text-[var(--fg-3)]">Platform</dt><dd className="font-mono">{engine.platform}</dd></div>
-              <div className="flex justify-between gap-3"><dt className="text-[var(--fg-3)]">Binary</dt><dd className="truncate font-mono">{engine.engine.path}</dd></div>
+              <div className="flex justify-between gap-3"><dt className="text-[var(--fg-3)]">Binary</dt><dd className="truncate font-mono">{capabilities?.enginePath ?? "UNAVAILABLE"}</dd></div>
             </dl>
           )}
         </Card>
@@ -70,7 +71,7 @@ export default function SettingsPage() {
               <div className="flex items-center gap-2">
                 <Shield className="h-3.5 w-3.5 text-[var(--fg-3)]" />
                 <span className="text-[var(--fg-2)]">Bind</span>
-                <code className="ml-auto font-mono text-[11px]">{caps.bind}</code>
+                <code className="ml-auto font-mono text-[11px]">{`${caps.bind.mode} · ${caps.bind.host}:${caps.bind.port}`}</code>
               </div>
               <div className="flex items-center gap-2">
                 <Shield className="h-3.5 w-3.5 text-[var(--fg-3)]" />

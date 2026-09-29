@@ -60,7 +60,46 @@ export interface InvestigationState {
   selection: () => EvidenceSelection;
 }
 
-function sameSession(state: InvestigationState, sessionId: string): boolean {
+/**
+ * The one session-switch policy.
+ *
+ * There are two kinds of action, and both enforce session scope -- they
+ * differ only in what happens when the action names a *different* session:
+ *
+ *   SELECTING actions (`selectProcess`, `selectEvent`, `selectEvidence`,
+ *   `moveCursor`, `openSession`) are a navigation intent.  They adopt the
+ *   named session and clear every session-scoped field.  The previous code
+ *   did `{...state, sessionId, ...}`, which adopted the new session id while
+ *   carrying the old session's cursor, pinned flag, and process identity -- so
+ *   a reader could be looking at execution B with a timeline position and a
+ *   highlighted process from execution A, while the store's own doc comment
+ *   claimed the opposite.
+ *
+ *   CLEARING actions (`clearProcess`, `clearEvent`, `clearAll`,
+ *   `releaseCursor`) are scoped, not navigating.  A clear aimed at another
+ *   session is stale -- a background component or an unmounted view acting on
+ *   a session the reader has left -- and is a no-op.  Silently navigating to
+ *   that session would be its own bug.
+ *
+ * `lens` is deliberately never cleared: it is a viewing preference about the
+ * data, not a claim about one execution, and resetting it on every navigation
+ * would make the 2D and 3D views disagree about which lens is active.
+ */
+function adoptSession(state: InvestigationState, sessionId: string, revision: number): Partial<InvestigationState> {
+  if (state.sessionId === sessionId) return {};
+  return {
+    sessionId,
+    cursorMs: null,
+    cursorPinned: false,
+    cursorSource: "live" as const,
+    identity: null,
+    eventSeq: null,
+    revision,
+  };
+}
+
+/** True when the action targets the session the store currently holds. */
+function targetsCurrent(state: InvestigationState, sessionId: string): boolean {
   return state.sessionId === sessionId;
 }
 
@@ -76,42 +115,42 @@ export const useInvestigation = create<InvestigationState>((set, get) => ({
 
   openSession: (sessionId) =>
     set((state) => {
+      // Reopening the session already held changes nothing and invalidates no
+      // derived work.
       if (state.sessionId === sessionId) return state;
-      // A different execution: nothing carries over. Correlation never crosses
-      // sessions, and neither does a cursor.
-      return { sessionId, cursorMs: null, cursorPinned: false, cursorSource: "live", identity: null, eventSeq: null, revision: state.revision + 1 };
+      return { ...state, ...adoptSession(state, sessionId, state.revision + 1) } as InvestigationState;
     }),
 
   selectProcess: (sessionId, identity) =>
-    set((state) => {
-      if (!sameSession(state, sessionId)) return { ...state, sessionId, identity, eventSeq: null, revision: state.revision + 1 };
-      return { identity, eventSeq: null, revision: state.revision + 1 };
-    }),
+    set((state) => ({ ...state, ...adoptSession(state, sessionId, state.revision + 1), identity, eventSeq: null, revision: state.revision + 1 })),
 
   selectEvent: (sessionId, eventSeq) =>
-    set((state) => {
-      if (!sameSession(state, sessionId)) return { ...state, sessionId, eventSeq, revision: state.revision + 1 };
-      return { eventSeq, revision: state.revision + 1 };
-    }),
+    set((state) => ({ ...state, ...adoptSession(state, sessionId, state.revision + 1), eventSeq, revision: state.revision + 1 })),
 
   selectEvidence: (sessionId, eventSeq, identity, cursorMs) =>
     set((state) => {
-      const base = sameSession(state, sessionId) ? state : { ...state, sessionId };
+      const switched = !targetsCurrent(state, sessionId);
+      const base = switched ? { cursorSource: "live" as const } : state;
       return {
-        ...base,
+        ...state,
+        ...adoptSession(state, sessionId, state.revision + 1),
         eventSeq,
         identity,
         cursorMs,
         cursorPinned: cursorMs !== null,
+        // A replay attribution is the reader's intent about *this* session and
+        // must survive an evidence selection, but it must not leak across a
+        // session switch: a live cursor is a different claim from a replayed one.
         cursorSource: cursorMs === null ? "live" : base.cursorSource === "replay" ? "replay" : "user",
-        revision: base.revision + 1,
+        revision: state.revision + 1,
       };
     }),
 
   clearProcess: (sessionId) =>
-    set((state) => (sameSession(state, sessionId) ? { identity: null, revision: state.revision + 1 } : state)),
+    set((state) => (targetsCurrent(state, sessionId) ? { identity: null, revision: state.revision + 1 } : state)),
 
-  clearEvent: (sessionId) => set((state) => (sameSession(state, sessionId) ? { eventSeq: null, revision: state.revision + 1 } : state)),
+  clearEvent: (sessionId) =>
+    set((state) => (targetsCurrent(state, sessionId) ? { eventSeq: null, revision: state.revision + 1 } : state)),
 
   /**
    * Drop both evidence selections. The time selection is untouched on purpose:
@@ -119,17 +158,23 @@ export const useInvestigation = create<InvestigationState>((set, get) => ({
    * evidence again, so clearing evidence never silently rewinds time.
    */
   clearAll: (sessionId) =>
-    set((state) => (sameSession(state, sessionId) ? { identity: null, eventSeq: null, revision: state.revision + 1 } : state)),
+    set((state) => (targetsCurrent(state, sessionId) ? { identity: null, eventSeq: null, revision: state.revision + 1 } : state)),
 
   moveCursor: (sessionId, cursorMs, source) =>
     set((state) => {
-      if (!sameSession(state, sessionId)) return { ...state, sessionId, cursorMs, cursorPinned: true, cursorSource: source, revision: state.revision + 1 };
+      if (!targetsCurrent(state, sessionId)) {
+        return { ...state, ...adoptSession(state, sessionId, state.revision + 1), cursorMs, cursorPinned: true, cursorSource: source };
+      }
       if (state.cursorMs === cursorMs && state.cursorPinned && state.cursorSource === source) return state;
       return { cursorMs, cursorPinned: true, cursorSource: source, revision: state.revision + 1 };
     }),
 
   releaseCursor: (sessionId) =>
-    set((state) => (sameSession(state, sessionId) ? { cursorMs: null, cursorPinned: false, cursorSource: "live", revision: state.revision + 1 } : state)),
+    set((state) =>
+      targetsCurrent(state, sessionId)
+        ? { cursorMs: null, cursorPinned: false, cursorSource: "live", revision: state.revision + 1 }
+        : state,
+    ),
 
   setLens: (lens) => set((state) => (state.lens === lens ? state : { lens, revision: state.revision + 1 })),
 

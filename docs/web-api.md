@@ -1,188 +1,256 @@
-# CAPS Observatory — Web API
+# CAPS — Web API Reference
 
-Base path: `http://127.0.0.1:3000` (configurable). All request/response
-bodies are JSON. Errors follow a single shape:
+Base path: `http://127.0.0.1:3000` by default (`CAPS_PORT`). All request and
+response bodies are JSON. Errors use a single shape:
 
 ```json
-{
-  "error": { "code": "INVALID_ARGUMENT", "message": "…", "requestId": "req_…" }
-}
+{ "error": { "code": "INVALID_ARGUMENT", "message": "…", "requestId": "req_…" } }
 ```
+
+The `requestId` is also sent as `x-request-id` on the request and appears in
+the gateway's structured log, so one call is traceable without correlating on
+timing.
 
 ## Execution model
 
-POSTing `/api/sessions` starts one **real CAPS execution**. CAPS is
-spawned with `shell:false` and an explicit argv array; the request is the
-single source of truth for the argument vector.
+`POST /api/sessions` starts one **real CAPS execution**. CAPS is spawned with
+an explicit argv array and `shell: false`; the request is the single source of
+truth for the argument vector. `command` and `args` are separate fields — there
+is no command string for a shell to interpret.
 
-## Endpoints
+## Authentication
 
-### `GET /api/health`
+In the default `local` bind mode there is no authentication, because the
+gateway refuses to start on a non-loopback address. In `remote` mode every
+request requires `Authorization: Bearer <token>`, and the gateway refuses to
+start without one. See [SECURITY.md](../SECURITY.md).
+
+## Health
+
+### `GET /api/health` — liveness
+
+Answers one question: is the process running?
 
 ```json
 {
   "status": "ok",
-  "engine": { "available": true, "path": "./caps" },
-  "database": { "available": true },
-  "version": "0.1.0"
+  "version": "1.1.0",
+  "platform": "linux/posix",
+  "uptimeSeconds": 412
 }
 ```
 
-`engine.available` reflects a real executable check of the CAPS binary.
+### `GET /api/ready` — readiness
 
-### `GET /api/capabilities`
+Answers a different question: can the gateway actually do its job? Returns
+**503** when a critical dependency is unavailable.
 
 ```json
 {
-  "platform": "linux",
-  "allowlist": ["echo","printf","sleep","true","false","pwd","cat","status_probe"],
-  "limits": { "maxConcurrent": 4, "defaultTimeoutMs": 30000, "maxTimeoutMs": 120000 },
-  "workspace": "/path/to/data/work",
-  "redirection": { "supported": true, "modes": ["in","out","append"] },
-  "signals": { "supported": true },
-  "telemetry": { "enabled": true, "intervalMs": 500, "source": "/proc/<tracked-pid>" }
+  "ready": true,
+  "version": "1.1.0",
+  "checks": {
+    "engine":     { "available": true, "detail": "caps engine is executable" },
+    "database":   { "available": true, "detail": "event store is open" },
+    "workspace":  { "available": true, "detail": "workspace is writable" },
+    "telemetry":  { "available": true, "detail": "procfs sampling is available" }
+  },
+  "retention": { "days": 0, "enabled": false, "policy": "disabled: every session is kept" },
+  "storage": { "sessions": 42, "events": 3180, "dbBytes": 2_191_360 }
 }
 ```
 
-### `POST /api/sessions`
+## Capabilities
 
-Body (Zod-validated):
+### `GET /api/capabilities`
+
+What this gateway can actually do, verified at request time. Absolute
+filesystem paths are **not** returned; `enginePath` and `workspace` are
+repository-relative.
+
+```json
+{
+  "version": "1.1.0",
+  "platform": "linux/posix",
+  "engineAvailable": true,
+  "enginePath": "caps",
+  "workspace": "data/work",
+  "workspaceAvailable": true,
+  "allowlist": ["echo","printf","sleep","true","false","pwd","cat","uname","status_probe","caps_cpu_burn","…"],
+  "limits": { "maxConcurrent": 4, "defaultTimeoutMs": 30000, "maxTimeoutMs": 120000, "maxOutputBytes": 65536 },
+  "security": {
+    "bindMode": "local",
+    "loopbackOnly": true,
+    "authentication": "none (loopback only)",
+    "executableResolution": "absolute verified path; PATH is never consulted for an allowlisted command",
+    "redirectionHardening": "O_NOFOLLOW plus a regular-file check at open time"
+  },
+  "redirection": { "supported": true, "modes": ["in","out","append"], "stderr": false },
+  "signals": { "supported": ["SIGINT","SIGTERM","SIGKILL","SIGQUIT","SIGTSTP"], "identityVerified": true },
+  "telemetry": {
+    "enabled": true,
+    "intervalMs": 500,
+    "source": "/proc/<tracked-pid>/{stat,status,io}",
+    "observedMetrics": ["pid","command","ppid","rssBytes","minorFaults","…"],
+    "derivedMetrics": ["startTime","elapsedMs","cpuTimeMs","cpuPercent","…"],
+    "gatewayMetrics": ["capsEnginePid"],
+    "metricProvenance": { "cpuPercent": "DERIVED", "rssBytes": "OBSERVED", "capsEnginePid": "GATEWAY" },
+    "counterResetRule": "A cumulative counter that decreases between two samples is reported as UNAVAILABLE, never as zero…",
+    "notCollected": ["Syscall tracing","eBPF","cgroup accounting","Network I/O","File descriptor counts"]
+  },
+  "workloads": { "count": 5, "available": 5, "profiles": [ … ], "limits": { … } }
+}
+```
+
+`telemetry.observedMetrics` is the procfs-read subset. A rate is **not** in
+it: a rate is computed from two samples, and the previous single
+`collectedMetrics` list conflated the two, which let a reader conclude
+`cpuPercent` was a procfs field.
+
+Each workload profile carries an `observationScope` stating what is sampled and
+what is **not**, so a UI cannot imply coverage the sampler does not provide.
+
+## Sessions
+
+### `POST /api/sessions`
 
 ```json
 {
   "command": "echo",
-  "args": ["Hello", "Shiva"],
+  "args": ["Hello CAPS"],
   "redirections": { "out": "demo.txt", "append": "log.txt", "in": "in.txt" },
   "timeoutMs": 30000
 }
 ```
 
-- `command` is required and must be on the allowlist.
-- `cat` accepts only existing regular files whose resolved paths remain
-  inside the configured workspace. It does not accept command-line options
-  through the gateway.
-- `redirections` is optional; each slot takes exactly one file name.
-  File names must be relative, within the safe workspace, no `..`.
-- Returns `202` immediately; execution proceeds in the background:
+| Field | Rule |
+| --- | --- |
+| `command` | 1–256 chars, on the allowlist, and **resolvable to a verified absolute path** |
+| `args` | ≤ 512 entries, each ≤ 4096 chars, ≤ 128 KiB total, no NUL |
+| `redirections.*` | optional; each value must be a non-empty, non-blank, workspace-relative name |
+| `timeoutMs` | ≥ 1000, clamped to `maxTimeoutMs` |
+
+Errors:
+
+| Code | Status | When |
+| --- | --- | --- |
+| `INVALID_ARGUMENT` | 400 | shape, size, or semantic violation |
+| `COMMAND_NOT_ALLOWED` | 403 | the name is not on the allowlist |
+| `COMMAND_UNAVAILABLE` | 503 | allowlisted, but the binary is missing or unverified |
+| `TIMEOUT_TOO_SHORT` | 400 | a workload's own budget exceeds the transport timeout |
+| `REDIRECTION_REJECTED` | 422 | path policy refused the target |
+| `FILE_ARGUMENT_REJECTED` | 422 | a `cat` argument is outside the workspace |
+| `CONCURRENCY_LIMIT_REACHED` | 429 | the concurrency limit is reached |
+| `PERSISTENCE_FAILED` | 500 | the session could not be recorded, so it was **not started** |
+
+Response `202`:
 
 ```json
-{
-  "sessionId": "exec_01J4…",
-  "status": "STARTING",
-  "eventsUrl": "/api/sessions/exec_01J4…/events",
-  "argvPreview": ["--monitor","--json","echo","Hello","Shiva"]
-}
+{ "sessionId": "exec_…", "status": "STARTING", "eventsUrl": "/api/sessions/exec_…/events", "argvPreview": ["--monitor","--json","echo","Hello CAPS"] }
 ```
-
-Rejected cases return `400` (invalid), `403` command not allowed, `429`
-concurrency limit reached, `422` redirection path rejected.
 
 ### `GET /api/sessions`
 
-History, newest first. Query: `?limit=50&offset=0&status=…&q=…`.
+Query: `limit` (1–200, default 50), `offset` (0–100000, default 0),
+`status` (one of the session statuses or `ALL`), `q` (≤ 128 chars, matched
+against command, args, and id).
 
 ```json
-{
-  "sessions": [{
-    "id": "exec_…",
-    "command": "echo",
-    "args": ["Hello","Shiva"],
-    "status": "COMPLETED",
-    "startedAt": "…", "endedAt": "…",
-    "durationMs": 4, "exitCode": 0, "signal": null,
-    "isSuccess": true,
-    "pid": 12345,
-    "redirections": {}
-  }],
-  "total": 12
-}
+{ "sessions": [ … ], "total": 128, "limit": 50, "offset": 0 }
 ```
 
 ### `GET /api/sessions/:id`
 
-Full metadata + `argv`:
+The session record. `storedJsonCorrupt` and `storedJsonError` appear when a
+persisted JSON column could not be parsed — the record is still returned,
+because hiding the session would hide the corruption.
 
-```json
-{
-  "id": "exec_…",
-  "command": "echo",
-  "args": ["Hello","Shiva"],
-  "argv": ["echo","Hello","Shiva"],
-  "status": "COMPLETED",
-  "startedAt": "…",
-  "endedAt": "…",
-  "durationMs": 4,
-  "exitCode": 0,
-  "signal": null,
-  "isSuccess": true,
-  "pid": 12345,
-  "redirections": { "out": "demo.txt" },
-  "eventCount": 6
-}
-```
+### `DELETE /api/sessions/:id`
 
-### `GET /api/sessions/:id/events` (SSE)
-
-`text/event-stream`. On connect the server replays stored events, then
-streams live ones.
-
-```
-event: execution.received
-data: {"id":"evt_…","sessionId":"exec_…","sequence":0,"type":"execution.created","source":"gateway","timestamp":"…","monotonicMs":0,"pid":null,"payload":{}}
-
-event: execution.received
-data: {"…"}
-
-event: execution.ended
-data: {"sessionId":"exec_…","status":"COMPLETED","exitCode":0}
-```
-
-The final line (`execution.ended`) closes the stream. Reconnect uses the
-`Last-Event-ID` header; events are re-sent from `sequence > last`.
+`409 RUNNING` if the execution is still in flight. Deletes the session, its
+events, and its redirection rows in one transaction.
 
 ### `GET /api/sessions/:id/argv`
 
-```json
-{
-  "sessionId": "exec_…",
-  "argc": 3,
-  "argv": ["echo","Hello","Shiva"],
-  "argvDisplay": ["echo","Hello","Shiva","NULL"]
-}
-```
+The exact argv the program received, with the `NULL` terminator shown for
+teaching purposes.
 
 ### `GET /api/sessions/:id/output`
 
-Captured program stdout/stderr as the execution ran:
-
 ```json
-{ "sessionId": "exec_…", "stdout": "Hello Shiva\n", "stderr": "" }
+{
+  "sessionId": "exec_…",
+  "stdout": "Hello CAPS\n",
+  "stderr": "",
+  "live": true,
+  "stdoutTruncated": false,
+  "stderrTruncated": false,
+  "channels": {
+    "stdout": "the executed program's own stdout, copied verbatim",
+    "stderr": "the executed program's stderr plus CAPS diagnostics; the CAPS monitor protocol is not included",
+    "limitation": "CAPS diagnostics and the target's stderr share one descriptor and are separated line-wise, not at descriptor level"
+  }
+}
 ```
+
+`live` is `true` while the execution is running. Both channels are served live;
+the CAPS monitor protocol never appears in `stderr`.
 
 ### `GET /api/sessions/:id/replay`
 
-Stored event timeline for the replay engine:
-
-The timeline includes `process.snapshot` events when the backend collected procfs data. Snapshot event payload metrics carry `value`, `provenance`, `source`, and, when unavailable, a `reason`. Replay returns only persisted event data; it does not inspect procfs or restart the command.
-
-### `GET /api/processes`
-
-Lists only active executions tracked in the gateway registry. Each row contains the CAPS execution ID, the CAPS-reported child PID, and the latest procfs snapshot for that same execution when available. No arbitrary PID can be supplied to this endpoint.
+The complete persisted event stream, plus the integrity report. **Read-only:**
+no spawn, no `open("/proc/...")`, no write. Two consecutive calls return a
+byte-identical event fingerprint.
 
 ```json
 {
   "sessionId": "exec_…",
-  "command": "echo",
-  "argv": ["echo","Hello","Shiva"],
-  "startedAt": "…",
-  "events": [
-    {"sequence":0,"type":"execution.created","timestamp":"…","monotonicMs":0,"pid":null},
-    {"sequence":1,"type":"command.received","…"},
-    …
-  ],
-  "result": { "exitCode": 0, "signal": null, "durationMs": 4, "isSuccess": true }
+  "status": "COMPLETED",
+  "events": [ … ],
+  "integrity": {
+    "valid": true,
+    "errors": 0,
+    "warnings": 0,
+    "corruptPayloads": 0,
+    "summary": { "eventCount": 20, "firstSequence": 0, "lastSequence": 19, "terminalType": "execution.completed" },
+    "violations": [ … ]
+  },
+  "result": { "exitCode": 0, "signal": null, "durationMs": 3010, "isSuccess": true, "status": "COMPLETED", "error": null }
 }
 ```
+
+## Events (SSE)
+
+### `GET /api/sessions/:id/events`
+
+Two frame types, and they mean different things:
+
+```
+id: 7
+event: caps.event
+data: {"id":"evt_…","sessionId":"exec_…","sequence":7,"type":"process.exited", …}
+
+event: stream.end
+data: {"sessionId":"exec_…","status":"COMPLETED","exitCode":0,"signal":null,"durationMs":3010}
+```
+
+* Only `caps.event` carries an `id:`, and that id is the canonical sequence
+  within the session. A native `EventSource` therefore reconnects with a
+  meaningful `Last-Event-ID`.
+* `stream.end` carries **no `id:`**, so `Last-Event-ID` can only ever hold a
+  sequence that exists.
+* The delivery order is subscribe-with-buffer → read → send → flush, so a
+  client never misses a persisted event because it connected at the wrong
+  moment.
+* `Last-Event-ID` is parsed only if it is a non-negative integer; anything else
+  is treated as absent rather than coerced.
+
+### `GET /api/live/stream`
+
+The same ordering, across every session, with a bounded preload of the most
+recent events.
+
+## Control
 
 ### `POST /api/sessions/:id/terminate`
 
@@ -190,110 +258,42 @@ Lists only active executions tracked in the gateway registry. Each row contains 
 { "signal": "SIGINT" }
 ```
 
-Sends a real signal to the child PID (observed via `process.started`).
-Returns `202` unless the session is already terminal. Default `SIGINT`
-(the Signal Lab path). The real `SIGNAL_RECEIVED`/`PROCESS_EXITED` events
-then stream as usual.
+`signal` ∈ `SIGINT` (default), `SIGTERM`, `SIGKILL`, `SIGQUIT`, `SIGTSTP`.
+
+`202` on delivery, `404` if the session is not running, `409 NOT_RUNNING` if it
+is already terminal, `409 SIGNAL_FAILED` with a reason otherwise. The
+delayed escalation re-verifies the target's kernel start time and refuses to
+fire if the PID was recycled.
 
 ### `GET /api/processes`
 
-Live process registry (only PIDs genuinely produced by CAPS in this
-gateway):
+The live process table, with the most recent telemetry payload for each.
 
-```json
-{
-  "processes": [{
-    "sessionId": "exec_…", "pid": 12345, "command": "sleep",
-    "argv": ["sleep","10"], "state": "RUNNING",
-    "startedAt": "…", "durationMs": 2103
-  }]
-}
-```
+## Analytics
 
-### `GET /api/analytics/overview`
+| Endpoint | Returns |
+| --- | --- |
+| `GET /api/analytics/overview` | counts, percentiles, exit/signal distributions, and the telemetry aggregate |
+| `GET /api/analytics/commands` | per-command baselines (durations, RSS, rates) |
+| `GET /api/analytics/compare?ids=a,b` | exactly two session ids; a third is a 400, not a silent truncation |
 
-Computed from stored sessions only:
-
-```json
-{
-  "totalExecutions": 42,
-  "successful": 37,
-  "failed": 4,
-  "signalled": 1,
-  "avgDurationMs": 12.4,
-  "p50Ms": 5, "p95Ms": 42, "p99Ms": 300,
-  "byExitCode": { "0": 37, "1": 3, "127": 1, "130": 1 },
-  "bySignal": { "2": 1 },
-  "byCommand": { "echo": 20, "sleep": 10, "false": 4, … },
-  "redirectionUsage": { "out": 5, "append": 2, "in": 1 },
-  "byDay": [ { "date": "2026-09-24", "count": 42, "success": 37 } ]
-}
-```
-
-### `GET /api/analytics/commands`
-
-Per-command baselines from stored sessions:
-
-```json
-{
-  "totalCommandRuns": 42,
-  "commands": [{
-    "command": "echo", "runs": 20, "successful": 20, "failed": 0,
-    "signalled": 0, "successRate": 100.0,
-    "avgDurationMs": 1.2, "medianDurationMs": 1.0, "p95DurationMs": 3.0,
-    "minDurationMs": 0.4, "maxDurationMs": 6.0,
-    "rssSamples": 10, "medianRssBytes": 1204296, "peakRssBytes": 1409024,
-    "lastRunAt": "…"
-  }]
-}
-```
-
-`null` fields mean insufficient observations, never fabricated zeros. The
-frontend renders `—` for those cells.
-
-### `GET /api/analytics/compare?ids=<left>,<right>`
-
-Side-by-side comparison of two stored sessions (no re-execution):
-
-```json
-{
-  "left":  { "sessionId": "exec_…", "command": "echo", "args": ["Hello"], "status": "COMPLETED", "exitCode": 0, "signal": null, "durationMs": 4, "eventCount": 12, "snapshotCount": 6, "peakRssBytes": 1260000, "medianRssBytes": 1220000, "peakCpuPercent": 8.2, "cpuTimeMs": 2 },
-  "right": { … },
-  "shared": { "sameCommand": true, "command": "echo", "sameExit": true, "sameSignal": true, "sameStatus": true },
-  "deltas": { "durationMs": 2, "eventDelta": 1, "snapshotDelta": 0, "peakRssDeltaBytes": 40000, "cpuTimeDeltaMs": 1 }
-}
-```
-
-Rejects sessions that do not exist, an empty query, or a self-comparison
-(`ids=a,a`) with a `400`.
+## Export and report
 
 ### `GET /api/sessions/:id/export?format=json|csv`
 
-Downloads the persisted event timeline.
-
-- `json` — the same canonical envelope array returned by replay.
-- `csv` — header `sequence,timestamp,type,payload_json`; string values are
-  RFC 4180 double-quote escaped; content disposition
-  `attachment; filename="<id>.<format>"`.
+An unknown `format` is a **400**, not a silent fallback to JSON. Both formats
+include the integrity report.
 
 ### `GET /api/sessions/:id/report`
 
-Markdown observation report (`text/markdown; charset=utf-8`) with the
-command, outcome, exit/signal, duration, peaks & moments, snapshot summary,
-and per-event tallies. Generated from the stored event store; it never
-re-runs the command.
+A Markdown observation report: the event timeline, the observed process
+resources with their provenance, the lifecycle verdict (including the errno and
+reason when `execvp()` failed), an explicit provenance section, and a
+limitations section naming what this report cannot tell you.
 
-### `GET /api/playground/examples`
+## Playground and retention
 
-Curated educational examples (static, safe list).
-
-## Security rules
-
-- No shell executable (`sh`, `bash`, etc.) is allowed through the gateway:
-  a request for `sh -c` would bypass the executable allowlist. No
-  `shell:true`, `system()`, `popen()`, or string-concatenated command
-  execution is used.
-- Allowlist enforced server-side; path traversal rejected; timeouts and
-  output caps enforced server-side; default bind `127.0.0.1`.
-- This gateway executes OS processes — do **not** expose it to untrusted
-  networks.
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/playground/examples` | curated, runnable examples |
+| `POST /api/retention/sweep` | run the retention sweep now; reports what it removed, and says so plainly when retention is disabled |

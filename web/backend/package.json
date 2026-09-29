@@ -1,9 +1,9 @@
 {
   "name": "caps-observatory-backend",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "CAPS Process Execution Observatory — web gateway (real-time execution -> SSE -> SQLite)",
+
   "engines": {
     "node": ">=22.5.0"
   },

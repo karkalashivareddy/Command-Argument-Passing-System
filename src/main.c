@@ -10,7 +10,17 @@
 #include "signals.h"
 #include "utils.h"
 
-#define CAPS_VERSION "0.1.0"
+/*
+ * Product version.
+ *
+ * CAPS_VERSION used to be a literal in this file that said 0.1.0 while the
+ * gateway and both npm packages said 1.0.0, so `caps --version` and the
+ * running service reported different products. The value is now generated
+ * from the single canonical source (web/backend/src/config/env.ts) by the
+ * Makefile and compared against the gateway's version in CI
+ * (scripts/check-lockfiles.sh).
+ */
+#include "version.h"
 
 static void usage(FILE *stream)
 {
@@ -102,11 +112,13 @@ static int interactive_loop(caps_monitor_t *mon, int quiet_ui)
                 fprintf(stderr, "\n");
             break;
         }
-        if (raw[0] == '\0')
-            continue;
 
-        emit_simple_event(mon, CAPS_EVENT_COMMAND_RECEIVED, raw);
-
+        /*
+         * Tokenize before announcing anything.  Emitting COMMAND_RECEIVED
+         * for a blank or whitespace-only line would put an event in the
+         * canonical stream that no later event ever resolves, breaking the
+         * "every event participates in the lifecycle" invariant.
+         */
         char **argv = NULL;
         int argc = 0;
         if (parser_parse(raw, &argv, &argc) < 0) {
@@ -118,6 +130,8 @@ static int interactive_loop(caps_monitor_t *mon, int quiet_ui)
             parser_free_argv(argv);
             continue;
         }
+
+        emit_simple_event(mon, CAPS_EVENT_COMMAND_RECEIVED, raw);
 
         redirection_t *redirs = NULL;
         int nredirs = 0;
@@ -218,12 +232,17 @@ static int parse_debug_mode(void)
 int main(int argc, char *argv[])
 {
     /*
-     * signals_parent_init() reports its own sigaction() failure.  The
-     * shell then continues in the documented degraded mode (Ctrl+C may
-     * also terminate the parent while a child runs), so the return value
-     * is intentionally not acted on and the failure is not re-reported.
+     * Fail closed on the signal model.  If SIGINT cannot be set to SIG_IGN
+     * here, Ctrl+C would also terminate caps while a child is running, and the
+     * documented guarantee ("the REPL survives Ctrl+C") would be false while
+     * the process kept behaving as if it were true.  A shell that quietly runs
+     * with the wrong signal semantics is worse than one that refuses to start,
+     * so this is fatal and the reason is printed.
      */
-    (void)signals_parent_init();
+    if (signals_parent_init() != 0) {
+        caps_error("cannot initialise the signal model; refusing to start");
+        return EXIT_FAILURE;
+    }
 
     if (argc == 2 && strcmp(argv[1], "--parse") == 0)
         return parse_debug_mode();

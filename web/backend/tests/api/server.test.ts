@@ -63,8 +63,10 @@ describeFx("CAPS gateway API (real engine)", () => {
     const res = await app.inject({ method: "GET", url: "/api/health" });
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(body.engine.available).toBe(true);
-    expect(body.engine.path).toBe(CAPS_PATH);
+    // Liveness only: /api/health reports that the process is running. Engine,
+    // database, and workspace readiness live on /api/ready.
+    expect(body.status).toBe("ok");
+    expect(body.version).toBeTruthy();
   });
 
   it("reports capabilities", async () => {
@@ -84,7 +86,14 @@ describeFx("CAPS gateway API (real engine)", () => {
     expect(body.telemetry.metrics).not.toContain("identityStartTicks");
     // capsEnginePid comes from the gateway child handle, not from procfs.
     expect(body.telemetry.metrics).toContain("capsEnginePid");
-    expect(body.telemetry.collectedMetrics).not.toContain("capsEnginePid");
+    // The classification must keep derived metrics out of the observed list:
+    // cpuPercent is a two-sample delta, not a procfs field.
+    expect(body.telemetry.observedMetrics).not.toContain("capsEnginePid");
+    expect(body.telemetry.observedMetrics).not.toContain("cpuPercent");
+    expect(body.telemetry.derivedMetrics).toContain("cpuPercent");
+    expect(body.telemetry.metricProvenance.cpuPercent).toBe("DERIVED");
+    expect(body.telemetry.metricProvenance.rssBytes).toBe("OBSERVED");
+    expect(body.telemetry.metricProvenance.capsEnginePid).toBe("GATEWAY");
     expect(body.telemetry.derivedRateMetrics).toContain("cpuPercent");
     expect(body.telemetry.derivedRateMetrics).toContain("wcharBytesPerSec");
   });
@@ -266,13 +275,16 @@ describeFx("CAPS gateway API (real engine)", () => {
 
     const stream = await app.inject({ method: "GET", url: `/api/sessions/${sid}/events` });
     expect(stream.statusCode).toBe(200);
-    expect(stream.body).toContain("event: execution.received");
+    expect(stream.body).toContain("event: caps.event");
     expect(stream.body).toContain('"type":"process.exited"');
     expect(stream.body).toContain('"exitCode":127');
 
     const resumed = await app.inject({ method: "GET", url: `/api/sessions/${sid}/events`, headers: { "last-event-id": "3" } });
     const resumedIds = [...resumed.body.matchAll(/^id: (\d+)$/gm)].map((match) => Number(match[1]));
-    const expectedResumedIds = [...events.filter((event) => event.sequence > 3).map((event) => event.sequence), Number.MAX_SAFE_INTEGER];
+    // The end-of-stream frame carries NO id:, so Last-Event-ID can only ever hold
+    // a real canonical sequence. This is the bug the assertion guards.
+    const expectedResumedIds = events.filter((event) => event.sequence > 3).map((event) => event.sequence);
+    expect(stream.body).not.toContain("id: 9007199254740991");
     expect(resumedIds).toEqual(expectedResumedIds);
     expect(new Set(resumedIds).size).toBe(resumedIds.length);
   });
@@ -318,7 +330,12 @@ describeFx("CAPS gateway API (real engine)", () => {
     const read = await run({ command: "cat", redirections: { in: target } });
     expect(read.stdout).toBe("first\nsecond\n");
     expect(read.exitCode).toBe(0);
-    expect(read.stderr).toContain('"event":"REDIRECTION_OPENED"');
+    // The CAPS monitor protocol is on the engine's stderr but is NOT user
+    // output. It used to be duplicated into the session's stderr, together
+    // with a second copy of every diagnostic. The protocol belongs in the
+    // event store, and the replay is where a reader looks for it.
+    expect(read.stderr).not.toContain("REDIRECTION_OPENED");
+    expect(read.stderr).not.toContain('"event":');
   });
 
   it("terminates a running execution with SIGINT (CANCELLED, 130)", async () => {
@@ -380,7 +397,9 @@ describeFx("CAPS gateway API (real engine)", () => {
     expect(laterEvents.filter((event) => event.type === "process.snapshot")).toHaveLength(countAfterExit);
     // Nothing at all may be appended after the terminal event: no telemetry
     // escapes past the end of the execution.
-    const terminalIndex = laterEvents.findIndex((event) => event.type === "execution.completed");
+    // A SIGINT-terminated execution is CANCELLED, and a cancelled execution
+    // gets its own terminal event type rather than being reported as a failure.
+    const terminalIndex = laterEvents.findIndex((event) => event.type === "execution.cancelled");
     expect(terminalIndex).toBeGreaterThan(-1);
     expect(terminalIndex).toBe(laterEvents.length - 1);
     // Sequence stays strictly ascending with no gaps.
@@ -531,7 +550,14 @@ describeFx("CAPS gateway API (real engine)", () => {
     expect(res.body).toContain("session.summary");
     const row = lines.find((l: string) => l.includes("command.received"));
     expect(row).toBeTruthy();
-    expect(row).toContain('""echo Export, me""'); // inner quotes are doubled per RFC 4180
+    // argv[0] of the executed child is the gateway's verified absolute path,
+    // so the recorded label is that path rather than the bare allowlist name.
+    // The inner quotes are still doubled per RFC 4180.
+    // The payload is JSON embedded in CSV, so every inner quote is doubled and
+    // the argument appears as `echo Export, me""`. argv[0] of the child is the
+    // gateway's verified absolute path, so the label is that path rather than
+    // the bare allowlist name.
+    expect(row).toContain('echo Export, me""');
   });
 
   it("produces a markdown observation report over persisted data", async () => {

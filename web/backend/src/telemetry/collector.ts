@@ -5,7 +5,52 @@ import { existsSync } from "node:fs";
 import { FIRST_SAMPLE_RATE_REASON } from "./derive.js";
 import { SNAPSHOT_METRIC_KEYS, type Metric, type ProcessSnapshot, type Provenance } from "./types.js";
 
-let cachedClockTicks: number | null | undefined;
+/**
+ * Cache of stable kernel values.
+ *
+ * Two values are worth caching: `_SC_CLK_TCK` (a compile-time constant of the
+ * running kernel) and `/proc/stat`'s `btime` (fixed for the machine's current
+ * boot).  Neither changes while the gateway runs, and re-reading `/proc/stat`
+ * on every sample of every process is pure waste on a busy recorder.
+ *
+ * The cache is an explicit, injectable object rather than a module-level
+ * variable.  A hidden global would make test results depend on the order tests
+ * happen to run in: whichever test read the cache first would decide the
+ * value every later test saw.
+ */
+export class KernelValueCache {
+  private readonly clockTicks = new Map<string, number | null>();
+  private readonly bootTime = new Map<string, number | null>();
+
+  clockTicksPerSecond(procRoot: string, read: () => number | null): number | null {
+    const key = `${procRoot}|${read.name}`;
+    if (this.clockTicks.has(key)) return this.clockTicks.get(key)!;
+    const value = read();
+    this.clockTicks.set(key, value);
+    return value;
+  }
+
+  bootTimeSeconds(procRoot: string, read: () => number | null): number | null {
+    const key = procRoot;
+    if (this.bootTime.has(key)) return this.bootTime.get(key)!;
+    const value = read();
+    this.bootTime.set(key, value);
+    return value;
+  }
+
+  clear(): void {
+    this.clockTicks.clear();
+    this.bootTime.clear();
+  }
+}
+
+/** Process-wide cache. Tests construct their own instead of sharing this. */
+export const kernelValues = new KernelValueCache();
+
+/** The global cache, kept for existing callers; prefer injecting KernelValueCache. */
+export function resetKernelValueCache(): void {
+  kernelValues.clear();
+}
 
 export interface ProcStat {
   pid: number;
@@ -112,26 +157,34 @@ export function parseProcIo(text: string): Partial<ProcIo> {
   return out;
 }
 
-export function readClockTicksPerSecond(): number | null {
-  if (cachedClockTicks !== undefined) return cachedClockTicks;
+/**
+ * Kernel clock tick rate.
+ *
+ * Resolved with `getconf CLK_TCK` from a fixed list of trusted locations, and
+ * cached by the caller-supplied `KernelValueCache`.  `getconf` is used rather
+ * than a hard-coded 100 because HZ is a kernel build option.
+ */
+function probeClockTicks(): number | null {
   if (process.platform !== "linux") return null;
   for (const executable of ["/usr/bin/getconf", "/bin/getconf"]) {
     if (!existsSync(executable)) continue;
     const result = spawnSync(executable, ["CLK_TCK"], { encoding: "utf8", timeout: 250, shell: false });
     const hz = Number(result.stdout.trim());
-    if (result.status === 0 && Number.isFinite(hz) && hz > 0) {
-      cachedClockTicks = hz;
-      return hz;
-    }
+    if (result.status === 0 && Number.isFinite(hz) && hz > 0) return hz;
   }
-  cachedClockTicks = null;
-  return cachedClockTicks;
+  return null;
+}
+
+export function readClockTicksPerSecond(cache: KernelValueCache = kernelValues): number | null {
+  return cache.clockTicksPerSecond("/proc", probeClockTicks);
 }
 
 export interface ProcReadOptions {
   procRoot?: string;
   nowMs?: number;
   clockTicksPerSecond?: number | null;
+  /** Cache for stable kernel values; pass a fresh one to isolate a test. */
+  cache?: KernelValueCache;
 }
 
 /**
@@ -179,13 +232,18 @@ export function readProcessSnapshot(pid: number, options: ProcReadOptions = {}):
     }
   }
 
-  const ticks = options.clockTicksPerSecond === undefined ? readClockTicksPerSecond() : options.clockTicksPerSecond;
+  const cache = options.cache ?? kernelValues;
+  const ticks =
+    options.clockTicksPerSecond === undefined
+      ? readClockTicksPerSecond(cache)
+      : options.clockTicksPerSecond;
   const uptimeSeconds = readUptime(procRoot);
   const source = `/proc/${pid}/stat`;
   const sourceStatus = `/proc/${pid}/status`;
   const sourceIo = `/proc/${pid}/io`;
   const sourceDerived = `${source} + ${procRoot}/uptime`;
   const sourceEngine = "gateway child_process.spawn";
+  const sourceIdentity = `${source} field 22 + ${procRoot}/stat btime, converted with CLK_TCK`;
   const metric = <T>(value: T, provenance: Provenance, fieldSource: string): Metric<T> => ({ value, provenance, source: fieldSource });
   const unavailable = <T>(fieldSource: string, reason = unavailableReason ?? "Field is absent from this kernel procfs response"): Metric<T> => ({
     value: null,
@@ -221,13 +279,13 @@ export function readProcessSnapshot(pid: number, options: ProcReadOptions = {}):
   }
 
   const elapsedMs = uptimeSeconds === null || ticks === null ? null : Math.max(0, (uptimeSeconds - stat.startTicks / ticks) * 1000);
-  const bootSeconds = ticks === null ? null : readBootTimeSeconds(procRoot);
+  const bootSeconds = ticks === null ? null : cache.bootTimeSeconds(procRoot, () => readBootTimeSeconds(procRoot));
   // Stable identity path: a pure function of kernel values, identical for every
   // sample of the same process. The wall-clock path is only a fallback for a
   // kernel that does not publish btime.
   const stableStartMs = bootSeconds === null || ticks === null ? null : Math.round(bootSeconds * 1000 + (stat.startTicks / ticks) * 1000);
   const startMs = stableStartMs ?? (elapsedMs === null ? null : nowMs - elapsedMs);
-  const startSource = stableStartMs === null ? sourceDerived : `${source} field 22 + ${procRoot}/stat btime, converted with CLK_TCK`;
+  const startSource = stableStartMs === null ? sourceDerived : sourceIdentity;
   const timeReason = uptimeSeconds === null ? "Cannot read /proc/uptime" : "Kernel clock tick rate unavailable";
   const statusPid = parseFirstInt(status.get("Pid"));
   const statusPpid = parseFirstInt(status.get("PPid"));

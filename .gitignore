@@ -32,3 +32,10 @@ web/backend/*.db
 web/backend/*.db-*
 data/
 *.log
+
+# The screenshots under docs/screenshots/ are deliberate documentation
+# artifacts and are tracked. Capture output written outside that directory is
+# not, so a stray run cannot commit a screenful of noise.
+web/frontend/docs/
+*.env.local
+*.env.*.local

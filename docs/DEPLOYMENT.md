@@ -1,3 +1,15 @@
+> **Status: historical / superseded.** This document describes a container
+> deployment of an earlier iteration. CAPS is a local, single-user
+> observability tool whose security boundary is **loopback by default** and
+> which refuses to start on a non-loopback address without an explicit remote
+> mode and a bearer token. The container recipe below is therefore *not* a
+> supported deployment and is retained only as a record of the thinking.
+>
+> For the supported way to run CAPS, see the Quick start in
+> [../README.md](../README.md) and the security model in
+> [../SECURITY.md](../SECURITY.md). For deployment-shaped concerns that do still
+> apply — port selection, a reverse proxy in front of a loopback service, and
+> the readiness endpoint — see the sections below.
 # Deployment Guide
 
 ## Overview
@@ -204,7 +216,7 @@ journalctl -u caps-observatory -f
 
 ```bash
 # Gateway health
-curl -f http://127.0.0.1:3000/api/health
+curl -f http://127.0.0.1:3000/api/ready
 
 # Engine availability
 curl -f http://127.0.0.1:3000/api/capabilities | jq .engineAvailable

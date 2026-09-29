@@ -1,4 +1,5 @@
 import { accessSync, constants } from "node:fs";
+import { isAbsolute } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -45,12 +46,29 @@ describe("workload catalog shape", () => {
 
   it("never names a path outside the repository workload build directory", () => {
     for (const cap of workloadCapabilities()) {
-      expect(cap.executablePath.startsWith("/")).toBe(true);
+      // Absolute on every platform. The assertion previously hard-coded a
+      // leading "/", which made the whole suite fail on any non-Linux
+      // developer machine even though the code was correct there.
+      expect(isAbsolute(cap.executablePath)).toBe(true);
       expect(cap.executableRelativePath.startsWith("..")).toBe(false);
-      expect(cap.executableRelativePath).toMatch(/build\/workloads\//);
+      expect(cap.executableRelativePath).toMatch(/build[\\/]workloads[\\/]/);
       // The path is derived from the fixed profile id, not from input.
       expect(cap.executablePath.endsWith(cap.id)).toBe(true);
     }
+  });
+
+  it("states what is sampled and what is not for every workload", () => {
+    // A workload may only advertise a signal the gateway really observes. The
+    // fork-tree workload is the case that matters: it forks children, but the
+    // sampler follows a single PID, so "descendants" would be a false claim.
+    for (const profile of WORKLOAD_PROFILES) {
+      expect(profile.observationScope.sampled).toBeTruthy();
+      expect(profile.observationScope.notSampled).toBeTruthy();
+    }
+    const tree = WORKLOAD_PROFILES.find((p) => p.id === "caps_fork_tree")!;
+    expect(tree.observes).not.toContain("descendants");
+    expect(tree.observationScope.notSampled).toMatch(/descendant/i);
+    expect(tree.observes).toContain("forkActivity");
   });
 
   it("reports availability as an observed probe result, never a guess", () => {

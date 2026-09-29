@@ -48,6 +48,15 @@ export interface WorkloadProfile {
   readonly description: string;
   /** Signals this workload is designed to make observable. */
   readonly observes: readonly string[];
+  /**
+   * What the gateway actually samples while this workload runs.  Present
+   * because "what the workload does" and "what the observatory sees" are
+   * different questions, and only the second one may be advertised.
+   */
+  readonly observationScope: {
+    readonly sampled: string;
+    readonly notSampled: string;
+  };
   readonly args: readonly WorkloadArgSpec[];
   /**
    * Built argv (excluding argv[0]) for a given set of user values.
@@ -98,6 +107,7 @@ export const WORKLOAD_PROFILES: readonly WorkloadProfile[] = [
     label: "CPU burn",
     description: "Sustained arithmetic mixing on one core for a bounded budget.",
     observes: ["cpuUserMs", "cpuSystemMs", "cpuPercent", "elapsedMs"],
+    observationScope: { sampled: "the single CAPS-reported child PID via /proc/<pid>/{stat,status,io}", notSampled: "system-wide CPU, cgroup accounting, and any process the child forks" },
     args: [duration()],
     buildArgv: (v) => [String(num(v[0], duration()))],
   },
@@ -106,6 +116,7 @@ export const WORKLOAD_PROFILES: readonly WorkloadProfile[] = [
     label: "Memory pressure",
     description: "Touches every page of a private anonymous mapping, then holds it resident.",
     observes: ["rssBytes", "virtualMemoryBytes", "minorFaults"],
+    observationScope: { sampled: "the single CAPS-reported child PID via /proc/<pid>/{stat,status,io}", notSampled: "system-wide memory, swap, and any process the child forks" },
     args: [duration(), memory()],
     buildArgv: (v) => [String(num(v[0], duration())), String(num(v[1], memory()))],
   },
@@ -114,6 +125,7 @@ export const WORKLOAD_PROFILES: readonly WorkloadProfile[] = [
     label: "File I/O burn",
     description: "Writes and reads back a bounded file inside a private workspace it creates and removes.",
     observes: ["readBytes", "writeBytes", "rcharBytes", "wcharBytes"],
+    observationScope: { sampled: "the single CAPS-reported child PID via /proc/<pid>/io", notSampled: "per-device I/O, network I/O, and any process the child forks" },
     args: [duration(), io()],
     buildArgv: (v) => [String(num(v[0], duration())), String(num(v[1], io()))],
   },
@@ -122,6 +134,7 @@ export const WORKLOAD_PROFILES: readonly WorkloadProfile[] = [
     label: "Mixed CPU + memory + I/O",
     description: "Interleaves all three phases in one process so every /proc signal shares one PID on one timeline.",
     observes: ["cpuPercent", "rssBytes", "readBytes", "writeBytes"],
+    observationScope: { sampled: "the single CAPS-reported child PID via /proc/<pid>/{stat,status,io}", notSampled: "system-wide CPU or memory, and any process the child forks" },
     args: [duration(), memory(), io()],
     buildArgv: (v) => [
       String(num(v[0], duration())),
@@ -131,10 +144,17 @@ export const WORKLOAD_PROFILES: readonly WorkloadProfile[] = [
   },
   {
     id: "caps_fork_tree",
-    label: "Process tree",
+    label: "Process tree (fork activity of one tracked process)",
     description:
-      "Forks a bounded, deterministic parent -> children -> grandchild topology and reaps every child before exiting.",
-    observes: ["descendants", "processGroupId", "elapsedMs"],
+      "Forks a bounded, deterministic parent -> children -> grandchild topology and reaps every child before exiting. The observatory samples the CAPS-reported child PID only, so this workload demonstrates that a single tracked process performs a number of forks and reaps them; it does NOT make descendants observable in the gateway telemetry.",
+    // Stated as fork *activity* rather than descendant observation, because
+    // the sampler follows one PID. Claiming "descendants" here would be a
+    // capability the gateway does not have.
+    observes: ["forkActivity", "processGroupId", "elapsedMs"],
+    observationScope: {
+      sampled: "the single CAPS-reported child PID",
+      notSampled: "descendants created by that child; the gateway discovers no process tree",
+    },
     args: [duration(8), children()],
     buildArgv: (v) => [String(num(v[0], duration(8))), String(num(v[1], children()))],
   },
@@ -196,9 +216,9 @@ export type WorkloadCapability = {
   readonly label: string;
   readonly description: string;
   readonly observes: readonly string[];
+  readonly observationScope: { readonly sampled: string; readonly notSampled: string };
   readonly args: readonly WorkloadArgSpec[];
-  readonly executablePath: string;
-  /** Repository-relative, for display only. */
+  readonly executablePath: string;  /** Repository-relative, for display only. */
   readonly executableRelativePath: string;
   readonly available: boolean;
   readonly availabilityProvenance: "OBSERVED";
@@ -214,6 +234,7 @@ export function workloadCapabilities(): WorkloadCapability[] {
       label: p.label,
       description: p.description,
       observes: p.observes,
+      observationScope: p.observationScope,
       args: p.args,
       executablePath: abs,
       executableRelativePath: relative(repoRoot, abs),

@@ -37,10 +37,10 @@ const ERRORS_ON: Record<StageId, CanonicalEventType[]> = {
   parse: ["command.parse_error"],
   argv: [],
   fork: ["redirection.failed"],
-  exec: ["process.exec_error"],
+  exec: ["process.exec_error", "process.launch_failed"],
   run: [],
   wait: [],
-  result: ["process.exec_error", "execution.failed"],
+  result: ["process.exec_error", "process.wait_failed", "execution.failed", "execution.cancelled"],
 };
 
 const TERMINAL = new Set<SessionStatus>(["COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED"]);
@@ -127,6 +127,9 @@ export const EVENT_LABELS: Record<CanonicalEventType, string> = {
   "process.snapshot": "PROCFS SNAPSHOT",
   "process.exited": "PROCESS EXITED",
   "process.exec_error": "EXEC ERROR",
+  "process.wait_failed": "WAIT FAILED",
+  "process.launch_failed": "LAUNCH FAILED",
+  "execution.cancelled": "CANCELLED",
   "signal.received": "SIGNAL RECEIVED",
   "session.summary": "SESSION SUMMARY",
 };

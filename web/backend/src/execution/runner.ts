@@ -1,21 +1,23 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import { dirname, isAbsolute } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 
 import type { CapsConfig } from "../config/env.js";
+import { transact } from "../db/database.js";
 import type { EventRepository } from "../db/repositories/events.js";
 import type { SessionRepository } from "../db/repositories/sessions.js";
 import type { EventBus } from "../events/bus.js";
+import { isTerminalStatus, type CanonicalEvent, type EngineOutcome, type RedirectionSpec, type SessionStatus } from "../types/observability.js";
 import { TelemetrySampler, type TelemetrySample } from "../telemetry/sampler.js";
-import type { ProcessSnapshot } from "../telemetry/types.js";
-import type { CanonicalEvent, RedirectionSpec } from "../types/observability.js";
 import { logger } from "../utils/logger.js";
 import { newId } from "../utils/ids.js";
-import { parseCapsLine, repairLineChunks } from "./parser.js";
+import { parseCapsLine } from "./parser.js";
+import { classifyLine, splitLines } from "./output.js";
 import { gatewayEvent, normalizeCapsEvent } from "./normalizer.js";
 import { ExecutionRegistry, type ActiveSession } from "./registry.js";
-import { signalChild } from "./terminator.js";
+import { escalateTo, forgetIdentity, signalChild, terminateGracefully, type ProcessIdentity } from "./terminator.js";
 
+/** Displayed/recorded flag names for each redirection, matching open()/dup2(). */
 const REDIR_FLAGS: Record<keyof RedirectionSpec, string> = {
   in: "O_RDONLY",
   out: "O_WRONLY | O_CREAT | O_TRUNC",
@@ -30,42 +32,51 @@ function keepTail(buf: string, chunk: string, limit: number): string {
 
 export interface StartExecutionInput {
   command: string;
+  /** Absolute, verified path of the binary that will actually be executed. */
   executable: string;
   args: string[];
   redirections: RedirectionSpec;
   timeoutMs: number;
 }
 
-export type StartResult = { sessionId: string } | { error: { code: string; message: string } };
+export type StartResult =
+  | { sessionId: string }
+  | { error: { code: string; message: string } };
 
-/** Minimal env for child processes: no secrets, PATH/LANG/TERM only. */
-function sanitizedEnv(executable: string): NodeJS.ProcessEnv {
+/**
+ * Environment for the engine and its child.
+ *
+ * No secrets are forwarded: the child gets PATH, LANG, HOME, TERM and
+ * nothing else.  PATH is still needed because a *workload* may itself invoke
+ * standard utilities; it is not needed to locate the allowlisted binary,
+ * because that is passed to the engine as an absolute path.
+ */
+function sanitizedEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of ["PATH", "LANG", "HOME", "TERM"]) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   env.LANG ??= "C.UTF-8";
   env.TERM ??= "dumb";
-  // The command allowlist resolves repository helpers to an absolute path.
-  // Add only that trusted directory so execvp() can keep the requested argv[0]
-  // (for example, "status_probe") while still locating the approved binary.
-  if (isAbsolute(executable)) {
-    const helperDir = dirname(executable);
-    const pathEntries = (env.PATH ?? "").split(":").filter(Boolean);
-    if (!pathEntries.includes(helperDir)) env.PATH = [helperDir, ...pathEntries].join(":");
-  }
   return env;
 }
 
+function key(channel: "stdout" | "stderr", sessionId: string): string {
+  return `${channel}:${sessionId}`;
+}
+
+export interface OutputSnapshot {
+  stdout: string;
+  stderr: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+  live: boolean;
+}
+
 export class ExecutionRunner {
-  /** "stdout:<id>" and "stderr:<id>" bounded text channels. */
-  private readonly buffers = new Map<string, string>();
-  /**
-   * Cadence and procfs access belong to the telemetry layer. The runner only
-   * hands it a verified target on process.started and takes finished
-   * snapshots back so it can assign a sequence and persist before publishing.
-   */
+  private readonly buffers = new Map<string, { text: string; truncated: boolean }>();
   private readonly telemetry: TelemetrySampler;
+  private closing = false;
 
   constructor(
     private readonly config: CapsConfig,
@@ -73,6 +84,7 @@ export class ExecutionRunner {
     private readonly events: EventRepository,
     private readonly bus: EventBus,
     private readonly registry: ExecutionRegistry,
+    private readonly db: DatabaseSync,
   ) {
     mkdirSync(config.workspace, { recursive: true });
     this.telemetry = new TelemetrySampler({
@@ -81,51 +93,81 @@ export class ExecutionRunner {
   }
 
   close(): void {
+    this.closing = true;
     this.telemetry.close();
     this.buffers.clear();
   }
 
   start(input: StartExecutionInput): StartResult {
-    if (!this.registry.hasCapacity()) {
-      return {
-        error: {
-          code: "CONCURRENCY_LIMIT_REACHED",
-          message: `Maximum concurrent executions reached (${this.config.maxConcurrent}).`,
-        },
-      };
+    if (this.registry.hasCapacity()) {
+      const sessionId = newId("exec");
+      const startedAt = new Date().toISOString();
+
+      // Session row, redirection rows, and the first event are one unit of
+      // work.  A failure part-way through would otherwise leave a session with
+      // no events, which replay cannot represent.
+      const redirDetail: Array<{ slot: string; target: string; flags: string }> = [];
+      if (input.redirections.in) redirDetail.push({ slot: "in", target: input.redirections.in, flags: REDIR_FLAGS.in });
+      if (input.redirections.out) redirDetail.push({ slot: "out", target: input.redirections.out, flags: REDIR_FLAGS.out });
+      if (input.redirections.append) redirDetail.push({ slot: "append", target: input.redirections.append, flags: REDIR_FLAGS.append });
+
+      const firstEventId = newId("evt");
+      try {
+        this.sessions.createWithFirstEvent({
+          id: sessionId,
+          command: input.command,
+          args: input.args,
+          redirections: input.redirections,
+          redirectionsDetail: redirDetail,
+          timeoutMs: input.timeoutMs,
+          startedAt,
+          firstEvent: {
+            id: firstEventId,
+            sequence: 0,
+            type: "execution.created",
+            source: "gateway",
+            timestamp: startedAt,
+            payload: { command: input.command, argumentCount: input.args.length, timeoutMs: input.timeoutMs },
+          },
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error("EXECUTION", "could not persist a new execution", { command: input.command, err: message });
+        return { error: { code: "PERSISTENCE_FAILED", message: "The execution could not be recorded and was not started." } };
+      }
+
+      const spawned = this.spawnFor(sessionId, input, startedAt);
+      if (spawned !== null) return spawned;
+      return { sessionId };
     }
 
-    const sessionId = newId("exec");
-    const startedAt = new Date().toISOString();
-    this.sessions.create({
-      id: sessionId,
-      command: input.command,
-      args: input.args,
-      redirections: input.redirections,
-      timeoutMs: input.timeoutMs,
-      startedAt,
-    });
-    recordRedirections(this.sessions, sessionId, input.redirections);
+    return {
+      error: {
+        code: "CONCURRENCY_LIMIT_REACHED",
+        message: `Maximum concurrent executions reached (${this.config.maxConcurrent}).`,
+      },
+    };
+  }
 
-    // Every event on this session gets a monotonically-increasing sequence.
-    // Start strictly after anything already persisted (defensive: this is a
-    // brand new session, so the initial value is -1 + 1 = 0).
-    let seq = this.events.maxSequence(sessionId) + 1;
-    this.events.insert(gatewayEvent({ sessionId, sequence: seq, evId: newId }, "gateway", "execution.created", {}));
-    seq += 1;
-
-    // CAPS argv: monitor + optional redirection descriptors + command args verbatim.
+  private spawnFor(
+    sessionId: string,
+    input: StartExecutionInput,
+    startedAt: string,
+  ): StartResult | null {
+    // The executable is an absolute, verified path.  argv[0] of the *engine's*
+    // child is that path, so the kernel executes exactly the file the gateway
+    // probed -- never whatever a PATH lookup would have found.
     const capsArgv: string[] = [this.config.capsExecutable, "--monitor", "--json"];
     if (input.redirections.in) capsArgv.push("--redir-in", input.redirections.in);
     if (input.redirections.out) capsArgv.push("--redir-out", input.redirections.out);
     if (input.redirections.append) capsArgv.push("--redir-append", input.redirections.append);
-    capsArgv.push(input.command, ...input.args);
+    capsArgv.push(input.executable, ...input.args);
 
     logger.info("EXECUTION", "spawning caps", {
       sessionId,
       command: input.command,
       argumentCount: input.args.length,
-      argvBytes: Buffer.byteLength(input.command) + input.args.reduce((total, arg) => total + Buffer.byteLength(arg), 0),
+      argvBytes: Buffer.byteLength(input.executable) + input.args.reduce((t, a) => t + Buffer.byteLength(a), 0),
       cwd: this.config.workspace,
     });
 
@@ -135,20 +177,16 @@ export class ExecutionRunner {
         cwd: this.config.workspace,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
-        env: sanitizedEnv(input.executable),
+        env: sanitizedEnv(),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.sessions.finalize(sessionId, {
-        status: "FAILED", exitCode: null, signal: null, isSuccess: false,
-        durationMs: null, pid: null, error: message,
-      });
-      this.events.insert(gatewayEvent({ sessionId, sequence: seq++, evId: newId }, "gateway", "execution.failed", { reason: message }));
+      this.failBeforeStart(sessionId, `execution could not be started: ${message}`, 1);
       return { error: { code: "SPAWN_FAILED", message } };
     }
 
-    this.buffers.set(key("stdout", sessionId), "");
-    this.buffers.set(key("stderr", sessionId), "");
+    this.buffers.set(key("stdout", sessionId), { text: "", truncated: false });
+    this.buffers.set(key("stderr", sessionId), { text: "", truncated: false });
 
     const active: ActiveSession = {
       sessionId,
@@ -157,6 +195,7 @@ export class ExecutionRunner {
       state: "STARTING",
       process: child,
       childPid: null,
+      childIdentity: null,
       processStartedAt: null,
       processReaped: false,
       startedAt,
@@ -170,51 +209,31 @@ export class ExecutionRunner {
       stdoutBytes: 0,
       stderrBytes: 0,
       sawSummary: false,
+      sawExecError: false,
+      sawWaitFailure: false,
+      sawLaunchFailure: false,
+      engineOutcome: null,
+      engineReason: null,
       killTimer: null,
-      stderrEventBuffer: "",
+      escalation: null,
+      stderrLineBuffer: "",
       finalized: false,
-      nextSeq: seq,
+      nextSeq: 1,
     };
     this.registry.add(active);
 
-    this.emit(gatewayEvent({ sessionId, sequence: active.nextSeq, evId: newId }, "gateway", "execution.started", { argv: capsArgv.slice(1) }));
+    this.emit(gatewayEvent({ sessionId, sequence: 0, evId: newId }, "gateway", "execution.started", {
+      argv: capsArgv.slice(1),
+      command: input.command,
+      executable: input.executable,
+    }));
+    // nextSeq is already correct: sequence 0 was written by the transaction
+    // that created the session, and emit() above consumed sequence 1.
     active.state = "RUNNING";
 
-    // stderr walker: JSON monitor events interleaved with caps diagnostics.
-    const onStderr = (chunk: Buffer | string): void => {
-      active.stderrBytes += chunk.length;
-      active.lastEventAt = Date.now();
-      const text = chunk.toString();
-      this.append("stderr", sessionId, text);
-      const result = repairLineChunks(active.stderrEventBuffer + text);
-      active.stderrEventBuffer = result.rest;
-      for (const line of result.lines) {
-        const parsed = parseCapsLine(line);
-        if (parsed.kind === "event" && parsed.event) {
-          const normalized = normalizeCapsEvent(parsed.event, {
-            sessionId, sequence: active.nextSeq, evId: newId, rawTs: Date.now(),
-          });
-          if (normalized) {
-            this.emit(normalized);
-            this.observe(sessionId, normalized);
-          }
-        } else if (parsed.kind === "diagnostic" && parsed.text) {
-          this.append("stderr", sessionId, parsed.text + "\n");
-        }
-      }
-    };
+    child.stderr?.on("data", (chunk: Buffer | string) => this.onStderr(active, chunk));
+    child.stdout?.on("data", (chunk: Buffer | string) => this.onStdout(active, chunk));
 
-    // stdout is the executed program's real output (never event JSON).
-    const onStdout = (chunk: Buffer | string): void => {
-      active.stdoutBytes += chunk.length;
-      active.lastEventAt = Date.now();
-      this.append("stdout", sessionId, chunk.toString());
-    };
-
-    child.stderr?.on("data", onStderr);
-    child.stdout?.on("data", onStdout);
-
-    // Timeout: politely signal the real child, then escalate.
     active.killTimer = setTimeout(() => this.handleTimeout(active), input.timeoutMs);
     active.killTimer.unref?.();
 
@@ -229,44 +248,135 @@ export class ExecutionRunner {
       this.finalize(active, code, signalCode);
     });
 
-    return { sessionId };
+    return null;
   }
 
-  /** Process any partial last line so a final event/diagnostic is never lost. */
-  private flushStderrTail(active: ActiveSession): void {
-    const sessionId = active.sessionId;
-    const tail = active.stderrEventBuffer.trim();
-    if (tail.length === 0) return;
-    const parsed = parseCapsLine(tail);
-    if (parsed.kind === "event" && parsed.event) {
-      const normalized = normalizeCapsEvent(parsed.event, {
-        sessionId, sequence: active.nextSeq, evId: newId, rawTs: Date.now(),
-      });
-      if (normalized) {
-        this.emit(normalized);
-        this.observe(sessionId, normalized);
+  /**
+   * Persist a terminal failure for an execution that never got a child, and
+   * publish it.  Going through the same path as a normal finalization is what
+   * keeps the event stream and the session row in agreement.
+   */
+  private failBeforeStart(sessionId: string, reason: string, nextSequence: number): void {
+    this.sessions.finalize(sessionId, {
+      status: "FAILED", exitCode: null, signal: null, isSuccess: false,
+      durationMs: null, pid: null, error: reason,
+    });
+    const ev = gatewayEvent({ sessionId, sequence: nextSequence, evId: newId }, "gateway", "execution.failed", {
+      reason,
+      outcome: "LAUNCH_FAILED",
+    });
+    this.events.insert(ev);
+    this.bus.publish(ev);
+  }
+
+  /**
+   * stderr carries the monitor protocol, CAPS diagnostics, and the executed
+   * program's own stderr.  Each line is classified exactly once and routed to
+   * exactly one destination; nothing is appended twice, and protocol lines
+   * never appear in the user's stderr.
+   */
+  private onStderr(active: ActiveSession, chunk: Buffer | string): void {
+    active.stderrBytes += chunk.length;
+    active.lastEventAt = Date.now();
+    const text = chunk.toString();
+    const { lines, rest } = splitLines(active.stderrLineBuffer + text);
+    active.stderrLineBuffer = rest;
+
+    for (const line of lines) this.routeStderrLine(active, line);
+  }
+
+  private routeStderrLine(active: ActiveSession, line: string): void {
+    const { sessionId } = active;
+    const classified = classifyLine(line);
+
+    switch (classified.kind) {
+      case "monitor-event": {
+        const parsed = parseCapsLine(line);
+        if (parsed.kind === "event" && parsed.event) {
+          const normalized = normalizeCapsEvent(parsed.event, {
+            sessionId, sequence: active.nextSeq, evId: newId, rawTs: Date.now(),
+          });
+          if (normalized) {
+            this.emit(normalized);
+            this.observe(sessionId, normalized);
+            return;
+          }
+        }
+        // A JSON object the normalizer does not recognise: keep it visible as
+        // a protocol fault, not as command output.
+        this.append("stderr", sessionId, line + "\n");
+        return;
       }
-    } else if (parsed.kind === "diagnostic" && parsed.text) {
-      this.append("stderr", sessionId, parsed.text.trimEnd() + "\n");
+      case "caps-diagnostic":
+        this.append("stderr", sessionId, classified.text + "\n");
+        return;
+      case "protocol-error":
+        this.append("stderr", sessionId, `[monitor protocol] ${classified.text}\n`);
+        return;
+      case "target-output":
+        this.append("stderr", sessionId, classified.text + "\n");
+        return;
     }
-    active.stderrEventBuffer = "";
+  }
+
+  /** Process any partial last line so a final event or diagnostic is not lost. */
+  private flushStderrTail(active: ActiveSession): void {
+    const tail = active.stderrLineBuffer;
+    active.stderrLineBuffer = "";
+    if (tail.length === 0) return;
+    this.routeStderrLine(active, tail);
+  }
+
+  private onStdout(active: ActiveSession, chunk: Buffer | string): void {
+    active.stdoutBytes += chunk.length;
+    active.lastEventAt = Date.now();
+    // The target's stdout is copied through verbatim, including a final line
+    // with no trailing newline.  Only the length is bounded.
+    this.append("stdout", active.sessionId, chunk.toString());
   }
 
   private handleTimeout(active: ActiveSession): void {
-    const sessionId = active.sessionId;
+    const { sessionId } = active;
     if (active.timedOut || active.finalized) return;
     active.timedOut = true;
     active.state = "TIMED_OUT";
     logger.warn("EXECUTION", "timeout reached", { sessionId, timeoutMs: active.timeoutMs });
-    this.emit(gatewayEvent({ sessionId, sequence: active.nextSeq, evId: newId }, "gateway", "execution.timeout", { timeoutMs: active.timeoutMs }));
-    signalChild(active.childPid, "SIGTERM");
-    setTimeout(() => signalChild(active.childPid, "SIGKILL"), 2000).unref?.();
+    this.emit(gatewayEvent({ sessionId, sequence: 0, evId: newId }, "gateway", "execution.timeout", { timeoutMs: active.timeoutMs }));
+
+    // SIGTERM, then a SIGKILL that is only delivered if the PID still belongs
+    // to the process that was actually signalled.
+    const handle = terminateGracefully(active.childPid, this.config.terminateGraceMs);
+    active.childIdentity = handle.identity;
+    active.escalation = handle.waitForEscalation();
   }
 
+  /**
+   * Persist one event, then publish it.
+   *
+   * The event row is always written before the bus is told, so a client can
+   * never be handed an event that replay would not return.
+   *
+   * A persistence failure is caught and logged rather than thrown: this runs
+   * inside a stream 'data' callback, where an escaping exception becomes an
+   * unhandled rejection that takes the process down and loses the execution
+   * entirely.  The sequence counter still advances, because a sequence that
+   * was skipped must not later be reused -- a gap is visible in the invariant
+   * report, whereas a duplicate is silent corruption.
+   */
   private emit(ev: CanonicalEvent): void {
     const active = this.registry.get(ev.sessionId);
     if (active) ev.sequence = active.nextSeq++;
-    this.events.insert(ev);
+    try {
+      this.events.insert(ev);
+    } catch (err) {
+      logger.error("EXECUTION", "failed to persist event", {
+        sessionId: ev.sessionId,
+        type: ev.type,
+        sequence: ev.sequence,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      if (ev.type === "process.snapshot") return; // telemetry is best-effort
+    }
     this.bus.publish(ev);
   }
 
@@ -279,7 +389,7 @@ export class ExecutionRunner {
         active.childPid = ev.pid;
         active.processStartedAt = ev.timestamp;
         active.processReaped = false;
-        if (ev.pid) this.sessions.setPid(sessionId, ev.pid);
+        if (ev.pid !== null) this.sessions.setPid(sessionId, ev.pid);
         if (typeof ev.pid === "number") {
           // One sampler loop for this execution, started with an immediate
           // first sample so even a very short process is observed once.
@@ -294,17 +404,29 @@ export class ExecutionRunner {
         break;
       case "signal.received":
         if (typeof ev.payload.signal === "number") active.signal = ev.payload.signal;
+        if (typeof ev.payload.outcome === "string") active.engineOutcome = ev.payload.outcome as EngineOutcome;
         break;
-      case "process.exited":
+      case "process.exited": {
         if (typeof ev.payload.exitCode === "number") active.exitCode = ev.payload.exitCode;
+        if (typeof ev.payload.outcome === "string") active.engineOutcome = ev.payload.outcome as EngineOutcome;
         active.processReaped = true;
         this.telemetry.stop(sessionId);
         break;
+      }
       case "process.exec_error":
+      case "process.wait_failed":
+      case "process.launch_failed":
+        if (typeof ev.payload.outcome === "string") active.engineOutcome = ev.payload.outcome as EngineOutcome;
+        active.engineReason = typeof ev.payload.reason === "string" ? ev.payload.reason : null;
+        if (ev.type === "process.exec_error") active.sawExecError = true;
+        if (ev.type === "process.wait_failed") active.sawWaitFailure = true;
+        if (ev.type === "process.launch_failed") active.sawLaunchFailure = true;
         active.processReaped = true;
         this.telemetry.stop(sessionId);
         break;
       case "session.summary":
+        // Recorded, but deliberately NOT treated as evidence of success: the
+        // summary only says the monitor reached the end of its input.
         active.sawSummary = true;
         break;
       default:
@@ -312,120 +434,269 @@ export class ExecutionRunner {
     }
   }
 
-  /**
-   * Persist one finished telemetry sample as a canonical event. The event row
-   * is written before the bus publishes, and a finalized execution is never
-   * given another snapshot.
-   */
   private publishSnapshot({ sessionId, pid, snapshot }: TelemetrySample): void {
     const active = this.registry.get(sessionId);
     if (!active || active.finalized) return;
     const { identityStartTicks: _identityStartTicks, ...payload } = snapshot;
-    this.emit(gatewayEvent({ sessionId, sequence: active.nextSeq, evId: newId }, "gateway", "process.snapshot", payload, { pid }));
+    this.emit(gatewayEvent({ sessionId, sequence: 0, evId: newId }, "gateway", "process.snapshot", payload, { pid }));
   }
 
   private append(channel: "stdout" | "stderr", sessionId: string, text: string): void {
     const k = key(channel, sessionId);
-    const cur = this.buffers.get(k) ?? "";
-    this.buffers.set(k, keepTail(cur, text, this.config.maxOutputBytes));
+    const cur = this.buffers.get(k) ?? { text: "", truncated: false };
+    const combined = cur.text + text;
+    if (combined.length <= this.config.maxOutputBytes) {
+      this.buffers.set(k, { text: combined, truncated: cur.truncated });
+    } else {
+      this.buffers.set(k, { text: combined.slice(-this.config.maxOutputBytes), truncated: true });
+    }
+  }
+
+  /**
+   * Decide the session status from the observed lifecycle.
+   *
+   * The single most important property here is what is *absent*: the presence
+   * of a session summary.  A failed `execvp()` produces a summary, and the
+   * previous implementation read that as success, reporting a nonexistent
+   * program run as COMPLETED.  Status now follows the engine's own outcome
+   * field, which is set only when a program actually ran.
+   */
+  private decideStatus(active: ActiveSession, exitCode: number | null): {
+    status: SessionStatus;
+    isSuccess: boolean;
+    error: string | null;
+  } {
+    if (active.timedOut) {
+      return { status: "TIMED_OUT", isSuccess: false, error: `execution timed out after ${active.timeoutMs}ms` };
+    }
+    if (active.terminateRequested && active.signal !== null) {
+      return { status: "CANCELLED", isSuccess: false, error: `terminated by signal ${active.signal}` };
+    }
+    if (active.sawExecError) {
+      return {
+        status: "FAILED",
+        isSuccess: false,
+        error: `execvp() failed (${active.engineReason ?? "exec_failed"}); no program ran`,
+      };
+    }
+    if (active.sawWaitFailure) {
+      return {
+        status: "FAILED",
+        isSuccess: false,
+        error: `waitpid() failed (${active.engineReason ?? "wait_failed"}); the process outcome is unknown`,
+      };
+    }
+    if (active.sawLaunchFailure) {
+      return {
+        status: "FAILED",
+        isSuccess: false,
+        error: `the engine could not launch the child (${active.engineReason ?? "launch_failed"})`,
+      };
+    }
+    if (active.engineOutcome === "SIGNALED" || active.signal !== null) {
+      return { status: "FAILED", isSuccess: false, error: `terminated by signal ${active.signal ?? "?"}` };
+    }
+    if (active.engineOutcome === "COMPLETED") {
+      return { status: "COMPLETED", isSuccess: true, error: null };
+    }
+    if (active.engineOutcome === "EXITED") {
+      return { status: "COMPLETED", isSuccess: false, error: `exited with code ${active.exitCode ?? exitCode ?? "?"}` };
+    }
+    // No lifecycle verdict at all: the engine produced no process event, so
+    // the outcome is genuinely unknown.  "FAILED" with an explicit reason is
+    // the honest answer; inferring COMPLETED from the summary is the bug this
+    // replaces.
+    return {
+      status: "FAILED",
+      isSuccess: false,
+      error: active.sawSummary
+        ? "the engine closed the monitor stream without reporting a process outcome"
+        : "no process lifecycle event was observed",
+    };
   }
 
   private finalize(active: ActiveSession, code: number | null, signalCode: NodeJS.Signals | null): void {
-    const sessionId = active.sessionId;
+    const { sessionId } = active;
     if (active.finalized) return;
     active.finalized = true;
 
     const exitCode = signalCode ? null : code;
     const durationMs = Math.max(0, Date.now() - active.monotonicStartMs);
+    const { status, isSuccess, error } = this.decideStatus(active, exitCode);
 
-    const status: ActiveSession["state"] = active.timedOut
-      ? "TIMED_OUT"
-      : active.terminateRequested && active.signal !== null
-        ? "CANCELLED"
-        : active.sawSummary
-          ? "COMPLETED"
-          : "FAILED";
+    const live = this.buffers.get(key("stdout", sessionId)) ?? { text: "", truncated: false };
+    const liveErr = this.buffers.get(key("stderr", sessionId)) ?? { text: "", truncated: false };
+    this.buffers.delete(key("stdout", sessionId));
+    this.buffers.delete(key("stderr", sessionId));
 
-    const isSuccess = status === "COMPLETED" && active.signal === null && (exitCode === 0 || exitCode === null);
+    // Sampling stops before the terminal event, so a snapshot can never follow
+    // the end of the stream (invariant I7).
+    this.telemetry.stop(sessionId);
+    forgetIdentity(active.childPid);
 
-    this.sessions.finalize(sessionId, {
+    // One terminal event type per terminal session status, so the row and the
+    // stream can never describe the same ending differently. A cancelled
+    // execution is not a success and not a timeout, and calling it "failed"
+    // would misattribute the cause to the program.
+    const finalType: CanonicalEvent["type"] =
+      status === "TIMED_OUT"
+        ? "execution.timeout"
+        : status === "CANCELLED"
+          ? "execution.cancelled"
+          : status === "COMPLETED"
+            ? "execution.completed"
+            : "execution.failed";
+
+    const payload: Record<string, unknown> = {
       status,
       exitCode,
       signal: active.signal,
-      isSuccess,
       durationMs,
+      isSuccess,
+      capsExitCode: code,
+      capsSignal: signalCode,
+      engineOutcome: active.engineOutcome,
+      execError: active.sawExecError,
+      waitFailure: active.sawWaitFailure,
+      launchFailure: active.sawLaunchFailure,
+      stdoutTruncated: live.truncated,
+      stderrTruncated: liveErr.truncated,
+    };
+    if (error !== null) payload.reason = error;
+    if (this.closing) payload.shutdown = true;
+
+    // One transaction for the session row, its output, and the terminal event,
+    // so a failure cannot leave the row and the stream disagreeing.
+    const ev = gatewayEvent({ sessionId, sequence: 0, evId: newId }, "gateway", finalType, payload, {
       pid: active.childPid,
-      error:
-        status === "FAILED"
-          ? `caps exited with code ${code ?? "?"}${signalCode ? ` (${signalCode})` : ""}`
-          : status === "TIMED_OUT"
-            ? `execution timed out after ${active.timeoutMs}ms`
-            : null,
     });
+    try {
+      transact(this.db, () => {
+        this.sessions.finalize(sessionId, {
+          status, exitCode, signal: active.signal, isSuccess, durationMs,
+          pid: active.childPid, error,
+        });
+        this.sessions.appendOutput(sessionId, live.text, liveErr.text);
+        ev.sequence = active.nextSeq++;
+        this.events.insert(ev);
+      });
+    } catch (err) {
+      // A persistence failure must still leave a terminal event in the stream
+      // and the execution out of the registry, or the session would hang in
+      // the API forever.
+      logger.error("EXECUTION", "failed to persist terminal state", {
+        sessionId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      active.nextSeq += 1;
+    }
 
-    const stdout = this.buffers.get(key("stdout", sessionId)) ?? "";
-    const stderr = this.buffers.get(key("stderr", sessionId)) ?? "";
-    this.buffers.delete(key("stdout", sessionId));
-    this.buffers.delete(key("stderr", sessionId));
-    this.sessions.appendOutput(sessionId, stdout, stderr);
-
-    const finalType: CanonicalEvent["type"] =
-      status === "TIMED_OUT" ? "execution.timeout"
-      : status === "FAILED" ? "execution.failed"
-      : "execution.completed";
-
-    const payload =
-      status === "TIMED_OUT"
-        ? { timeoutMs: active.timeoutMs }
-        : status === "FAILED"
-          ? { reason: `caps exited with code ${code ?? "?"}`, exitCode: exitCode ?? code }
-          : { status, exitCode, signal: active.signal, durationMs, isSuccess };
-
-    // Sampling is stopped before the terminal event is emitted, so a
-    // process.snapshot can never follow execution.completed/timeout/failed.
-    this.telemetry.stop(sessionId);
-    this.emit(gatewayEvent({ sessionId, sequence: active.nextSeq, evId: newId }, "gateway", finalType, payload));
-
+    this.bus.publish(ev);
     this.registry.delete(sessionId);
-    logger.info("EXECUTION", "finalized", { sessionId, status, exitCode, signal: active.signal, durationMs });
+    logger.info("EXECUTION", "finalized", { sessionId, status, exitCode, signal: active.signal, durationMs, engineOutcome: active.engineOutcome });
   }
 
   private finalizeFailed(active: ActiveSession, reason: string): void {
-    const sessionId = active.sessionId;
+    const { sessionId } = active;
     if (active.finalized) return;
     active.finalized = true;
+    this.telemetry.stop(sessionId);
+    forgetIdentity(active.childPid);
     this.sessions.finalize(sessionId, {
       status: "FAILED", exitCode: null, signal: null, isSuccess: false,
-      durationMs: null, pid: null, error: reason,
+      durationMs: Math.max(0, Date.now() - active.monotonicStartMs), pid: active.childPid, error: reason,
     });
-    this.telemetry.stop(sessionId);
-    this.emit(gatewayEvent({ sessionId, sequence: active.nextSeq, evId: newId }, "gateway", "execution.failed", { reason }));
+    this.emit(gatewayEvent({ sessionId, sequence: 0, evId: newId }, "gateway", "execution.failed", {
+      reason, outcome: "LAUNCH_FAILED",
+    }));
     this.registry.delete(sessionId);
   }
 
-  stdoutFor(sessionId: string): string {
-    return this.buffers.get(key("stdout", sessionId)) ?? "";
-  }
-  stderrFor(sessionId: string): string {
-    return this.buffers.get(key("stderr", sessionId)) ?? "";
+  /**
+   * Finalize an execution the gateway is abandoning (shutdown, or boot
+   * recovery of a session left in flight by a previous process).
+   *
+   * This is the path that keeps the database and the event stream in
+   * agreement: a recovered session gets a real terminal event, so replay never
+   * shows an unfinished stream for a row that says FAILED.
+   */
+  finalizeAbandoned(
+    sessionId: string,
+    reason: string,
+    kind: "recovered" | "shutdown",
+  ): CanonicalEvent | null {
+    const existing = this.registry.get(sessionId);
+    if (existing !== null && !existing.finalized) {
+      this.finalizeFailed(existing, reason);
+      return null;
+    }
+    const record = this.sessions.findById(sessionId);
+    if (record === null) return null;
+    if (isTerminalStatus(record.status)) return null;
+
+    const startedAt = Date.parse(record.startedAt);
+    const durationMs = Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : null;
+    const ev = gatewayEvent({ sessionId, sequence: this.events.maxSequence(sessionId) + 1, evId: newId }, "gateway", "execution.failed", {
+      reason,
+      recovered: kind === "recovered",
+      shutdown: kind === "shutdown",
+      outcome: "LAUNCH_FAILED",
+      durationMs,
+    });
+    try {
+      transact(this.db, () => {
+        this.sessions.finalize(sessionId, {
+          status: "FAILED", exitCode: null, signal: null, isSuccess: false,
+          durationMs, pid: record.pid, error: reason,
+        });
+        this.events.insert(ev);
+      });
+    } catch (err) {
+      logger.error("EXECUTION", "failed to persist recovery", { sessionId, err: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+    this.bus.publish(ev);
+    return ev;
   }
 
-  isTerminal(sessionId: string): boolean {
+  /** Live output for a running execution; persisted output once it is done. */
+  outputFor(sessionId: string): OutputSnapshot | null {
+    const live = this.buffers.get(key("stdout", sessionId));
+    const liveErr = this.buffers.get(key("stderr", sessionId));
+    if (live === undefined && liveErr === undefined) return null;
+    return {
+      stdout: live?.text ?? "",
+      stderr: liveErr?.text ?? "",
+      stdoutTruncated: live?.truncated ?? false,
+      stderrTruncated: liveErr?.truncated ?? false,
+      live: true,
+    };
+  }
+
+  /** Terminate one execution, verifying identity before escalating. */
+  requestTerminate(sessionId: string, signal: NodeJS.Signals): { sent: boolean; reason: string | null; identity: ProcessIdentity | null } {
     const active = this.registry.get(sessionId);
-    return active !== null && isTerminalState(active.state);
+    if (!active) return { sent: false, reason: "execution is not running", identity: null };
+    const result = signalChild(active.childPid, signal);
+    if (result.sent) {
+      active.terminateRequested = true;
+      active.childIdentity = result.identity;
+      // A terminate request is also escalated, with the same identity guard,
+      // so a process that ignores the requested signal cannot linger.
+      active.escalation = terminateGracefully(active.childPid, this.config.terminateGraceMs).waitForEscalation();
+    }
+    return result;
   }
-}
 
-function key(channel: "stdout" | "stderr", sessionId: string): string {
-  return `${channel}:${sessionId}`;
-}
+  /** Await any pending escalation for a session, if there is one. */
+  async awaitEscalation(sessionId: string): Promise<void> {
+    const active = this.registry.get(sessionId);
+    if (active?.escalation) await active.escalation;
+  }
 
-function isTerminalState(s: string): boolean {
-  return s === "COMPLETED" || s === "FAILED" || s === "TIMED_OUT" || s === "CANCELLED";
-}
-
-function recordRedirections(sessions: SessionRepository, sessionId: string, redirs: RedirectionSpec): void {
-  if (redirs.in) sessions.recordRedirection(sessionId, "in", redirs.in, REDIR_FLAGS.in);
-  if (redirs.out) sessions.recordRedirection(sessionId, "out", redirs.out, REDIR_FLAGS.out);
-  if (redirs.append) sessions.recordRedirection(sessionId, "append", redirs.append, REDIR_FLAGS.append);
+  /** Direct, identity-checked kill used only by the shutdown sequence. */
+  killVerified(pid: number | null, identity: ProcessIdentity | null): void {
+    if (pid === null) return;
+    escalateTo(identity, "SIGKILL");
+  }
 }

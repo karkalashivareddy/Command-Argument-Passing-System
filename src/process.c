@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -165,6 +166,7 @@ static void emit_event(caps_monitor_t *mon, caps_event_type_t type, pid_t pid,
     ev.pid = pid;
     ev.status = status;
     ev.duration_ms = duration_ms;
+    ev.outcome = CAPS_OUTCOME_EXITED;
 
     if (argv != NULL) {
         caps_join_argv(argv, cmd, sizeof cmd);
@@ -176,30 +178,205 @@ static void emit_event(caps_monitor_t *mon, caps_event_type_t type, pid_t pid,
     caps_monitor_emit(mon, &ev);
 }
 
+/*
+ * Terminal event for a process that actually ran.  `outcome` states what the
+ * kernel reported about it; the monitor prints it verbatim rather than
+ * re-deriving it from the status code.
+ */
+static void emit_exit_event(caps_monitor_t *mon, pid_t pid, caps_outcome_t outcome,
+                            int status, long long duration_ms,
+                            char *const argv[])
+{
+    caps_event_t ev;
+    char cmd[256];
+
+    if (mon == NULL)
+        return;
+
+    memset(&ev, 0, sizeof ev);
+    ev.type = CAPS_EVENT_PROCESS_EXITED;
+    ev.pid = pid;
+    ev.status = status;
+    ev.duration_ms = duration_ms;
+    ev.outcome = outcome;
+    caps_join_argv(argv, cmd, sizeof cmd);
+    ev.command = cmd;
+
+    caps_monitor_emit(mon, &ev);
+}
+
+/*
+ * Terminal event for a failed execvp(), carrying the failure reason.
+ *
+ * `exec_errno` is the errno the child's execvp() actually returned. It is
+ * reported, never discarded, and it is what distinguishes 126 (EACCES: the
+ * file exists and is not executable) from 127 (ENOENT, or anything else the
+ * kernel refused).
+ */
+static void emit_exec_error(caps_monitor_t *mon, pid_t pid, int exec_errno,
+                            long long duration_ms, char *const argv[])
+{
+    caps_event_t ev;
+    char cmd[256];
+    const char *reason;
+
+    if (mon == NULL)
+        return;
+
+    switch (exec_errno) {
+    case ENOENT:
+        reason = "exec_not_found";
+        break;
+    case EACCES:
+        reason = "exec_permission_denied";
+        break;
+    case ENOEXEC:
+        reason = "exec_format_error";
+        break;
+    case ELOOP:
+        reason = "exec_symlink_loop";
+        break;
+    case ENAMETOOLONG:
+        reason = "exec_name_too_long";
+        break;
+    case ETXTBSY:
+        reason = "exec_text_file_busy";
+        break;
+    case E2BIG:
+        reason = "exec_argument_list_too_long";
+        break;
+    case ENOMEM:
+        reason = "exec_out_of_memory";
+        break;
+    default:
+        reason = "exec_failed";
+        break;
+    }
+
+    memset(&ev, 0, sizeof ev);
+    ev.type = CAPS_EVENT_EXEC_ERROR;
+    ev.pid = pid;
+    ev.status = (exec_errno == EACCES) ? 126 : 127;
+    ev.errno_value = exec_errno;
+    ev.message = reason;
+    ev.duration_ms = duration_ms;
+    ev.outcome = CAPS_OUTCOME_EXEC_FAILED;
+    caps_join_argv(argv, cmd, sizeof cmd);
+    ev.command = cmd;
+
+    caps_monitor_emit(mon, &ev);
+}
+
+/*
+ * Failure event for a launch/wait failure. `status` is the negated errno so
+ * the value is always meaningful and never accidentally 0 (which would read
+ * as "exited 0"); the errno is repeated in its own field so a consumer does
+ * not have to know that convention.
+ */
+static void emit_failure_event(caps_monitor_t *mon, caps_event_type_t type,
+                               pid_t pid, int err, const char *reason,
+                               long long duration_ms, char *const argv[])
+{
+    caps_event_t ev;
+    char cmd[256];
+
+    if (mon == NULL)
+        return;
+
+    memset(&ev, 0, sizeof ev);
+    ev.type = type;
+    ev.pid = pid;
+    ev.status = -err;
+    ev.errno_value = err;
+    ev.message = reason;
+    ev.duration_ms = duration_ms;
+    ev.outcome = (type == CAPS_EVENT_WAIT_FAILED) ? CAPS_OUTCOME_WAIT_FAILED
+                                                 : CAPS_OUTCOME_LAUNCH_FAILED;
+    caps_join_argv(argv, cmd, sizeof cmd);
+    ev.command = cmd;
+
+    caps_monitor_emit(mon, &ev);
+}
+
+/*
+ * Redirection target policy, enforced at the point of use.
+ *
+ * The gateway already validates redirection names before spawning CAPS, but a
+ * check-then-open sequence has an inherent gap: whatever sits at the path can
+ * change between the check and the open().  These helpers close that gap
+ * without pretending to be a sandbox:
+ *
+ *   - O_NOFOLLOW on the final component refuses to follow a symlink, so a
+ *     name that became a symlink after validation is an error, not a write to
+ *     an arbitrary target;
+ *   - for "<" the file must already exist, be a regular file, and be opened
+ *     read-only, so a "readable file" race cannot turn into a create;
+ *   - an existing redirection target for ">" / ">>" must be a regular file, so
+ *     a freshly planted FIFO or device node is refused rather than written to.
+ *
+ * Anything rejected here is reported through the monitor as
+ * REDIRECTION_FAILED, so the failure is observed rather than silent.
+ */
+static int open_redirection(const redirection_t *r)
+{
+    int flags;
+    int fd;
+    struct stat st;
+
+    switch (r->type) {
+    case CAPS_REDIR_IN:
+        flags = O_RDONLY | O_NOFOLLOW;
+        break;
+    case CAPS_REDIR_APPEND:
+        flags = O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW;
+        break;
+    default:
+        flags = O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW;
+        break;
+    }
+
+    fd = open(r->path, flags, 0644);
+    if (fd < 0)
+        return -1;
+
+    /*
+     * Type check.  "<" must not create anything and must not be a device or
+     * FIFO; ">" / ">>" may create a regular file but must not write to a
+     * pre-existing special file.  fstat() on the descriptor we already hold
+     * cannot be redirected by a rename race.
+     */
+    if (fstat(fd, &st) != 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    if (r->type == CAPS_REDIR_IN) {
+        if (!S_ISREG(st.st_mode)) {
+            close(fd);
+            errno = EINVAL;
+            return -1;
+        }
+    } else if (!S_ISREG(st.st_mode)) {
+        close(fd);
+        errno = EINVAL;
+        return -1;
+    }
+    return fd;
+}
+
 static int open_redirections(redirection_t *redirs, int nredirs)
 {
     for (int i = 0; i < nredirs; i++) {
-        int flags;
+        int fd = open_redirection(&redirs[i]);
 
-        switch (redirs[i].type) {
-        case CAPS_REDIR_IN:
-            flags = O_RDONLY;
-            break;
-        case CAPS_REDIR_APPEND:
-            flags = O_WRONLY | O_CREAT | O_APPEND;
-            break;
-        default:
-            flags = O_WRONLY | O_CREAT | O_TRUNC;
-            break;
-        }
-
-        redirs[i].fd = open(redirs[i].path, flags, 0644);
-        if (redirs[i].fd < 0) {
+        if (fd < 0) {
             caps_error("%s: %s", redirs[i].path, strerror(errno));
             for (int j = 0; j < i; j++)
                 close(redirs[j].fd);
             return -1;
         }
+        redirs[i].fd = fd;
     }
     return 0;
 }
@@ -306,7 +483,10 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
         emit_event(mon, CAPS_EVENT_REDIRECTION_OPENED, 0, 0, 0, argv);
 
     if (make_exec_status_pipe(exec_pipe) != 0) {
-        caps_error("exec status pipe: %s", strerror(errno));
+        int err = errno;
+        caps_error("exec status pipe: %s", strerror(err));
+        emit_failure_event(mon, CAPS_EVENT_EXECUTION_FAILED, 0, err,
+                           "exec_status_pipe_failed", 0, argv);
         close_redirections(redirs, nredirs);
         return EXIT_FAILURE;
     }
@@ -314,7 +494,10 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
     start_ok = (monotonic_ms(&start_ms) == 0);
     pid = fork();
     if (pid < 0) {
-        caps_error("fork: %s", strerror(errno));
+        int err = errno;
+        caps_error("fork: %s", strerror(err));
+        emit_failure_event(mon, CAPS_EVENT_EXECUTION_FAILED, 0, err,
+                           "fork_failed", 0, argv);
         close(exec_pipe[0]);
         close(exec_pipe[1]);
         close_redirections(redirs, nredirs);
@@ -323,10 +506,28 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
 
     if (pid == 0) {
         close(exec_pipe[0]);
-        if (signals_child_reset() != 0)
-            child_fatal_printf("caps: warning: failed to reset SIGINT in "
-                               "child; the executed program may ignore "
-                               "Ctrl+C\n");
+        if (signals_child_reset() != 0) {
+            /*
+             * Fail closed on the signal model.  POSIX exec preserves SIG_IGN,
+             * so execvp()ing while SIGINT is still ignored would hand the
+             * executed program a disposition CAPS never promised: the child
+             * would survive Ctrl+C while the REPL carried on.  Refusing the
+             * launch is more honest than running a program whose signal
+             * semantics are wrong, and the refusal travels on the status pipe
+             * like any other launch failure so the parent classifies it
+             * instead of guessing.
+             */
+            int err = errno;
+            child_fatal_printf("caps: refusing to exec %s: could not restore "
+                               "the default SIGINT disposition (%s); running "
+                               "it with an inherited SIG_IGN would break its "
+                               "signal model\n",
+                               argv[0], strerror(err));
+            exec_errno = err ? err : EINVAL;
+            (void)write(exec_pipe[1], &exec_errno, sizeof exec_errno);
+            errno = exec_errno;
+            _exit(126);
+        }
         apply_redirections(redirs, nredirs);
         execvp(argv[0], argv);
         exec_errno = errno;
@@ -345,40 +546,85 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
     exec_failed = read_exec_error(exec_pipe[0], &exec_errno) == 1;
     close(exec_pipe[0]);
 
-    if (process_wait_child(pid, &status) != 0)
+    if (process_wait_child(pid, &status) != 0) {
+        /*
+         * A permanent waitpid() failure must not make the execution vanish.
+         * PROCESS_STARTED is already in the stream, so the only honest ending
+         * is an explicit terminal event carrying the real errno.  Without it
+         * the session would have a start and no end, and the gateway would
+         * have to invent one from a non-zero process exit.
+         */
+        int err = errno;
+        emit_failure_event(mon, CAPS_EVENT_WAIT_FAILED, pid, err, "wait_failed",
+                           elapsed_ms(start_ms, start_ok), argv);
         return EXIT_FAILURE;
+    }
 
     if (WIFEXITED(status)) {
         int code = WEXITSTATUS(status);
-        int st = status;
 
-        if (exec_failed)
-            emit_event(mon, CAPS_EVENT_EXEC_ERROR, pid,
-                       exec_errno == EACCES ? 126 : 127,
-                       elapsed_ms(start_ms, start_ok), argv);
-        else
-            emit_event(mon, CAPS_EVENT_PROCESS_EXITED, pid, code,
-                       elapsed_ms(start_ms, start_ok), argv);
+        /*
+         * exec_failed outranks the child's own exit status.  A child that
+         * never reached execvp() has no program result, so emitting
+         * PROCESS_EXITED would claim a target ran when none did.
+         */
+        if (exec_failed) {
+            emit_exec_error(mon, pid, exec_errno, elapsed_ms(start_ms, start_ok),
+                            argv);
+            if (raw_status != NULL)
+                *raw_status = status;
+            return (exec_errno == EACCES) ? 126 : 127;
+        }
+        emit_exit_event(mon, pid,
+                        code == 0 ? CAPS_OUTCOME_COMPLETED : CAPS_OUTCOME_EXITED,
+                        code, elapsed_ms(start_ms, start_ok), argv);
         if (raw_status != NULL)
-            *raw_status = st;
+            *raw_status = status;
         return code;
     }
 
     if (WIFSIGNALED(status)) {
         int sig = WTERMSIG(status);
 
-        if (exec_failed)
-            emit_event(mon, CAPS_EVENT_EXEC_ERROR, pid,
-                       exec_errno == EACCES ? 126 : 127,
-                       elapsed_ms(start_ms, start_ok), argv);
-        emit_event(mon, CAPS_EVENT_SIGNAL_RECEIVED, pid, sig, 0, argv);
-        emit_event(mon, CAPS_EVENT_PROCESS_EXITED, pid, 128 + sig,
-                   elapsed_ms(start_ms, start_ok), argv);
+        /* Same rule on the signal path: no program ran, so no exit event. */
+        if (exec_failed) {
+            emit_exec_error(mon, pid, exec_errno, elapsed_ms(start_ms, start_ok),
+                            argv);
+            if (raw_status != NULL)
+                *raw_status = status;
+            return (exec_errno == EACCES) ? 126 : 127;
+        }
+        {
+            caps_event_t sigev;
+            char cmd[256];
+
+            if (mon != NULL) {
+                memset(&sigev, 0, sizeof sigev);
+                sigev.type = CAPS_EVENT_SIGNAL_RECEIVED;
+                sigev.pid = pid;
+                sigev.status = sig;
+                sigev.outcome = CAPS_OUTCOME_SIGNALED;
+                caps_join_argv(argv, cmd, sizeof cmd);
+                sigev.command = cmd;
+                caps_monitor_emit(mon, &sigev);
+            }
+        }
+        emit_exit_event(mon, pid, CAPS_OUTCOME_SIGNALED, 128 + sig,
+                        elapsed_ms(start_ms, start_ok), argv);
         if (raw_status != NULL)
             *raw_status = status;
         return 128 + sig;
     }
 
+    /*
+     * WIFSTOPPED / WIFCONTINUED cannot occur with options == 0. Reaching this
+     * point means the kernel returned a status shape this engine does not
+     * model; report it explicitly instead of returning a bare failure with no
+     * event, which is the failure mode this event type exists to prevent.
+     */
+    emit_failure_event(mon, CAPS_EVENT_WAIT_FAILED, pid, EINVAL,
+                       "unmodelled_wait_status", elapsed_ms(start_ms, start_ok),
+                       argv);
     return EXIT_FAILURE;
 }
 

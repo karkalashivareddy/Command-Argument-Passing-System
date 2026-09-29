@@ -103,6 +103,8 @@ export interface SpaceMarker {
   /** Which node the marker belongs to, when the record identifies one. */
   nodeKey: string | null;
   pid: number | null;
+  /** The signal number, for a signal.received marker only. */
+  signal: number | null;
   detail: string | null;
 }
 
@@ -129,8 +131,16 @@ export interface ProcessSpace {
    * for every node on every cursor move, so this lookup must not scan markers.
    */
   terminalMarkerByKey: Map<string, SpaceMarker>;
-  /** True when the record contains any signal at all, for SIGNALED inference. */
-  hasSignalMarker: boolean;
+  /**
+   * The signal number that terminated each node, keyed by node key.
+   *
+   * Per node, and only for the node the signal event actually names. The
+   * previous field was a single record-wide `hasSignalMarker` boolean, so a
+   * record containing one signalled process marked *every* node without a
+   * terminal marker as SIGNALED -- a fabricated claim about processes that
+   * exited normally.
+   */
+  signalByKey: Map<string, { signal: number; sequence: number }>;
   ruler: SpaceRuler;
   /** Execution-time origin: the timestamp of the first event. */
   originTimestamp: string | null;
@@ -236,6 +246,25 @@ function childKey(pid: number | null): string {
 }
 
 /**
+ * Re-key every node to the same semantic key the correlation layer uses.
+ *
+ * The raw node set is collected per `role:pid` because that is all a
+ * `process.started` event carries. Once the procfs samples have supplied a
+ * kernel start time, the node can be keyed the way the 2D timeline keys it:
+ * `role:pid@start`. The two surfaces must agree on this key, or a reader who
+ * selects a process in one view and looks for it in the other finds nothing --
+ * which is the "3D and 2D reach different conclusions" failure the equivalence
+ * test guards.
+ */
+function rekeyNodes(nodes: RawNode[]): RawNode[] {
+  return nodes.map((node) => {
+    if (node.pid === null) return node;
+    const key = nodeKeyFor({ pid: node.pid, role: node.role, processStartTime: node.processStartTime });
+    return key === null || key === node.key ? node : { ...node, key };
+  });
+}
+
+/**
  * Builds the raw node set from the canonical record. Only PIDs the backend
  * actually reported become nodes:
  *   - the gateway-spawned CAPS engine (child_process.spawn, and the PPID the
@@ -330,11 +359,22 @@ function collectRawNodes(events: CanonicalEvent[], base: number): RawNode[] {
   }
 
   // ---- terminal times and verified parents --------------------------------
-  const exitEvent = events.find((event) => event.type === "process.exited");
-  const execErrorEvent = events.find((event) => event.type === "process.exec_error");
+  // Per process, not per record. The previous code took the *first*
+  // process.exited in the whole stream and applied it to whichever node
+  // matched its pid, so in a record with two children the second one was never
+  // given an end time and stayed rendered as RUNNING for the rest of the
+  // session -- a false statement about a process that had already been reaped.
+  const endEventByPid = new Map<number, CanonicalEvent>();
+  for (const event of events) {
+    if (event.type !== "process.exited" && event.type !== "process.exec_error" && event.type !== "process.wait_failed") continue;
+    if (typeof event.pid !== "number") continue;
+    // The first terminal event for a pid is that process's end; a later one
+    // for the same pid is not a new process end.
+    if (!endEventByPid.has(event.pid)) endEventByPid.set(event.pid, event);
+  }
   for (const node of nodes.values()) {
     if (node.role !== "child") continue;
-    const end = typeof node.pid === "number" && (exitEvent?.pid === node.pid || execErrorEvent?.pid === node.pid) ? (exitEvent ?? execErrorEvent)! : null;
+    const end = typeof node.pid === "number" ? endEventByPid.get(node.pid) ?? null : null;
     if (end) {
       node.endedAtMs = atMsOf(end, base);
       node.endSequence = end.sequence;
@@ -510,6 +550,9 @@ function buildMarkers(events: CanonicalEvent[], base: number, nodes: SpaceNode[]
       sequence: event.sequence,
       nodeKey: node?.key ?? null,
       pid: typeof event.pid === "number" ? event.pid : null,
+      // Resolved from this event's own payload, so a signal is attached to the
+      // process it actually named and to no other.
+      signal: event.type === "signal.received" && typeof event.payload.signal === "number" ? event.payload.signal : null,
       detail: markerDetail(event),
     });
   }
@@ -541,7 +584,7 @@ function buildVisualStateIndex(samples: TelemetrySample[]): Map<number, ProcessV
 export function buildProcessSpace(events: CanonicalEvent[]): ProcessSpace {
   const { base, origin } = timeOrigin(events);
   const samples = collectSamples(events);
-  const raw = collectRawNodes(events, base);
+  const raw = rekeyNodes(collectRawNodes(events, base));
   const nodes = orderNodes(raw, events[0]?.sessionId ?? "unknown-session");
 
   const lastAtMs = events.length > 0 ? atMsOf(events[events.length - 1]!, base) : 0;
@@ -586,7 +629,17 @@ export function buildProcessSpace(events: CanonicalEvent[]): ProcessSpace {
       terminalMarkerByKey.set(marker.nodeKey, marker);
     }
   }
-  const hasSignalMarker = markers.some((marker) => marker.type === "signal.received");
+  // Attribute each signal to the node whose event names it. No fallback, no
+  // record-wide flag: if the event has no resolvable node, it is not shown on
+  // any node rather than being shown on all of them.
+  const signalByKey = new Map<string, { signal: number; sequence: number }>();
+  for (const marker of markers) {
+    if (marker.type !== "signal.received" || marker.nodeKey === null) continue;
+    if (signalByKey.has(marker.nodeKey)) continue;
+    const signal = marker.signal ?? null;
+    if (signal === null) continue;
+    signalByKey.set(marker.nodeKey, { signal, sequence: marker.sequence });
+  }
 
   const limitations = [
     "Only the CAPS-owned direct child is sampled. Descendants created by that child (for example caps_fork_tree) are not observed, so no node or edge is drawn for them.",
@@ -603,7 +656,7 @@ export function buildProcessSpace(events: CanonicalEvent[]): ProcessSpace {
     markers,
     markersBySequence: new Map(markers.map((marker) => [marker.sequence, marker])),
     terminalMarkerByKey,
-    hasSignalMarker,
+    signalByKey,
     ruler: buildRuler(spanMs),
     originTimestamp: origin,
     spanMs,
@@ -662,10 +715,13 @@ export function nodeStateAt(space: ProcessSpace, cursorMs: number | null, node: 
   if (exited && node.endedAtMs !== null) {
     const terminal = space.terminal;
     const childTerminal = space.terminalMarkerByKey.get(node.key);
-    if (childTerminal?.type === "process.exec_error") state = "FAILED";
+    if (childTerminal?.type === "process.exec_error" || childTerminal?.type === "process.wait_failed") state = "FAILED";
+    // This node's OWN signal outranks the session-level verdict. A record-wide
+    // signal flag marked every ended process SIGNALED, which is a fabricated
+    // claim about processes that exited normally.
+    else if (space.signalByKey.has(node.key)) state = "SIGNALED";
     else if (terminal !== null && terminal.state === "TIMED_OUT") state = "TIMED_OUT";
     else if (terminal !== null && terminal.state === "FAILED") state = "FAILED";
-    else if (childTerminal === undefined && space.hasSignalMarker) state = "SIGNALED";
     else state = "COMPLETED";
   } else if (node.role === "child" && visual === null) {
     state = "STARTING";

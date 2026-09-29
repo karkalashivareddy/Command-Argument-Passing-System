@@ -1,3 +1,4 @@
+import type { EventRepository } from "../db/repositories/events.js";
 import type { SessionRepository } from "../db/repositories/sessions.js";
 import type {
   AnalyticsOverview,
@@ -20,7 +21,7 @@ function percentile(sorted: number[], p: number): number | null {
  * No fabricated values: insufficient data yields null and the UI renders
  * "No executions recorded yet." / "Insufficient data".
  */
-export function computeAnalytics(repo: SessionRepository): AnalyticsOverview {
+export function computeAnalytics(repo: SessionRepository, eventRepo: EventRepository): AnalyticsOverview {
   const rows = repo.listForAnalytics().filter((r) => r.status === "COMPLETED" || r.status === "FAILED" || r.status === "TIMED_OUT" || r.status === "CANCELLED");
   const result: AnalyticsOverview = {
     totalExecutions: rows.length,
@@ -105,71 +106,34 @@ export function computeAnalytics(repo: SessionRepository): AnalyticsOverview {
     .map(([date, v]) => ({ date, count: v.count, success: v.success }))
     .sort((a, b) => a.date.localeCompare(b.date));
 
-  const terminalIds = new Set(rows.map((row) => row.id));
-  const snapshots = collectSnapshots(repo, terminalIds);
-  for (const records of snapshots.values()) result.processTelemetry.sampleCount += records.length;
-
-  const rssSamples: number[] = [];
-  const cpuPercentSamples: number[] = [];
-  const terminalCpuTotals: number[] = [];
-  const minorFaultSamples: number[] = [];
-  const majorFaultSamples: number[] = [];
-  const rcharRates: number[] = [];
-  const wcharRates: number[] = [];
-  for (const records of snapshots.values()) {
-    for (const sample of records) {
-      const rss = metricValue(sample.rssBytes);
-      const cpuPercent = metricValue(sample.cpuPercent);
-      const minorFaults = metricValue(sample.minorFaults);
-      const majorFaults = metricValue(sample.majorFaults);
-      const rcharRate = metricValue(sample.rcharBytesPerSec);
-      const wcharRate = metricValue(sample.wcharBytesPerSec);
-      if (rss !== null) rssSamples.push(rss);
-      if (cpuPercent !== null) cpuPercentSamples.push(cpuPercent);
-      if (minorFaults !== null) minorFaultSamples.push(minorFaults);
-      if (majorFaults !== null) majorFaultSamples.push(majorFaults);
-      if (rcharRate !== null) rcharRates.push(rcharRate);
-      if (wcharRate !== null) wcharRates.push(wcharRate);
-    }
-    const latest = records.at(-1)!;
-    // cpuTimeMs is the collector's own per-sample total; older persisted rows
-    // may predate it, so fall back to summing the two tick counters.
-    const cpuTime = metricValue(latest.cpuTimeMs)
-      ?? (metricValue(latest.cpuUserMs) !== null && metricValue(latest.cpuSystemMs) !== null
-        ? metricValue(latest.cpuUserMs)! + metricValue(latest.cpuSystemMs)!
-        : null);
-    if (cpuTime !== null) terminalCpuTotals.push(cpuTime);
-  }
-  result.processTelemetry.executionsSampled = snapshots.size;
-  result.processTelemetry.rssSamples = rssSamples.length;
-  result.processTelemetry.cpuPercentSamples = cpuPercentSamples.length;
-  result.processTelemetry.cpuTimeExecutions = terminalCpuTotals.length;
-  result.processTelemetry.majorFaultSamples = majorFaultSamples.length;
-  result.processTelemetry.ioRateSamples = Math.min(rcharRates.length, wcharRates.length);
-  if (rssSamples.length >= 2) {
-    result.processTelemetry.averageRssBytes = rssSamples.reduce((sum, value) => sum + value, 0) / rssSamples.length;
-    result.processTelemetry.maxRssBytes = Math.max(...rssSamples);
-  }
-  if (terminalCpuTotals.length >= 2) {
-    result.processTelemetry.averageCpuTimeMs = terminalCpuTotals.reduce((sum, value) => sum + value, 0) / terminalCpuTotals.length;
-  }
-  if (cpuPercentSamples.length >= 2) result.processTelemetry.averageCpuPercent = cpuPercentSamples.reduce((sum, value) => sum + value, 0) / cpuPercentSamples.length;
-  if (minorFaultSamples.length >= 2) {
-    result.processTelemetry.averageMinorFaults = minorFaultSamples.reduce((sum, value) => sum + value, 0) / minorFaultSamples.length;
-  }
-  if (majorFaultSamples.length >= 2) {
-    result.processTelemetry.averageMajorFaults = majorFaultSamples.reduce((sum, value) => sum + value, 0) / majorFaultSamples.length;
-    result.processTelemetry.maxMajorFaults = Math.max(...majorFaultSamples);
-  }
-  if (rcharRates.length >= 2) {
-    result.processTelemetry.averageRcharBytesPerSec = rcharRates.reduce((sum, value) => sum + value, 0) / rcharRates.length;
-    result.processTelemetry.maxRcharBytesPerSec = Math.max(...rcharRates);
-  }
-  if (wcharRates.length >= 2) {
-    result.processTelemetry.averageWcharBytesPerSec = wcharRates.reduce((sum, value) => sum + value, 0) / wcharRates.length;
-    result.processTelemetry.maxWcharBytesPerSec = Math.max(...wcharRates);
-  }
-
+  /*
+   * Process telemetry is aggregated in SQL rather than by loading and parsing
+   * every snapshot in the database on every request.  The numbers come from
+   * the same persisted rows, so each one is still traceable to the
+   * observations it summarises; only the JavaScript object churn is gone.
+   * See EventRepository.aggregateProcessTelemetry() for the exact semantics.
+   */
+  const agg = eventRepo.aggregateProcessTelemetry();
+  result.processTelemetry.sampleCount = agg.sampleCount;
+  result.processTelemetry.executionsSampled = agg.executionsSampled;
+  result.processTelemetry.rssSamples = agg.rssSamples;
+  result.processTelemetry.averageRssBytes = agg.averageRssBytes;
+  result.processTelemetry.maxRssBytes = agg.maxRssBytes;
+  result.processTelemetry.cpuPercentSamples = agg.cpuPercentSamples;
+  result.processTelemetry.averageCpuPercent = agg.averageCpuPercent;
+  result.processTelemetry.cpuTimeExecutions = agg.cpuTimeExecutions;
+  result.processTelemetry.averageCpuTimeMs = agg.averageCpuTimeMs;
+  result.processTelemetry.averageMinorFaults = agg.averageMinorFaults;
+  result.processTelemetry.majorFaultSamples = agg.majorFaultSamples;
+  result.processTelemetry.averageMajorFaults = agg.averageMajorFaults;
+  result.processTelemetry.maxMajorFaults = agg.maxMajorFaults;
+  result.processTelemetry.averageRcharBytesPerSec = agg.averageRcharBytesPerSec;
+  result.processTelemetry.averageWcharBytesPerSec = agg.averageWcharBytesPerSec;
+  result.processTelemetry.maxRcharBytesPerSec = agg.maxRcharBytesPerSec;
+  result.processTelemetry.maxWcharBytesPerSec = agg.maxWcharBytesPerSec;
+  // A rate needs both directions to be meaningful, so the pair count is the
+  // smaller of the two, as before.
+  result.processTelemetry.ioRateSamples = Math.min(agg.rcharRateSamples, agg.wcharRateSamples);
   return result;
 }
 
@@ -184,19 +148,22 @@ function metricValue(value: unknown): number | null {
  * Malformed rows are excluded without inventing replacement values.
  */
 function collectSnapshots(
-  repo: SessionRepository,
+  eventRepo: EventRepository,
   terminalIds: Set<string>,
 ): Map<string, Array<Record<string, unknown>>> {
   const snapshots = new Map<string, Array<Record<string, unknown>>>();
-  for (const row of repo.listProcessSnapshots()) {
-    if (!terminalIds.has(row.session_id)) continue;
+  // Scoped to the terminal sessions actually needed, rather than to every
+  // snapshot the database has ever held.
+  for (const row of eventRepo.listSnapshotsForSessions([...terminalIds])) {
     try {
       const payload = JSON.parse(row.payload) as Record<string, unknown>;
       const list = snapshots.get(row.session_id) ?? [];
       list.push(payload);
       snapshots.set(row.session_id, list);
     } catch {
-      // skip malformed persisted snapshot
+      // A malformed persisted snapshot is excluded rather than replaced with
+      // an empty object, so it contributes nothing instead of contributing
+      // fabricated zeroes.
     }
   }
   return snapshots;
@@ -318,7 +285,7 @@ function latestValue(current: number | null, metric: unknown): number | null {
  * Command profiles over terminal sessions: duration distribution plus
  * telemetry aggregates from the same persisted snapshot series.
  */
-export function computeCommandProfiles(repo: SessionRepository): CommandProfile[] {
+export function computeCommandProfiles(repo: SessionRepository, eventRepo: EventRepository): CommandProfile[] {
   const rows = repo.listForAnalytics();
   const byCommand = new Map<string, typeof rows>();
   for (const row of rows) {
@@ -328,7 +295,7 @@ export function computeCommandProfiles(repo: SessionRepository): CommandProfile[
   }
 
   const terminalIds = new Set(rows.map((row) => row.id));
-  const snapshots = collectSnapshots(repo, terminalIds);
+  const snapshots = collectSnapshots(eventRepo, terminalIds);
   const sessionsByCommand = new Map<string, string[]>();
   for (const row of rows) {
     const list = sessionsByCommand.get(row.command) ?? [];

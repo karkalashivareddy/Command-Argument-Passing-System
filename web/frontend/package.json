@@ -1,9 +1,9 @@
 {
   "name": "caps-observatory-frontend",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "CAPS Process Execution Observatory — frontend (real-time execution observatory)",
+
   "engines": {
     "node": ">=22.5.0"
   },

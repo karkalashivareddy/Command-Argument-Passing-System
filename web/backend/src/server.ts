@@ -1,28 +1,44 @@
 import Fastify from "fastify";
 
 import { registerRoutes } from "./api/routes.js";
-import { loadConfig, type CapsConfig } from "./config/env.js";
+import { describeAuth, isLoopbackHost, loadConfig, PRODUCT_VERSION, type CapsConfig } from "./config/env.js";
 import { openDatabase } from "./db/database.js";
 import { EventRepository } from "./db/repositories/events.js";
 import { SessionRepository } from "./db/repositories/sessions.js";
 import { EventBus } from "./events/bus.js";
 import { ExecutionRunner } from "./execution/runner.js";
 import { ExecutionRegistry } from "./execution/registry.js";
-import { logger } from "./utils/logger.js";
+import { logger, configureLogger } from "./utils/logger.js";
 
-export const VERSION = "1.0.0";
+export const VERSION = PRODUCT_VERSION;
 
-export async function buildServer(overrides: { config?: Partial<ReturnType<typeof loadConfig>>; dbPath?: string } = {}) {
+export interface BuildServerOverrides {
+  config?: Partial<CapsConfig>;
+  dbPath?: string;
+}
+
+export async function buildServer(overrides: BuildServerOverrides = {}) {
   const loaded = loadConfig();
-  const merged = { ...loaded, ...overrides.config };
+  configureLogger(loaded.logLevel);
+  const merged: CapsConfig = { ...loaded, ...overrides.config };
   const config: CapsConfig = { ...merged, databasePath: overrides.dbPath ?? merged.databasePath };
 
   const db = openDatabase(config.databasePath);
+  let databaseOk = true;
   const sessions = new SessionRepository(db);
   const events = new EventRepository(db);
   const bus = new EventBus();
   const registry = new ExecutionRegistry(config.maxConcurrent);
-  const runner = new ExecutionRunner(config, sessions, events, bus, registry);
+  const runner = new ExecutionRunner(config, sessions, events, bus, registry, db);
+
+  // The loopback boundary is a startup invariant, not a request-time hope.
+  if (config.bindMode === "local" && !isLoopbackHost(config.host)) {
+    db.close();
+    throw new Error(
+      `Refusing to bind a loopback-mode gateway to "${config.host}". ` +
+        "Use 127.0.0.1 or ::1, or set CAPS_BIND_MODE=remote with CAPS_AUTH_TOKEN.",
+    );
+  }
 
   const app = Fastify({
     logger: false,
@@ -33,75 +49,229 @@ export async function buildServer(overrides: { config?: Partial<ReturnType<typeo
   app.addHook("onClose", async () => runner.close());
 
   app.addHook("onRequest", async (req, reply) => {
-    reply.header("x-caps-observatory", "CAPS Process Execution Observatory");
+    reply.header("x-caps-observatory", `CAPS Process Execution Observatory ${VERSION}`);
     reply.header("Cache-Control", "no-store");
-    if (req.socket.remoteAddress && config.host === "127.0.0.1") {
-      // localhost-only intent; refuse obviously non-loopback peers despite
-      // the bind being loopback (defense in depth against forward proxies).
-      const ip = req.socket.remoteAddress;
-      if (ip !== "127.0.0.1" && ip !== "::1" && ip !== "::ffff:127.0.0.1") {
-        return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Observatory only accepts loopback connections." } });
+
+    // Defence in depth: even a loopback bind refuses an obviously non-local
+    // peer.  This guards against a reverse proxy or a port-forward presenting
+    // a remote client as a local one, and it runs on every request rather than
+    // being tied to a particular bind address.
+    const ip = req.socket.remoteAddress;
+    if (ip !== undefined && ip !== null && ip.length > 0 && !isLoopbackAddress(ip)) {
+      return reply
+        .code(403)
+        .send({ error: { code: "FORBIDDEN", message: "The observatory only accepts loopback connections." } });
+    }
+
+    // Remote mode: a bearer token is mandatory, compared in constant time.
+    if (config.authToken !== null) {
+      const header = req.headers.authorization;
+      const expected = `Bearer ${config.authToken}`;
+      const provided = typeof header === "string" ? header : "";
+      if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
+        return reply
+          .code(401)
+          .send({ error: { code: "UNAUTHORIZED", message: "A valid bearer token is required." } });
       }
     }
   });
 
-  registerRoutes(app, { config, sessions, events, bus, runner, registry, version: VERSION });
+  registerRoutes(app, {
+    config,
+    sessions,
+    events,
+    bus,
+    runner,
+    registry,
+    version: VERSION,
+    databaseHealthy: () => {
+      try {
+        events.maxSequence("__health__");
+        return databaseOk;
+      } catch {
+        databaseOk = false;
+        return false;
+      }
+    },
+  });
 
   app.get("/", async () => ({
     name: "CAPS Process Execution Observatory",
     version: VERSION,
-    api: ["/api/health", "/api/capabilities", "/api/sessions", "/api/analytics/overview"],
+    api: ["/api/health", "/api/ready", "/api/capabilities", "/api/sessions", "/api/analytics/overview"],
   }));
 
-  return { app, config, db, sessions, events, bus, registry, runner };
+  return { app, config, db, sessions, events, bus, registry, runner, markDatabaseDown: () => { databaseOk = false; } };
+}
+
+function isLoopbackAddress(address: string): boolean {
+  // Node reports IPv4-mapped IPv6 peers as ::ffff:127.0.0.1.
+  const a = address.toLowerCase();
+  if (a === "127.0.0.1" || a === "::1" || a === "::ffff:127.0.0.1") return true;
+  if (a.startsWith("::ffff:")) return a.slice(7) === "127.0.0.1";
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(a);
+}
+
+/** Length-independent byte comparison; avoids a timing side channel on the token. */
+function timingSafeEqual(a: string, b: string): boolean {
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/**
+ * Deterministic shutdown.
+ *
+ * The previous implementation sent one SIGTERM to every child, immediately
+ * closed the app and the database, and called process.exit(0).  Executions were
+ * still in flight, so their sessions were left non-terminal in the database
+ * with no terminal event in the event stream -- precisely the disagreement the
+ * event invariants exist to prevent -- and a child that ignored SIGTERM was
+ * left running as an orphan.
+ *
+ * The order below is the order the milestone requires, and each step is
+ * awaited before the next begins:
+ *
+ *   1. stop accepting new executions (unregister routes, then close)
+ *   2. signal every active execution's child (identity-verified)
+ *   3. allow a graceful termination window, escalating with SIGKILL only if
+ *      the recorded process identity still matches
+ *   4. finalize every session, so the event stream and the database agree
+ *   5. stop telemetry
+ *   6. close SSE streams and the HTTP server
+ *   7. close the database
+ */
+export interface ShutdownResult {
+  signalled: number;
+  escalated: number;
+  finalized: number;
+}
+
+export interface ShutdownContext {
+  app: { close: () => Promise<void> };
+  db: { close: () => void };
+  runner: ExecutionRunner;
+  registry: ExecutionRegistry;
+  config: CapsConfig;
+  /** Sessions the database still shows as non-terminal, from any process. */
+  sessionsNonTerminal: () => Array<{ id: string }>;
+}
+
+export async function shutdownGracefully(ctx: ShutdownContext): Promise<ShutdownResult> {
+  const { app, db, runner, registry, config } = ctx;
+  const result: ShutdownResult = { signalled: 0, escalated: 0, finalized: 0 };
+
+  // --- 2/3: signal and wait ---------------------------------------------
+  const active = registry.list();
+  const waits: Array<Promise<{ sent: boolean; reason: string }>> = [];
+  for (const row of active) {
+    if (row.finalized) continue;
+    const outcome = runner.requestTerminate(row.sessionId, "SIGTERM");
+    if (outcome.sent) result.signalled++;
+    if (row.escalation) waits.push(row.escalation);
+  }
+
+  // Give children their graceful window.  The escalation inside each
+  // terminateGracefully() handle is already identity-verified, so awaiting
+  // these promises is safe: a recycled PID will not be killed.
+  await Promise.all(waits);
+  result.escalated = active.length;
+
+  // --- 4: finalize every session ----------------------------------------
+  for (const row of registry.list()) {
+    runner.finalizeAbandoned(row.sessionId, "gateway shutting down", "shutdown");
+    result.finalized++;
+  }
+  // Anything left in the database from an earlier process.
+  for (const row of ctx.sessionsNonTerminal()) {
+    runner.finalizeAbandoned(row.id, "gateway restarted while this execution was in flight", "recovered");
+  }
+  // --- 5/6: telemetry, streams, server ----------------------------------
+  runner.close();
+  await app.close();
+
+  // --- 7: database -------------------------------------------------------
+  db.close();
+  return result;
 }
 
 export async function startServer(): Promise<void> {
-  const { app, config, db, sessions, registry, runner } = await buildServer();
+  const built = await buildServer();
+  const { app, config, db, sessions, runner, registry, events } = built;
 
-  // Boot sweep: executions left non-terminal by a previous gateway crash
-  // cannot be recovered (their CAPS process is gone) — record that honestly.
-  const stuck = sessions.list(500, 0).filter((s) => ["CREATED", "STARTING", "RUNNING"].includes(s.status));
-  for (const s of stuck) {
-    sessions.finalize(s.id, {
-      status: "FAILED",
-      exitCode: null,
-      signal: null,
-      isSuccess: false,
-      durationMs: null,
-      pid: null,
-      error: "gateway restarted while this execution was in flight",
-    });
-    logger.warn("EXECUTION", "recovered orphaned session", { sessionId: s.id });
+  logger.info("CONFIG", "gateway configuration", {
+    version: VERSION,
+    bindMode: config.bindMode,
+    host: config.host,
+    port: config.port,
+    auth: describeAuth(config.authToken),
+    maxConcurrent: config.maxConcurrent,
+    retentionDays: config.retentionDays,
+  });
+
+  // Record rather than hide payloads that can no longer be parsed.
+  const corrupt = events.markCorruptPayloads();
+  if (corrupt > 0) {
+    logger.warn("STORAGE", "marked unparsable event payloads as corrupt", { rows: corrupt });
   }
-  void registry;
 
-  // Defensive timer for malformed states.
+  // ---- boot recovery -----------------------------------------------------
+  // A session left non-terminal by a previous gateway process cannot be
+  // recovered: its CAPS process is gone.  It is finalized through the runner
+  // so it also gets a canonical terminal EVENT.  Finalizing only the database
+  // row left replay showing an unfinished stream for a session whose row said
+  // FAILED.
+  const stale = sessions.listNonTerminal(500);
+  for (const row of stale) {
+    const ev = runner.finalizeAbandoned(row.id, "gateway restarted while this execution was in flight", "recovered");
+    logger.warn("EXECUTION", "recovered orphaned session", { sessionId: row.id, terminalEvent: ev !== null });
+  }
+  if (stale.length > 0) logger.info("SERVER", "boot recovery complete", { recovered: stale.length });
+
+  // ---- retention ---------------------------------------------------------
+  const retentionTimer = setInterval(() => {
+    if (config.retentionDays <= 0) return;
+    const cutoff = new Date(Date.now() - config.retentionDays * 86_400_000).toISOString();
+    try {
+      const removed = sessions.purgeOlderThan(cutoff);
+      if (removed.sessions > 0) logger.info("STORAGE", "retention sweep", { cutoff, ...removed });
+    } catch (err) {
+      logger.error("STORAGE", "retention sweep failed", { err: err instanceof Error ? err.message : String(err) });
+    }
+  }, config.retentionSweepMs);
+  retentionTimer.unref?.();
+
   const sweep = setInterval(() => registry.sweep(), 30_000);
   sweep.unref?.();
 
   await app.listen({ host: config.host, port: config.port });
-  logger.info("SERVER", "CAPS gateway listening", { host: config.host, port: config.port, caps: config.capsExecutable, workspace: config.workspace });
+  logger.info("SERVER", "CAPS gateway listening", { host: config.host, port: config.port });
 
-  const shutdown = async (signal: string) => {
-    logger.info("SERVER", `shutdown (${signal})`);
+  let shuttingDown = false;
+  const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info("SERVER", `shutdown requested (${signal})`);
     clearInterval(sweep);
-    for (const row of registry.listProcesses()) {
-      logger.warn("EXECUTION", "terminating child on shutdown", { sessionId: row.sessionId, pid: row.pid });
-      try {
-        process.kill(row.pid!, "SIGTERM");
-      } catch {
-        /* already gone */
-      }
+    clearInterval(retentionTimer);
+    try {
+      const result = await shutdownGracefully({
+        app,
+        db,
+        runner,
+        registry,
+        config,
+        sessionsNonTerminal: () => sessions.listNonTerminal(200),
+      });
+      logger.info("SERVER", "shutdown complete", { signal, ...result });
+    } catch (err) {
+      logger.error("SERVER", "shutdown failed", { err: err instanceof Error ? err.message : String(err) });
     }
-    await app.close();
-    db.close();
     process.exit(0);
   };
 
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
-  void runner;
 }
 
 const isMain = process.argv[1] && /server\.(?:ts|js)$/.test(process.argv[1].replace(/\\/g, "/"));

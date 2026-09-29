@@ -1,0 +1,35 @@
+# Code owners.
+#
+# The engine and the security boundary get explicit owners because a change
+# there changes what the system can execute, not just how it behaves.
+
+# C execution engine: fork/exec/wait, parser, signals, redirection.
+/src/                       @karkalashivareddy
+/include/                   @karkalashivareddy
+/workloads/                 @karkalashivareddy
+/tests/                     @karkalashivareddy
+/Makefile                   @karkalashivareddy
+
+# Gateway security boundary: allowlist, executable resolution, redirection
+# policy, configuration validation.
+/web/backend/src/security/   @karkalashivareddy
+/web/backend/src/config/    @karkalashivareddy
+/web/backend/src/api/       @karkalashivareddy
+/web/backend/src/execution/ @karkalashivareddy
+
+# Canonical event store and invariants.
+/web/backend/src/db/        @karkalashivareddy
+/web/backend/src/events/    @karkalashivareddy
+/web/backend/src/types/     @karkalashivareddy
+
+# Telemetry: procfs reading, provenance, identity verification.
+/web/backend/src/telemetry/ @karkalashivareddy
+
+# Frontend evidence correlation and the process space.
+/web/frontend/src/lib/      @karkalashivareddy
+/web/frontend/src/store/    @karkalashivareddy
+/web/frontend/src/components/space/ @karkalashivareddy
+
+# Verification and repository hygiene.
+/.github/                   @karkalashivareddy
+/scripts/                   @karkalashivareddy

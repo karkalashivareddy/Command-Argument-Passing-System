@@ -2,6 +2,22 @@ import { useEffect, useRef, useState } from "react";
 
 import type { CanonicalEvent, SessionStatus } from "../types/observability";
 
+/**
+ * SSE frame names.
+ *
+ * The gateway distinguishes "a canonical event arrived" from "the stream is
+ * over", and the two names say so. The previous pair, `execution.received` and
+ * `execution.ended`, was ambiguous: a reader could not tell a completed *event*
+ * from a completed *stream* by looking at the frame, and both sounded as if the
+ * execution itself had finished.
+ *
+ * Only the canonical-event frame carries an `id:`, and that id is the event's
+ * sequence within its session. That is what makes a native `EventSource`
+ * reconnect send a meaningful `Last-Event-ID`.
+ */
+export const SSE_EVENT_FRAME = "caps.event";
+export const SSE_END_FRAME = "stream.end";
+
 export interface EndedPayload {
   sessionId: string;
   status: SessionStatus;
@@ -44,7 +60,7 @@ export function useLiveEvents({ sessionId, onEvent, onEnded, onOpen, onError, en
 
     const handle = (e: MessageEvent<string>) => {
       try {
-        // The gateway's `execution.received` frame contains the canonical
+        // The `caps.event` frame contains the canonical
         // event envelope directly (id/sessionId/sequence/type/source/...).
         const data = JSON.parse(e.data) as CanonicalEvent | EndedPayload;
         if ("type" in data && "id" in data && "sequence" in data) {
@@ -57,13 +73,13 @@ export function useLiveEvents({ sessionId, onEvent, onEnded, onOpen, onError, en
       }
     };
 
-    es.addEventListener("execution.received", handle);
-    es.addEventListener("execution.ended", handle);
+    es.addEventListener(SSE_EVENT_FRAME, handle);
+    es.addEventListener(SSE_END_FRAME, handle);
     es.onerror = () => onErrorRef.current?.(new Error("connection interrupted"));
 
     return () => {
-      es.removeEventListener("execution.received", handle);
-      es.removeEventListener("execution.ended", handle);
+      es.removeEventListener(SSE_EVENT_FRAME, handle);
+      es.removeEventListener(SSE_END_FRAME, handle);
       es.close();
     };
   }, [sessionId, enabled]);
@@ -95,10 +111,10 @@ export function useGlobalFeed(limit = 200): { events: CanonicalEvent[]; connecte
       }
     };
     es.onopen = () => setConnection("connected");
-    es.addEventListener("execution.received", handle);
+    es.addEventListener(SSE_EVENT_FRAME, handle);
     es.onerror = () => setConnection("reconnecting");
     return () => {
-      es.removeEventListener("execution.received", handle);
+      es.removeEventListener(SSE_EVENT_FRAME, handle);
       es.close();
     };
   }, [limit]);

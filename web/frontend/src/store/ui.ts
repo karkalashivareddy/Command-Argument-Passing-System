@@ -1,12 +1,13 @@
 import { create } from "zustand";
 
-import { api, ApiError } from "../api/client";
+import { api, ApiError, type ReadinessResponse } from "../api/client";
 import type { CapabilitiesResponse, HealthResponse } from "../types/observability";
 
-export type EngineState = "checking" | "online" | "offline";
+export type EngineState = "checking" | "online" | "degraded" | "offline";
 
 interface UiState {
   engine: HealthResponse | null;
+  readiness: ReadinessResponse | null;
   capabilities: CapabilitiesResponse | null;
   engineState: EngineState;
   engineDetail: string;
@@ -22,6 +23,7 @@ interface UiState {
 
 export const useUi = create<UiState>((set) => ({
   engine: null,
+  readiness: null,
   capabilities: null,
   engineState: "checking",
   engineDetail: "Querying the CAPS gateway…",
@@ -30,13 +32,27 @@ export const useUi = create<UiState>((set) => ({
   toast: null,
   fetchEngine: async () => {
     try {
-      const [engine, capabilities] = await Promise.all([api.health(), api.capabilities()]);
+      // Liveness and readiness are different questions. `/api/health` only
+      // says the process is running; `/api/ready` says whether the engine,
+      // database, and workspace it depends on are actually usable. A gateway
+      // that is alive but cannot execute anything is "degraded", not "online",
+      // and saying "online" would be a claim the system does not support.
+      const [health, readiness, capabilities] = await Promise.all([
+        api.health(),
+        api.ready().catch(() => null),
+        api.capabilities(),
+      ]);
+      const engineAvailable = readiness?.checks.engine.available ?? capabilities.engineAvailable;
+      const degraded = readiness !== null && !readiness.ready;
       set({
-        engine,
+        engine: health,
+        readiness,
         capabilities,
-        engineState: engine.engine.available ? "online" : "offline",
-        engineDetail: engine.engine.available
-          ? `${engine.platform} · ${engine.version}`
+        engineState: !engineAvailable ? "offline" : degraded ? "degraded" : "online",
+        engineDetail: engineAvailable
+          ? degraded
+            ? `${health.platform} · ${health.version} · ${readiness!.checks.engine.detail}`
+            : `${health.platform} · ${health.version}`
           : "gateway is up but the CAPS binary is unavailable",
       });
     } catch (err) {

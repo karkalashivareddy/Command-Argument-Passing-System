@@ -58,6 +58,13 @@ export function deriveRates(
  * Process CPU utilization as a percentage of one core. The kernel exposes
  * cumulative user/system time, so utilization only exists between two valid
  * samples; it can exceed 100% for a process running on several threads.
+ *
+ * Counter-reset policy, identical to the one already applied to the I/O and
+ * fault counters: a cumulative counter that went *backwards* means the process
+ * identity changed (a recycled PID, or an execve that reset accounting), not
+ * that the process used no CPU.  Clamping to zero would turn "this number is
+ * not trustworthy" into "this process used no CPU", which is a fabricated
+ * observation presented as a measurement.  It is reported as UNAVAILABLE.
  */
 export function deriveCpuPercent(
   current: ProcessSnapshot,
@@ -71,9 +78,16 @@ export function deriveCpuPercent(
   if (user === null || system === null || priorUser === null || priorSystem === null) {
     return unavailable(current.cpuPercent, "CPU time was unavailable in one of the two samples; no utilization is reported");
   }
-  const deltaMs = user + system - (priorUser + priorSystem);
+  const before = priorUser + priorSystem;
+  const now = user + system;
+  if (now < before) {
+    return unavailable(
+      current.cpuPercent,
+      `CPU time counter decreased between samples (${before}ms then ${now}ms); no utilization is reported`,
+    );
+  }
   return {
-    value: Math.max(0, (deltaMs / wallMs) * 100),
+    value: (now - before) / wallMs * 100,
     provenance: "DERIVED",
     source: "delta(/proc/<pid>/stat utime+stime) / delta(sample wall time), percent of one core",
   };

@@ -6,14 +6,43 @@ on:
   pull_request:
     branches: [main]
 
+# Read-only by default. Every job that needs more says so explicitly.
 permissions:
   contents: read
 
+# A new push to the same ref makes the previous run irrelevant. Cancelling
+# keeps CI minutes honest and does not hide verification: the newest commit is
+# always checked, and `attribution` always runs on the full history.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22"
+
 jobs:
-  build-and-test:
-    name: make + make test (${{ matrix.cc }})
+  # GitHub builds its contributors graph from commit metadata, so one
+  # `Co-authored-by: Claude ...` trailer creates a permanent contributor entry
+  # that can only be undone by rewriting published history. This job fails the
+  # build the moment such an identity is introduced again.
+  attribution:
+    name: commit attribution
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: No AI author, committer, or co-author
+        run: sh scripts/check-attribution.sh HEAD
+
+  # ---------------------------------------------------------------- C engine
+  c-engine:
+    name: C engine (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -26,8 +55,6 @@ jobs:
         run: |
           ${{ matrix.cc }} --version | head -n 1
           make --version | head -n 1
-          echo "sh: $(command -v sh) -> $(readlink -f "$(command -v sh)")"
-          echo "jq: $(jq --version 2>/dev/null || echo 'not installed (JSON test falls back)')"
 
       - name: Strict warnings build (-Werror)
         run: |
@@ -38,27 +65,251 @@ jobs:
       - name: Clean build
         run: make clean && make CC="${{ matrix.cc }}"
 
-      - name: Test suite
+      - name: Unit and integration suite
         run: make test CC="${{ matrix.cc }}"
 
       - name: Sanitizer suite (ASan + UBSan, leak detection)
         run: make test-asan CC="${{ matrix.cc }}"
 
-      - name: Working-tree hygiene (no artifacts committed)
+      - name: Controlled workloads
+        run: make test-workloads CC="${{ matrix.cc }}"
+
+      - name: Controlled workloads under sanitizers
+        run: make test-workloads-asan CC="${{ matrix.cc }}"
+
+  # ------------------------------------------------------------------ backend
+  backend:
+    name: gateway typecheck, build, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web/backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/backend/package-lock.json
+
+      - name: Install from the lockfile
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Tests
+        run: node node_modules/vitest/vitest.mjs run
+
+  # ----------------------------------------------------------------- frontend
+  frontend:
+    name: frontend typecheck, build, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/frontend/package-lock.json
+
+      - name: Install from the lockfile
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Production build
+        run: npm run build
+
+      - name: Tests
+        run: node node_modules/vitest/vitest.mjs run
+
+  # -------------------------------------------------------------- integration
+  # Runs the real C engine through the real gateway against the real
+  # controlled workloads. This is the only job that proves the three layers
+  # agree; everything else can pass while the system as a whole is broken.
+  integration:
+    name: real gateway integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/backend/package-lock.json
+
+      - name: Build the C engine and the controlled workloads
+        run: make
+
+      - name: Install the gateway from the lockfile
+        working-directory: web/backend
+        run: npm ci
+
+      - name: Gateway integration suite against the real engine
+        working-directory: web/backend
+        run: node node_modules/vitest/vitest.mjs run
+
+  # ------------------------------------------------------------------ browser
+  # A smoke suite against the production build of the real frontend, talking
+  # to the real gateway with the real C engine. This is deliberately a smoke
+  # suite, not a visual-regression system: the repository has no visual-diff
+  # infrastructure and inventing one would test pixels rather than behaviour.
+  browser-smoke:
+    name: browser smoke (production build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/frontend/package-lock.json
+
+      - name: Build the C engine
+        run: make caps
+
+      - name: Install and build the frontend
+        working-directory: web/frontend
         run: |
-          git status --porcelain
-          test -z "$(git status --porcelain)"
+          npm ci
+          npm run build
+
+      - name: Install the gateway
+        working-directory: web/backend
+        run: npm ci
+
+      - name: Start the gateway
+        working-directory: web/backend
+        env:
+          CAPS_DATABASE_PATH: ${{ runner.temp }}/caps-smoke.db
+          CAPS_WORKSPACE: ${{ runner.temp }}/caps-smoke-work
+          CAPS_LOG_LEVEL: info
+        run: |
+          nohup node --disable-warning=ExperimentalWarning node_modules/tsx/dist/cli.mjs src/server.ts \
+            > "$RUNNER_TEMP/gateway.log" 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3000/api/ready > /dev/null; then
+              echo "gateway ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "gateway did not become ready"
+          cat "$RUNNER_TEMP/gateway.log"
+          exit 1
+
+      - name: Serve the production build
+        working-directory: web/frontend
+        run: |
+          nohup npx vite preview --host 127.0.0.1 --port 4173 \
+            > "$RUNNER_TEMP/preview.log" 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:4173/ > /dev/null; then
+              echo "preview ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "preview did not start"
+          cat "$RUNNER_TEMP/preview.log"
+          exit 1
+
+      - name: Browser smoke suite
+        run: sh scripts/browser-smoke.sh
+
+      - name: Gateway log on failure
+        if: failure()
+        run: cat "$RUNNER_TEMP/gateway.log" || true
+
+  # ---------------------------------------------------------------- hygiene
+  repository-hygiene:
+    name: repository hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: No build artifacts, databases, or local paths committed
+        run: sh scripts/check-repository-hygiene.sh
 
       - name: Text files end with a newline
+        run: sh scripts/check-trailing-newline.sh
+
+      - name: Lockfiles are consistent with their manifests
+        run: sh scripts/check-lockfiles.sh
+
+  # ------------------------------------------------------ dependency hygiene
+  dependency-audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # Required for `npm audit` to reach the advisory database in CI.
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Gateway audit (high and critical fail the build)
+        working-directory: web/backend
         run: |
-          rc=0
-          for f in $(git ls-files); do
-            [ -f "$f" ] || continue
-            [ -s "$f" ] || continue
-            if git check-attr binary -- "$f" | grep -q 'binary: set'; then continue; fi
-            if [ "$(tail -c1 "$f" | wc -l)" -ne 1 ]; then
-              echo "missing trailing newline: $f"
-              rc=1
-            fi
-          done
-          exit $rc
+          npm ci --ignore-scripts
+          npm audit --audit-level=high
+
+      - name: Frontend audit (high and critical fail the build)
+        working-directory: web/frontend
+        run: |
+          npm ci --ignore-scripts
+          npm audit --audit-level=high
+
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, c-cpp]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          language: ${{ matrix.language }}
+          build-mode: ${{ matrix.language == 'c-cpp' && 'none' || 'autobuild' }}
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { compareSessions, computeCommandProfiles, computeRuntimePeaks } from "../../src/analytics/service.js";
 import { openDatabase } from "../../src/db/database.js";
+import { EventRepository } from "../../src/db/repositories/events.js";
 import { SessionRepository } from "../../src/db/repositories/sessions.js";
 import type { CanonicalEvent, SessionRecord } from "../../src/types/observability.js";
 
@@ -167,7 +168,7 @@ describe("computeCommandProfiles", () => {
     insert.run("p-a-s2", "p-a", 1, "2026-01-01T10:00:00.600Z", JSON.stringify({ rssBytes: { value: 300, provenance: "OBSERVED", source: "x" } }));
     insert.run("p-b-s1", "p-b", 0, "2026-01-01T10:00:00.100Z", JSON.stringify({ rssBytes: { value: 200, provenance: "OBSERVED", source: "x" } }));
 
-    const profiles = computeCommandProfiles(repo);
+    const profiles = computeCommandProfiles(repo, new EventRepository(db));
     const sleep = profiles.find((p) => p.command === "sleep")!;
     const falseProfile = profiles.find((p) => p.command === "false")!;
     expect(sleep.runs).toBe(2);

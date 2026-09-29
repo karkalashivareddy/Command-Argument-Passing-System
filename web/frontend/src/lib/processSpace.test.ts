@@ -330,7 +330,10 @@ describe("markers", () => {
   it("ties a fork marker to the child node", () => {
     const space = buildProcessSpace(cpuBurnEvents());
     const fork = space.markers.find((marker) => marker.type === "process.started")!;
-    expect(fork.nodeKey).toBe(`child:${CHILD_PID}`);
+    // The node key is the semantic identity key (role + pid + start time), so the
+    // 3D scene and the 2D timeline name the same process identically. This
+    // fixture carries no procfs snapshot, so the start time is absent.
+    expect(fork.nodeKey).toBe(`child:${CHILD_PID}@?`);
     expect(fork.label).toBe("fork()");
     expect(space.nodes.find((node) => node.key === fork.nodeKey)?.pid).toBe(CHILD_PID);
   });

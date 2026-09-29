@@ -13,6 +13,7 @@ export type CanonicalEventType =
   | "execution.completed"
   | "execution.failed"
   | "execution.timeout"
+  | "execution.cancelled"
   | "command.received"
   | "command.parsed"
   | "command.parse_error"
@@ -22,8 +23,29 @@ export type CanonicalEventType =
   | "process.snapshot"
   | "process.exited"
   | "process.exec_error"
+  | "process.wait_failed"
+  | "process.launch_failed"
   | "signal.received"
   | "session.summary";
+
+/**
+ * Events after which no further event may appear for the session.
+ *
+ * This is the definition of "terminal", and it is used by the SSE routes, the
+ * event-stream validator, and the analytics layer.  Keeping one list means
+ * those three can never disagree about whether a session has ended.
+ */
+export const TERMINAL_EVENT_TYPES: readonly CanonicalEventType[] = [
+  "execution.completed",
+  "execution.failed",
+  "execution.timeout",
+  "execution.cancelled",
+];
+
+/** True when the type ends a session. */
+export function isTerminalEventType(type: CanonicalEventType): boolean {
+  return (TERMINAL_EVENT_TYPES as readonly string[]).includes(type);
+}
 
 export interface CanonicalEvent<T = Record<string, unknown>> {
   id: string;
@@ -45,6 +67,26 @@ export type SessionStatus =
   | "FAILED"
   | "TIMED_OUT"
   | "CANCELLED";
+
+/**
+ * Session status is derived from the observed lifecycle, never from the mere
+ * presence of a session-summary event.
+ *
+ * `COMPLETED` means: execvp() succeeded AND the target exited 0 AND it was
+ * not signalled.  A failed exec, a failed wait, and a non-zero exit are all
+ * `FAILED` with a distinct `error`, and a gateway that cannot know the outcome
+ * says so instead of guessing.
+ */
+export const TERMINAL_SESSION_STATUSES: readonly SessionStatus[] = [
+  "COMPLETED",
+  "FAILED",
+  "TIMED_OUT",
+  "CANCELLED",
+];
+
+export function isTerminalStatus(status: SessionStatus): boolean {
+  return (TERMINAL_SESSION_STATUSES as readonly string[]).includes(status);
+}
 
 export interface RedirectionSpec {
   in?: string;
@@ -71,6 +113,14 @@ export interface SessionRecord {
   error: string | null;
   timeoutMs: number | null;
   eventCount: number;
+  /**
+   * True when a persisted JSON column could not be parsed.  The record is
+   * still returned, because hiding the session would hide the corruption, but
+   * `storedJsonError` says exactly which column is unreadable so no consumer
+   * can mistake a default value for real data.
+   */
+  storedJsonCorrupt?: boolean;
+  storedJsonError?: string;
 }
 
 export interface ProcessRecord {
@@ -226,15 +276,50 @@ export interface SessionComparison {
 
 // Type-safe payloads for key events (informational; the event row also
 // keeps a copy of the raw payload as JSON).
+
+/**
+ * Lifecycle verdict reported by the C engine.  This is the field that
+ * separates "the observation finished" from "the target succeeded", and the
+ * gateway derives the session status from it.
+ */
+export type EngineOutcome =
+  | "COMPLETED"
+  | "EXITED"
+  | "SIGNALED"
+  | "EXEC_FAILED"
+  | "LAUNCH_FAILED"
+  | "WAIT_FAILED";
+
 export interface ProcessStartedPayload { label: string; }
-export interface ProcessExitedPayload { label: string; exitCode: number; durationMs: number; }
-export interface SignalReceivedPayload { label: string; signal: number; }
+export interface ProcessExitedPayload {
+  label: string;
+  exitCode: number;
+  durationMs: number;
+  outcome: EngineOutcome;
+}
+export interface SignalReceivedPayload { label: string; signal: number; outcome: EngineOutcome; }
 export interface SummaryPayload {
   commands: number;
   succeeded: number;
   failed: number;
   signals: number;
   timed: number;
+  exec_errors: number;
+  launch_errors: number;
+  observed_cleanly: boolean;
   averageDurationMs: number;
 }
-export interface ExecErrorPayload { label: string; }
+/**
+ * A failure that means no program result exists.  `exitCode` is the shell
+ * convention fallback (126/127) and is null when not applicable; `errno` and
+ * `errnoName` carry the kernel reason, and `reason` is a stable token.
+ */
+export interface FailurePayload {
+  label: string;
+  exitCode: number | null;
+  errno: number;
+  errnoName: string;
+  reason: string;
+  outcome: EngineOutcome;
+  durationMs?: number;
+}

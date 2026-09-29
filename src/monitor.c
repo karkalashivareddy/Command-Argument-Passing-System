@@ -14,6 +14,8 @@ struct caps_monitor {
     long failed;
     long signals;
     long timed;
+    long exec_errors;
+    long launch_errors;
     long long total_duration_ms;
 };
 
@@ -131,10 +133,43 @@ static const char *event_name(caps_event_type_t type)
         return "SIGNAL_RECEIVED";
     case CAPS_EVENT_EXEC_ERROR:
         return "EXEC_ERROR";
+    case CAPS_EVENT_WAIT_FAILED:
+        return "WAIT_FAILED";
+    case CAPS_EVENT_EXECUTION_FAILED:
+        return "EXECUTION_FAILED";
     case CAPS_EVENT_SESSION_SUMMARY:
         return "SESSION_SUMMARY";
     default:
         return "UNKNOWN_EVENT";
+    }
+}
+
+/*
+ * Machine-readable lifecycle verdict for a terminal process event.
+ *
+ * This is the field that makes "the observation finished" independent of
+ * "the target succeeded".  A consumer that only looks at whether a summary
+ * was printed will conclude that a failed execvp() was a successful run;
+ * reading `outcome` cannot be mistaken that way.  The value is supplied by
+ * the execution core, which is the only layer that knows the difference.
+ */
+static const char *outcome_name(caps_outcome_t outcome)
+{
+    switch (outcome) {
+    case CAPS_OUTCOME_COMPLETED:
+        return "COMPLETED";
+    case CAPS_OUTCOME_EXITED:
+        return "EXITED";
+    case CAPS_OUTCOME_SIGNALED:
+        return "SIGNALED";
+    case CAPS_OUTCOME_EXEC_FAILED:
+        return "EXEC_FAILED";
+    case CAPS_OUTCOME_LAUNCH_FAILED:
+        return "LAUNCH_FAILED";
+    case CAPS_OUTCOME_WAIT_FAILED:
+        return "WAIT_FAILED";
+    default:
+        return "OBSERVED";
     }
 }
 
@@ -167,8 +202,11 @@ static void emit_terminal(caps_monitor_t *mon, const caps_event_t *ev)
                 ev->duration_ms);
         break;
     case CAPS_EVENT_EXEC_ERROR:
-        fprintf(mon->out, "[%s] %-22s pid=%ld %s\n", wall,
-                event_name(ev->type), (long)ev->pid,
+    case CAPS_EVENT_WAIT_FAILED:
+    case CAPS_EVENT_EXECUTION_FAILED:
+        fprintf(mon->out, "[%s] %-22s pid=%ld status=%d errno=%d reason=%s %s\n",
+                wall, event_name(ev->type), (long)ev->pid, ev->status,
+                ev->errno_value, ev->message ? ev->message : "-",
                 ev->command ? ev->command : "(none)");
         break;
     default:
@@ -201,27 +239,58 @@ static void emit_json(caps_monitor_t *mon, const caps_event_t *ev)
         json_escape(mon->out, ev->command ? ev->command : "");
         fputs("}\n", mon->out);
         break;
-    case CAPS_EVENT_SIGNAL_RECEIVED:
-        fprintf(mon->out,
-                "{\"event\":\"%s\",\"time\":\"%s\",\"pid\":%ld,\"signal\":%d,"
-                "\"command\":",
-                event_name(ev->type), wall, (long)ev->pid, ev->status);
-        json_escape(mon->out, ev->command ? ev->command : "");
-        fputs("}\n", mon->out);
-        break;
     case CAPS_EVENT_PROCESS_EXITED:
         fprintf(mon->out,
                 "{\"event\":\"%s\",\"time\":\"%s\",\"pid\":%ld,\"exit_code\":"
-                "%d,\"duration_ms\":%lld,\"command\":",
+                "%d,\"duration_ms\":%lld,\"outcome\":\"%s\",\"command\":",
                 event_name(ev->type), wall, (long)ev->pid, ev->status,
-                ev->duration_ms);
+                ev->duration_ms, outcome_name(ev->outcome));
+        json_escape(mon->out, ev->command ? ev->command : "");
+        fputs("}\n", mon->out);
+        break;
+    case CAPS_EVENT_SIGNAL_RECEIVED:
+        fprintf(mon->out,
+                "{\"event\":\"%s\",\"time\":\"%s\",\"pid\":%ld,\"signal\":%d,"
+                "\"outcome\":\"%s\",\"command\":",
+                event_name(ev->type), wall, (long)ev->pid, ev->status,
+                outcome_name(ev->outcome));
         json_escape(mon->out, ev->command ? ev->command : "");
         fputs("}\n", mon->out);
         break;
     case CAPS_EVENT_EXEC_ERROR:
+        /*
+         * The failure reason is the whole point of this event.  status is the
+         * shell-convention status the process actually terminated with (126
+         * for EACCES, 127 for "not found"), and errno/errno_name carry the
+         * kernel reason, so a consumer never has to parse the human-readable
+         * diagnostic that also went to stderr.
+         */
         fprintf(mon->out,
-                "{\"event\":\"%s\",\"time\":\"%s\",\"pid\":%ld,\"command\":",
-                event_name(ev->type), wall, (long)ev->pid);
+                "{\"event\":\"%s\",\"time\":\"%s\",\"pid\":%ld,"
+                "\"exit_code\":%d,\"errno\":%d,\"errno_name\":\"%s\","
+                "\"reason\":\"%s\",\"outcome\":\"%s\",\"command\":",
+                event_name(ev->type), wall, (long)ev->pid, ev->status,
+                ev->errno_value, ev->errno_value ? strerror(ev->errno_value) : "",
+                ev->message ? ev->message : "", outcome_name(ev->outcome));
+        json_escape(mon->out, ev->command ? ev->command : "");
+        fputs("}\n", mon->out);
+        break;
+    case CAPS_EVENT_WAIT_FAILED:
+    case CAPS_EVENT_EXECUTION_FAILED:
+        /*
+         * No program result exists for these.  status carries the negated
+         * errno so the event is never a bare marker with no reason, and
+         * outcome states plainly that the observation itself failed.
+         */
+        fprintf(mon->out,
+                "{\"event\":\"%s\",\"time\":\"%s\",\"pid\":%ld,"
+                "\"exit_code\":null,\"errno\":%d,\"errno_name\":\"%s\","
+                "\"reason\":\"%s\",\"duration_ms\":%lld,"
+                "\"outcome\":\"%s\",\"command\":",
+                event_name(ev->type), wall, (long)ev->pid, ev->errno_value,
+                ev->errno_value ? strerror(ev->errno_value) : "",
+                ev->message ? ev->message : "", ev->duration_ms,
+                outcome_name(ev->outcome));
         json_escape(mon->out, ev->command ? ev->command : "");
         fputs("}\n", mon->out);
         break;
@@ -253,6 +322,17 @@ void caps_monitor_emit(caps_monitor_t *mon, const caps_event_t *ev)
         break;
     case CAPS_EVENT_EXEC_ERROR:
         mon->failed++;
+        mon->exec_errors++;
+        break;
+    case CAPS_EVENT_WAIT_FAILED:
+    case CAPS_EVENT_EXECUTION_FAILED:
+        /*
+         * Counted as a failed execution but NOT as an observed process
+         * result: no program ran, so there is no exit code and no duration to
+         * average.  A summary that said otherwise would invent a measurement.
+         */
+        mon->failed++;
+        mon->launch_errors++;
         break;
     default:
         break;
@@ -264,10 +344,21 @@ void caps_monitor_emit(caps_monitor_t *mon, const caps_event_t *ev)
         emit_terminal(mon, ev);
 }
 
+/*
+ * Close the monitor session.
+ *
+ * SESSION_SUMMARY means "the monitor reached the end of its input".  It is
+ * NOT a success claim: the exec_errors / launch_errors counters and the
+ * presence of an EXEC_ERROR, WAIT_FAILED, or EXECUTION_FAILED event are what
+ * say whether the observed commands actually ran.  Consumers that treat the
+ * presence of this event as proof of execution are reading the wrong field,
+ * so the failure counters are emitted here as first-class data.
+ */
 void caps_monitor_finish(caps_monitor_t *mon)
 {
     double average_ms;
     caps_event_t summary;
+    const int clean = mon->exec_errors == 0 && mon->launch_errors == 0;
 
     if (mon == NULL)
         return;
@@ -283,9 +374,11 @@ void caps_monitor_finish(caps_monitor_t *mon)
         fprintf(mon->out,
                 "{\"event\":\"SESSION_SUMMARY\",\"commands\":%ld,"
                 "\"succeeded\":%ld,\"failed\":%ld,\"signals\":%ld,"
-                "\"timed\":%ld,\"average_duration_ms\":%.1f}\n",
+                "\"timed\":%ld,\"exec_errors\":%ld,\"launch_errors\":%ld,"
+                "\"observed_cleanly\":%s,\"average_duration_ms\":%.1f}\n",
                 mon->commands, mon->succeeded, mon->failed, mon->signals,
-                mon->timed, average_ms);
+                mon->timed, mon->exec_errors, mon->launch_errors,
+                clean ? "true" : "false", average_ms);
     } else {
         fputs("Session Summary\n", mon->out);
         fputs("---------------\n", mon->out);
@@ -293,6 +386,8 @@ void caps_monitor_finish(caps_monitor_t *mon)
         fprintf(mon->out, "Succeeded: %ld\n", mon->succeeded);
         fprintf(mon->out, "Failed: %ld\n", mon->failed);
         fprintf(mon->out, "Signals: %ld\n", mon->signals);
+        fprintf(mon->out, "Exec errors: %ld\n", mon->exec_errors);
+        fprintf(mon->out, "Launch/wait errors: %ld\n", mon->launch_errors);
         if (mon->timed > 0)
             fprintf(mon->out, "Average duration: %.1f ms\n", average_ms);
         else
