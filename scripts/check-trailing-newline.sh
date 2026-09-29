@@ -12,6 +12,9 @@ for f in $(git ls-files); do
   [ -f "$f" ] || continue
   [ -s "$f" ] || continue
   if git check-attr binary -- "$f" | grep -q 'binary: set'; then continue; fi
+  # Belt and braces: a declared attribute list cannot cover every future
+  # asset, and a NUL byte means the file is binary whatever it is called.
+  if [ "$(LC_ALL=C tr -dc '\000' < "$f" | wc -c)" -gt 0 ]; then continue; fi
   count=$((count + 1))
   if [ "$(tail -c1 "$f" | wc -l)" -ne 1 ]; then
     printf 'missing trailing newline: %s\n' "$f"

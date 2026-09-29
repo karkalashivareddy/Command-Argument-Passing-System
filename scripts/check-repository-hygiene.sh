@@ -43,7 +43,9 @@ done
 # layout at best and a broken path at worst. Repository-relative and generic
 # absolute paths (/usr/bin, /proc) are fine.
 localpaths='[A-Za-z]:\\\\?(Users|home)\\\\|/Users/[a-z]|/home/[a-z][a-z0-9_-]*/(Desktop|Documents|Downloads)|AppData'
-hits=$(git grep -InE "$localpaths" -- . ':!docs/audit' 2>/dev/null || true)
+# This file is excluded because it necessarily contains the very patterns it
+# searches for. Matching its own regex literal is not a leaked path.
+hits=$(git grep -InE "$localpaths" -- . ':!docs/audit' ':!scripts/check-repository-hygiene.sh' 2>/dev/null || true)
 if [ -n "$hits" ]; then
   printf 'FAIL local path references:\n%s\n' "$hits" | head -20 | sed 's/^/  /'
   fail=1

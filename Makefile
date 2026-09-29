@@ -102,6 +102,12 @@ WAIT_OBJS := $(filter-out $(BUILD)/main.o,$(OBJS))
 $(WAIT_HELPER): tests/helpers/wait_probe.c $(WAIT_OBJS) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ tests/helpers/wait_probe.c $(WAIT_OBJS)
 
+# The gateway suite drives the real engine against the status probe, so it
+# needs the helper binaries that only the test targets used to build. Exposed
+# as its own target so a job that runs the suite without `make test` still
+# gets a runnable fixture instead of a session that can never start.
+test-helpers: $(HELPER) $(WAIT_HELPER)
+
 $(BUILD):
 	mkdir -p $(BUILD)
 

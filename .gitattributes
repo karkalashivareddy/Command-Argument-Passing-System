@@ -1,5 +1,15 @@
-# Normalize line endings to LF on checkout for all text files.
-* text=auto eol=lf
-
-# Binary files are never touched by Git's text handling.
+# Binary assets are declared as binary so that git, and the checks that use
+# `git check-attr binary`, never treat them as text. Without this, a PNG is
+# diffed as a wall of bytes and a text-only gate such as the trailing-newline
+# check reports it as a missing final newline.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
 *.docx binary
+*.pptx binary
+*.zip binary
+*.gz binary

@@ -152,8 +152,8 @@ jobs:
           cache: npm
           cache-dependency-path: web/backend/package-lock.json
 
-      - name: Build the C engine and the controlled workloads
-        run: make
+      - name: Build the C engine, the controlled workloads, and the test helpers
+        run: make && make test-helpers
 
       - name: Install the gateway from the lockfile
         working-directory: web/backend
@@ -306,7 +306,7 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
-          language: ${{ matrix.language }}
+          languages: ${{ matrix.language }}
           build-mode: ${{ matrix.language == 'c-cpp' && 'none' || 'autobuild' }}
 
       - name: Perform CodeQL analysis
