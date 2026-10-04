@@ -99,7 +99,22 @@ export default function AnalyticsPage() {
         </div>
         <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
           <ResourceStat label="Syscall I/O rate" value={data.processTelemetry.averageRcharBytesPerSec === null && data.processTelemetry.averageWcharBytesPerSec === null ? "Insufficient telemetry" : `r ${data.processTelemetry.averageRcharBytesPerSec === null ? "—" : formatKibPerSec(data.processTelemetry.averageRcharBytesPerSec)} · w ${data.processTelemetry.averageWcharBytesPerSec === null ? "—" : formatKibPerSec(data.processTelemetry.averageWcharBytesPerSec)}`} detail={data.processTelemetry.ioRateSamples === 0 ? "No derived I/O rate samples; the first sample of every session has no rate by design." : `Characters per second averaged over ${data.processTelemetry.ioRateSamples} DERIVED samples · rchar/wchar include page cache, so this is not disk throughput.`} />
-          <ResourceStat label="Page faults per execution" value={data.processTelemetry.averageMajorFaults === null ? "Insufficient telemetry" : `min ${formatCount(data.processTelemetry.averageMinorFaults ?? 0)} · maj ${formatCount(data.processTelemetry.averageMajorFaults)}`} detail={data.processTelemetry.majorFaultSamples === 0 ? "No valid fault counters collected." : `Averaged over ${data.processTelemetry.majorFaultSamples} samples · worst single sample saw ${formatCount(data.processTelemetry.maxMajorFaults ?? 0)} major faults`} />
+          {/*
+           * Minor and major faults are gated on SEPARATE sample counts. Reading
+           * them as one number made `?? 0` reachable: with two major-fault samples
+           * and one minor-fault sample, the card printed "min 0", a hard zero for
+           * a metric that was never measured. Each half now renders its own
+           * unavailable state with its own count.
+           */}
+          <ResourceStat
+            label="Page faults per execution"
+            value={
+              data.processTelemetry.averageMinorFaults === null && data.processTelemetry.averageMajorFaults === null
+                ? "Insufficient telemetry"
+                : `min ${data.processTelemetry.averageMinorFaults === null ? "—" : formatCount(data.processTelemetry.averageMinorFaults)} · maj ${data.processTelemetry.averageMajorFaults === null ? "—" : formatCount(data.processTelemetry.averageMajorFaults)}`
+            }
+            detail={`Minor from ${data.processTelemetry.minorFaultSamples} sample(s), major from ${data.processTelemetry.majorFaultSamples}. A rate needs two valid samples, and the two counters are counted independently, so either half can be absent on its own.`}
+          />
           <ResourceStat label="Sampling coverage" value={`${data.processTelemetry.sampleCount} snapshots`} detail={`A rate needs two valid samples, so the average CPU rate rests on ${data.processTelemetry.cpuPercentSamples} samples and the I/O rates on ${data.processTelemetry.ioRateSamples}.`} />
         </div>
       </Card>

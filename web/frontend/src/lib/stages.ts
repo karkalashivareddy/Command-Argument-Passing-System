@@ -105,6 +105,17 @@ export function stageForEvent(t: CanonicalEventType): StageId | null {
       return "run";
     case "session.summary":
       return "result";
+    /*
+     * The pipeline envelope belongs to the run phase: it brackets the stages
+     * rather than summarising the session, and PIPELINE_COMPLETED arrives
+     * BEFORE execution.completed, because every stage has been reaped but the
+     * gateway has not yet finalised the record.
+     */
+    case "pipeline.parsed":
+      return "parse";
+    case "pipeline.started":
+    case "pipeline.completed":
+      return "run";
     case "signal.received":
       return "wait";
     default:
@@ -132,6 +143,14 @@ export const EVENT_LABELS: Record<CanonicalEventType, string> = {
   "execution.cancelled": "CANCELLED",
   "signal.received": "SIGNAL RECEIVED",
   "session.summary": "SESSION SUMMARY",
+  /*
+   * The pipeline envelope, rendered with the same words the engine uses so a
+   * reader can match an event in the raw stream against one in the UI without
+   * translating.
+   */
+  "pipeline.parsed": "PIPELINE PARSED",
+  "pipeline.started": "PIPELINE STARTED",
+  "pipeline.completed": "PIPELINE COMPLETED",
 };
 
 export const STATUS_META: Record<SessionStatus, { label: string; tone: "neutral" | "active" | "success" | "danger" | "warn" }> = {

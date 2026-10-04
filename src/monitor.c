@@ -121,6 +121,12 @@ static const char *event_name(caps_event_type_t type)
         return "PARSED";
     case CAPS_EVENT_COMMAND_PARSE_ERROR:
         return "COMMAND_PARSE_ERROR";
+    case CAPS_EVENT_PIPELINE_PARSED:
+        return "PIPELINE_PARSED";
+    case CAPS_EVENT_PIPELINE_STARTED:
+        return "PIPELINE_STARTED";
+    case CAPS_EVENT_PIPELINE_COMPLETED:
+        return "PIPELINE_COMPLETED";
     case CAPS_EVENT_REDIRECTION_OPENED:
         return "REDIRECTION_OPENED";
     case CAPS_EVENT_REDIRECTION_FAILED:
@@ -223,6 +229,47 @@ static void emit_json(caps_monitor_t *mon, const caps_event_t *ev)
 
     switch (ev->type) {
     case CAPS_EVENT_COMMAND_RECEIVED:
+        {
+            /*
+             * The line exactly as the operator typed it, bounded.
+             *
+             * The raw line is the honest record of the request -- it is what the
+             * user asked for, before any lexing -- but the engine accepts a line
+             * up to `maxLineBytes`, so emitting it verbatim would put a 64 KB
+             * event into an SSE frame and a SQLite row. Bounded, with the
+             * truncation declared, because a silently shortened request would be
+             * a record that disagrees with what was typed and nothing would say
+             * so.
+             */
+            enum { LINE_BUDGET = 400 };
+            const char *text = ev->command ? ev->command : "";
+            size_t len = strlen(text);
+            int truncated = len > LINE_BUDGET;
+            fprintf(mon->out, "{\"event\":\"%s\",\"time\":\"%s\",\"command\":",
+                    event_name(ev->type), wall);
+            if (!truncated) {
+                json_escape(mon->out, text);
+            } else {
+                /*
+                 * Cut on a byte boundary, then walk back to the nearest space so
+                 * the record ends on a whole token. Ending mid-word would read
+                 * as a shorter argument than the one typed.
+                 */
+                size_t cut = LINE_BUDGET;
+                while (cut > 0 && text[cut - 1] != ' ')
+                    cut--;
+                char head[LINE_BUDGET + 1];
+                memcpy(head, text, cut);
+                head[cut] = '\0';
+                json_escape(mon->out, head);
+                fputs("...", mon->out);
+            }
+            if (truncated) {
+                fprintf(mon->out, ",\"command_truncated\":true,\"command_bytes_total\":%zu", len);
+            }
+            fputs("}\n", mon->out);
+        }
+        break;
     case CAPS_EVENT_PARSED:
     case CAPS_EVENT_COMMAND_PARSE_ERROR:
     case CAPS_EVENT_REDIRECTION_OPENED:
@@ -233,26 +280,121 @@ static void emit_json(caps_monitor_t *mon, const caps_event_t *ev)
         fputs("}\n", mon->out);
         break;
     case CAPS_EVENT_PROCESS_STARTED:
+        /*
+         * stage_index and stage_count are emitted for every process, and a
+         * single command reports stage 0 of 1.  A pipeline reader needs them to
+         * know which of several processes an event refers to; a single-command
+         * reader needs them to know that there is only one.  Emitting them
+         * unconditionally means no consumer has to infer "was this a
+         * pipeline?" from the absence of a field, and it keeps the rule
+         * `0 <= stage < stages` true for every event.
+         */
         fprintf(mon->out,
-                "{\"event\":\"%s\",\"time\":\"%s\",\"pid\":%ld,\"command\":",
-                event_name(ev->type), wall, (long)ev->pid);
+                "{\"event\":\"%s\",\"time\":\"%s\",\"pid\":%ld,"
+                "\"pgid\":%ld,\"stage\":%d,\"stages\":%d,\"command\":",
+                event_name(ev->type), wall, (long)ev->pid, (long)ev->pgid,
+                ev->stage_index, ev->stage_count);
         json_escape(mon->out, ev->command ? ev->command : "");
+        /*
+         * The argv elements, emitted alongside the joined label.
+         *
+         * The label alone is lossy: an element containing a space and two
+         * elements that do not both render as the same text, so a consumer
+         * wanting the real argv would have to split the string again. That is a
+         * second lexer, and two lexers eventually disagree about one quoting
+         * case -- always in the unsafe direction, where the reader is told what
+         * ran and it is wrong.
+         */
+        if (ev->argv != NULL && ev->argv_count > 0) {
+            /*
+             * The argv elements, emitted alongside the joined label.
+             *
+             * Bounded, because this stream feeds SSE frames and SQLite rows and
+             * a single 2 KB argument would otherwise produce a 2 KB event line.
+             * The bound is 400 bytes of escaped content plus the JSON framing,
+             * which keeps an event comfortably under the 600-byte ceiling the
+             * monitor suite enforces.
+             *
+             * Truncation is EXPLICIT. A silently shortened argv would be a
+             * record that disagrees with what ran, and a reader would have no
+             * way to know. So when elements are dropped, `argv_truncated` says
+             * so and `argv_bytes_recorded` says how much of the real vector
+             * survived.
+             *
+             * argv[0] is always emitted whatever the budget, because it is the
+             * element that identifies which program ran. A record that kept
+             * only arguments but dropped the command name would be the worst
+             * possible truncation.
+             */
+            enum { ARGV_BUDGET = 400 };
+            size_t used = 0;
+            int emitted = 0;
+            int dropped = 0;
+            fputs(",\"argv\":[", mon->out);
+            for (int i = 0; i < ev->argv_count; i++) {
+                const char *element = ev->argv[i] ? ev->argv[i] : "";
+                size_t need = strlen(element) + 3; /* two quotes and a comma */
+                if (i > 0 && used + need > ARGV_BUDGET) {
+                    dropped = ev->argv_count - emitted;
+                    break;
+                }
+                if (i > 0)
+                    fputc(',', mon->out);
+                /* json_escape emits the element WITH its surrounding quotes and
+                 * escapes the contents. Adding quotes around it here doubled
+                 * them and made every event unparseable, which is why this line
+                 * reads as a bare call. */
+                json_escape(mon->out, element);
+                used += need;
+                emitted++;
+            }
+            fputc(']', mon->out);
+            if (dropped > 0) {
+                fprintf(mon->out,
+                        ",\"argv_truncated\":true,\"argv_elements_dropped\":%d,"
+                        "\"argv_elements_total\":%d",
+                        dropped, ev->argv_count);
+            }
+        }
         fputs("}\n", mon->out);
         break;
     case CAPS_EVENT_PROCESS_EXITED:
         fprintf(mon->out,
-                "{\"event\":\"%s\",\"time\":\"%s\",\"pid\":%ld,\"exit_code\":"
-                "%d,\"duration_ms\":%lld,\"outcome\":\"%s\",\"command\":",
-                event_name(ev->type), wall, (long)ev->pid, ev->status,
+                "{\"event\":\"%s\",\"time\":\"%s\",\"pid\":%ld,"
+                "\"pgid\":%ld,\"stage\":%d,\"stages\":%d,"
+                "\"exit_code\":%d,\"duration_ms\":%lld,\"outcome\":\"%s\","
+                "\"command\":",
+                event_name(ev->type), wall, (long)ev->pid, (long)ev->pgid,
+                ev->stage_index, ev->stage_count, ev->status,
                 ev->duration_ms, outcome_name(ev->outcome));
+        json_escape(mon->out, ev->command ? ev->command : "");
+        fputs("}\n", mon->out);
+        break;
+    case CAPS_EVENT_PIPELINE_PARSED:
+    case CAPS_EVENT_PIPELINE_STARTED:
+    case CAPS_EVENT_PIPELINE_COMPLETED:
+        /*
+         * The pipeline envelope.  PIPELINE_STARTED carries the process group
+         * that later stages join, so the whole pipeline is addressable as one
+         * unit; PIPELINE_COMPLETED carries the pipeline's own outcome, which is
+         * the LAST stage's, while every stage keeps its own separate events.
+         */
+        fprintf(mon->out,
+                "{\"event\":\"%s\",\"time\":\"%s\",\"pid\":%ld,"
+                "\"pgid\":%ld,\"stage\":%d,\"stages\":%d,\"outcome\":\"%s\","
+                "\"command\":",
+                event_name(ev->type), wall, (long)ev->pid, (long)ev->pgid,
+                ev->stage_index, ev->stage_count, outcome_name(ev->outcome));
         json_escape(mon->out, ev->command ? ev->command : "");
         fputs("}\n", mon->out);
         break;
     case CAPS_EVENT_SIGNAL_RECEIVED:
         fprintf(mon->out,
-                "{\"event\":\"%s\",\"time\":\"%s\",\"pid\":%ld,\"signal\":%d,"
+                "{\"event\":\"%s\",\"time\":\"%s\",\"pid\":%ld,"
+                "\"pgid\":%ld,\"stage\":%d,\"stages\":%d,\"signal\":%d,"
                 "\"outcome\":\"%s\",\"command\":",
-                event_name(ev->type), wall, (long)ev->pid, ev->status,
+                event_name(ev->type), wall, (long)ev->pid, (long)ev->pgid,
+                ev->stage_index, ev->stage_count, ev->status,
                 outcome_name(ev->outcome));
         json_escape(mon->out, ev->command ? ev->command : "");
         fputs("}\n", mon->out);
@@ -342,6 +484,23 @@ void caps_monitor_emit(caps_monitor_t *mon, const caps_event_t *ev)
         emit_json(mon, ev);
     else
         emit_terminal(mon, ev);
+
+    /*
+     * Flush after EVERY event.
+     *
+     * This is what makes the monitor a stream rather than a report. An event
+     * that sits in a stdio buffer is not observable: a gateway reading this
+     * stream sees nothing until the buffer fills or the process exits, so a
+     * PROCESS_STARTED for a long-running workload does not appear until the
+     * workload is over. That is fatal for a live observatory, and it is not
+     * merely a latency problem -- a consumer that cannot see the start cannot
+     * observe the process while it exists, which is the only time there is
+     * anything to observe.
+     *
+     * The flush is per-event rather than per-line because one event is one line
+     * and the two coincide.
+     */
+    fflush(mon->out);
 }
 
 /*

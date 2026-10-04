@@ -32,6 +32,8 @@ import {
  *  I12 an execution reported as successful has a positive process.exited
  *      (the "summary is not proof of success" rule, checked structurally)
  *  I13 no event carries a corrupt payload that is being read as valid
+ *  I14 a pipeline that reported completion accounted for every stage it declared,
+ *      and no event claims a stage index outside the pipeline it belongs to
  */
 
 export type InvariantId =
@@ -47,7 +49,8 @@ export type InvariantId =
   | "I10-terminal-present-when-finalized"
   | "I11-no-orphan-process-lifecycle"
   | "I12-success-has-process-exit"
-  | "I13-payload-not-corrupt";
+  | "I13-payload-not-corrupt"
+  | "I14-pipeline-stages-accounted";
 
 export type Severity = "error" | "warning";
 
@@ -230,13 +233,92 @@ export function validateEventStream(events: CanonicalEvent[], options: ValidateO
   }
 
   // ---- I11 orphan process lifecycle ---------------------------------------
-  const startedPids = new Set<number>();
+  /*
+   * Keyed on (pid, stage), not pid alone.
+   *
+   * A PID uniquely identifies a process at any instant, but a pipeline has
+   * several processes and the reader's question is "which one is this event
+   * about?". Keying on the pair means an event that claims stage 2 for a pid
+   * whose only `process.started` was stage 1 is reported as an orphan, which is
+   * the corruption it actually is. For a single command the stage is -1 on
+   * every event, so the pair degenerates to the pid and behaves exactly as
+   * before.
+   */
+  const startedProcesses = new Set<string>();
   for (const e of stream) {
-    if (e.type === "process.started" && typeof e.pid === "number") startedPids.add(e.pid);
-    if (LIFECYCLE_TYPES.includes(e.type) && typeof e.pid === "number" && !startedPids.has(e.pid)) {
+    const stage = typeof e.payload["stage"] === "number" ? e.payload["stage"] : -1;
+    const key = typeof e.pid === "number" ? `${e.pid}@${stage}` : null;
+    if (e.type === "process.started" && key !== null) startedProcesses.add(key);
+    if (LIFECYCLE_TYPES.includes(e.type) && key !== null && !startedProcesses.has(key)) {
       violations.push(
-        violation("I11-no-orphan-process-lifecycle", `${e.type} for pid ${e.pid} has no preceding process.started`, [e]),
+        violation(
+          "I11-no-orphan-process-lifecycle",
+          `${e.type} for pid ${e.pid} stage ${stage} has no preceding process.started for the same pid and stage`,
+          [e],
+        ),
       );
+    }
+  }
+
+  // ---- I14 pipeline envelope ------------------------------------------------
+  /*
+   * If the stream says a pipeline completed, every stage it declared must have
+   * a terminal event of its own.
+   *
+   * Without this, a truncated stream could report `pipeline.completed` with
+   * two of three stages' exits missing, and every consumer that trusts the
+   * envelope would conclude the third process finished cleanly. This is the
+   * invariant that makes the envelope evidence rather than decoration.
+   */
+  const pipelineCompleted = stream.find((e) => e.type === "pipeline.completed");
+  if (pipelineCompleted !== undefined) {
+    const declared =
+      typeof pipelineCompleted.payload["stages"] === "number" ? (pipelineCompleted.payload["stages"] as number) : 0;
+    if (declared > 0) {
+      const terminated = new Set<number>();
+      for (const e of stream) {
+        if (typeof e.payload["stage"] === "number" && LIFECYCLE_TYPES.includes(e.type)) {
+          terminated.add(e.payload["stage"] as number);
+        }
+      }
+      for (let stage = 0; stage < declared; stage += 1) {
+        if (!terminated.has(stage)) {
+          violations.push(
+            violation(
+              "I14-pipeline-stages-accounted",
+              `pipeline.completed declares ${declared} stage(s) but stage ${stage} has no ${LIFECYCLE_TYPES.join("/")} event`,
+              [pipelineCompleted],
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  /*
+   * The stages a stream declares must agree with itself. A process.started
+   * claiming stage 5 of a 2-stage pipeline is a malformed record, and
+   * accepting it would put a node in the 3D view that no pipeline could have
+   * produced.
+   */
+  const declaredStages = stream.reduce<number | null>((acc, e) => {
+    const n = e.payload["stages"];
+    if (typeof n !== "number") return acc;
+    return acc === null ? n : Math.max(acc, n);
+  }, null);
+  if (declaredStages !== null && declaredStages > 0) {
+    for (const e of stream) {
+      const stage = e.payload["stage"];
+      if (typeof stage !== "number") continue;
+      if (stage < -1 || stage >= declaredStages) {
+        violations.push(
+          violation(
+            "I14-pipeline-stages-accounted",
+            `${e.type} claims stage ${stage} in a pipeline declaring ${declaredStages} stage(s)`,
+            [e],
+          ),
+        );
+      }
     }
   }
 

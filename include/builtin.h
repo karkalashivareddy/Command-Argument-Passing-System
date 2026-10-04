@@ -24,4 +24,15 @@ builtin_result_t builtin_run(int argc, char *const argv[], int last_status,
 
 void builtin_print_help(void);
 
+/*
+ * True when `name` is a CAPS built-in rather than an external command.
+ *
+ * Needed because the REPL now routes every line through the pipeline parser
+ * first, and a built-in must not reach fork(): `exit` has to end the session
+ * in-process, and `cd` has to change CAPS's own working directory.  Asking
+ * here rather than letting builtin_run() discover it keeps the decision
+ * explicit at the call site.
+ */
+int builtin_is_builtin(const char *name);
+
 #endif /* CAPS_BUILTIN_H */

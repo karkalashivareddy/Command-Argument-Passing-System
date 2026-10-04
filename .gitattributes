@@ -1,3 +1,17 @@
+# Every text file is stored with LF endings and checked out with LF endings.
+#
+# This is stated here rather than left to `core.autocrlf` because that setting is
+# per-machine, and the repository has already been bitten by the difference:
+# `core.autocrlf` is true in the Windows git config and unset in the WSL one, so
+# staging the same working tree from the two machines produced CRLF in the index
+# from one and LF from the other. `git diff --check` then reported every line of
+# the affected files as trailing whitespace, which is how five files reached a
+# commit that the hygiene gate would have rejected.
+#
+# `text=auto` lets git detect binary content on its own; the explicit `binary`
+# rules below still take precedence over it, because they come later.
+* text=auto eol=lf
+
 # Binary assets are declared as binary so that git, and the checks that use
 # `git check-attr binary`, never treat them as text. Without this, a PNG is
 # diffed as a wall of bytes and a text-only gate such as the trailing-newline

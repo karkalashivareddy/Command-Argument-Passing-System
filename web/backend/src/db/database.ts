@@ -21,7 +21,7 @@ import { logger } from "../utils/logger.js";
  *     reader would misinterpret.
  */
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export interface Migration {
   readonly id: number;
@@ -113,6 +113,132 @@ const MIGRATIONS: readonly Migration[] = [
         -- Retention sweeps order by creation time; without this every sweep
         -- is a full scan of the sessions table.
         CREATE INDEX IF NOT EXISTS idx_sessions_created_sweep ON sessions(created_at);
+      `);
+    },
+  },
+  {
+    id: 4,
+    name: "host-observability-telemetry",
+    up: (db) => {
+      /*
+       * Host telemetry is stored in its own tables rather than as more event
+       * types on `events`, for two reasons.
+       *
+       * First, the shapes are different. `events` is a per-session log with a
+       * contiguous sequence and thirteen structural invariants; a host sample
+       * is a single wide observation with no session and no lifecycle, and
+       * forcing it into that table would mean lying about both.
+       *
+       * Second, and more practically: the two have opposite retention needs.
+       * Execution records are few and individually interesting, so they are
+       * kept. Host samples are produced every second and are only useful in
+       * aggregate and as a bounded recent window, so they are swept on a much
+       * shorter life. Keeping them in one table would force a single retention
+       * policy on two incompatible workloads.
+       *
+       * `boot_id` is part of the identity of every row. Cumulative kernel
+       * counters reset at boot, so a sample from a previous boot cannot be
+       * differenced against one from the current boot, and a query that mixed
+       * them would produce a rate that is a reboot artefact.
+       */
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS system_snapshots (
+          sequence        INTEGER PRIMARY KEY,
+          timestamp       TEXT    NOT NULL,
+          boot_id         TEXT    NOT NULL,
+          machine_id      TEXT,
+          kernel          TEXT,
+          logical_cpus    INTEGER,
+          total_memory_bytes INTEGER,
+          -- The full typed snapshot. Analytics read the promoted columns
+          -- below; the JSON is the authoritative record and is what replay
+          -- serves, so a column that is later added does not invalidate it.
+          payload         TEXT    NOT NULL,
+          -- Promoted scalars, so an aggregate is an index scan rather than a
+          -- json_extract over every row.
+          cpu_busy_percent        REAL,
+          cpu_idle_percent        REAL,
+          cpu_iowait_percent      REAL,
+          cpu_user_percent        REAL,
+          cpu_system_percent      REAL,
+          cpu_steal_percent       REAL,
+          memory_total_bytes      INTEGER,
+          memory_used_bytes       INTEGER,
+          memory_available_bytes  INTEGER,
+          memory_used_percent     REAL,
+          swap_used_bytes         INTEGER,
+          swap_percent            REAL,
+          load1                   REAL,
+          load5                   REAL,
+          load15                  REAL,
+          thermal_highest_celsius REAL,
+          psi_cpu_some_avg10      REAL,
+          psi_memory_some_avg10   REAL,
+          psi_io_some_avg10       REAL,
+          disk_read_bytes_per_sec  REAL,
+          disk_write_bytes_per_sec REAL,
+          network_rx_bytes_per_sec REAL,
+          network_tx_bytes_per_sec REAL,
+          process_total            INTEGER,
+          process_running          INTEGER,
+          process_zombie           INTEGER,
+          -- How many fields in this snapshot were UNAVAILABLE. Retained
+          -- explicitly so an aggregate can report a missing-data ratio
+          -- instead of silently averaging over a smaller, unknown subset.
+          fields_unavailable       INTEGER,
+          collection_ms            INTEGER
+        );
+
+        -- Retention sweeps and any per-metric time range query.
+        CREATE INDEX IF NOT EXISTS idx_system_snapshots_time
+          ON system_snapshots(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_system_snapshots_boot
+          ON system_snapshots(boot_id, timestamp);
+        -- The dashboard queries a single metric across a window; these make
+        -- that an index range scan instead of a table scan.
+        CREATE INDEX IF NOT EXISTS idx_system_snapshots_cpu
+          ON system_snapshots(timestamp, cpu_busy_percent);
+        CREATE INDEX IF NOT EXISTS idx_system_snapshots_memory
+          ON system_snapshots(timestamp, memory_used_percent);
+        CREATE INDEX IF NOT EXISTS idx_system_snapshots_thermal
+          ON system_snapshots(timestamp, thermal_highest_celsius);
+
+        -- Per-process host rows. One row per (snapshot, process identity).
+        -- The identity is the (pid, start_ticks, boot) tuple, not the pid, so
+        -- a recycled PID is a different row rather than a corrupted one.
+        CREATE TABLE IF NOT EXISTS system_process_snapshots (
+          snapshot_sequence INTEGER NOT NULL,
+          pid               INTEGER NOT NULL,
+          start_ticks       INTEGER,
+          boot_id           TEXT    NOT NULL,
+          identity_key      TEXT    NOT NULL,
+          row_state         TEXT    NOT NULL,
+          sampled           INTEGER NOT NULL DEFAULT 0,
+          name              TEXT,
+          state_letter      TEXT,
+          ppid              INTEGER,
+          process_group_id  INTEGER,
+          session_id        INTEGER,
+          threads           INTEGER,
+          cpu_time_ms       REAL,
+          cpu_percent       REAL,
+          rss_bytes         INTEGER,
+          pss_bytes         INTEGER,
+          virtual_memory_bytes INTEGER,
+          swap_bytes        INTEGER,
+          major_faults      INTEGER,
+          minor_faults      INTEGER,
+          read_bytes        INTEGER,
+          write_bytes       INTEGER,
+          fields_unavailable INTEGER,
+          payload           TEXT    NOT NULL,
+          PRIMARY KEY (snapshot_sequence, identity_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_system_process_identity
+          ON system_process_snapshots(identity_key, snapshot_sequence);
+        CREATE INDEX IF NOT EXISTS idx_system_process_pid
+          ON system_process_snapshots(pid, snapshot_sequence);
       `);
     },
   },

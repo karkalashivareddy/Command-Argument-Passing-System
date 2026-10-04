@@ -10,11 +10,14 @@ import {
   FlaskConical,
   GitCompareArrows,
   History,
+  Network,
   Play,
   Radio,
   Rows3,
+  ServerCog,
   Settings,
   Signal,
+  SquareTerminal,
   Terminal,
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
@@ -38,8 +41,15 @@ const GROUPS: NavGroup[] = [
     title: "Execute",
     items: [
       { to: "/", label: "Overview", icon: Eye, end: true },
+      // The catalog-backed terminal. "Execute" is the older structured session
+      // form and is kept, because the two surfaces are genuinely different:
+      // this one asks the catalog what this host can run, that one posts an
+      // argv vector directly.
+      { to: "/terminal", label: "Terminal", icon: SquareTerminal },
       { to: "/execute", label: "Execute", icon: Terminal },
       { to: "/processes", label: "Processes", icon: Activity },
+      { to: "/processes/explorer", label: "Host explorer", icon: Network },
+      { to: "/system", label: "System", icon: ServerCog },
       { to: "/playground", label: "Playground", icon: FlaskConical },
     ],
   },

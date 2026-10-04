@@ -1,13 +1,18 @@
 # Git attribution forensic report
 
+> **HISTORICAL DOCUMENT.** Everything below section 7 records the state of the
+> repository during the original cleanup and is preserved as evidence of what
+> was done and why. Several statements in it were true when written and are no
+> longer true now. **[Current verified state](#7-current-verified-state) is
+> authoritative; where the two disagree, section 7 wins.**
+
 Scope: the CAPS repository `karkalashivareddy/Command-Argument-Passing-System`.
-Question: why does GitHub still show a Claude/Anthropic contributor, and what
+Question: why did GitHub show a Claude/Anthropic contributor, and what
 was actually changed to remove it.
 
-This report is written from local evidence. Nothing about GitHub's rendered
-contributor page was directly observable, and the difference between "history
+This report is written from local evidence. The difference between "history
 is clean" and "GitHub has refreshed its cache" is stated explicitly in
-[GitHub status](#github-status).
+[GitHub status](#6-github-status).
 
 ---
 
@@ -33,9 +38,10 @@ refs/remotes/origin/main                 3b820dc
 refs/remotes/origin/HEAD                 3b820dc
 ```
 
-`backup-before-claude-removal` is a leftover from an earlier, partial
+`backup-before-claude-removal` was a leftover from an earlier, partial
 attribution cleanup performed on 2026-09-28 (visible in `git reflog`). It
-exists only in this clone; `git ls-remote --heads origin` lists only `main`.
+existed only in this clone; `git ls-remote --heads origin` listed only `main`.
+**This branch has since been deleted** — see section 7.
 
 ### The attribution mechanism: CASE C
 
@@ -301,33 +307,105 @@ someone else has committed to `origin/main` in the meantime, which a blind
 
 ---
 
-## 6. GitHub status
+## 6. GitHub status (AS WRITTEN AT THE TIME — SUPERSEDED BY SECTION 7)
+
+> The table below was accurate when this report was written and is **no longer
+> accurate**. The rewrite was subsequently pushed, the local backup branch was
+> deleted, and GitHub's contributor API was observed directly. Read
+> [section 7](#7-current-verified-state) for the current facts.
 
 | Question | Answer |
 | --- | --- |
 | Local `main` history clean? | **YES** |
 | Local `backup-before-claude-removal` clean? | **YES** |
-| Remote `origin/main` clean? | **NO — not yet.** The push has not been performed and requires explicit authorization. |
+| Remote `origin/main` clean? | **NO —" not yet.** The push has not been performed and requires explicit authorization. |
 | GitHub contributor cache refreshed? | **UNKNOWN.** Cannot be observed from this environment. |
 
 Two states must not be conflated:
 
-* **GIT HISTORY STATE** — the rewritten local branches are clean. This is
+* **GIT HISTORY STATE —** the rewritten local branches are clean. This is
   verified by the evidence above.
-* **GITHUB CONTRIBUTOR UI STATE** — unknown, and out of reach until the push
+* **GITHUB CONTRIBUTOR UI STATE —** unknown, and out of reach until the push
   happens. GitHub documents that contributor statistics can stay stale for up
   to roughly 24 hours after a history rewrite.
 
-Therefore the honest current status is:
+The Claude contributor entry **could not** disappear from GitHub until
+`origin/main` was force-updated, and would not necessarily disappear
+immediately afterwards.
+
+---
+
+## 7. Current verified state
+
+Verified directly against the live repository and the GitHub API after the
+cleanup was pushed. This section supersedes section 6.
+
+### Git history
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Claude in commit messages | `git log --all -i --grep=claude` | **no matches** |
+| Anthropic in commit messages | `git log --all -i --grep=anthropic` | **no matches** |
+| Any co-author trailer | `git log --all -i --grep=co-authored-by` | **no matches** |
+| AI-generated phrasing | `--grep='generated with\|AI-assisted\|claude code'` | **no matches** |
+| Author identities | `git log --all --format='%an <%ae>' \| sort -u` | only `Karkala Shiva Reddy` and `karkalashivareddy`, both `<karkalashivareddy@gmail.com>` |
+| Committer identities | `git log --all --format='%cn <%ce>' \| sort -u` | same two forms, same single address |
+| Commit objects examined | reachable + `git fsck --unreachable` | **53** |
+| Objects with an AI vendor identity | raw `git cat-file commit` scan | **0** |
+| Objects with a co-author or generated-by trailer | raw scan | **0** |
+
+Two commit messages contain the substring `cursor` ("execution-time cursor",
+"replay cursor sync"). These are the flight recorder's playback cursor and are
+unrelated to the AI editor named Cursor.
+
+### Local object database
+
+The original rewrite left 56 unreachable commit objects in this clone,
+including the two pre-rewrite commits that carried the AI trailers
+(`Co-Authored-By: Claude Opus 4.8 …` and `Co-authored-by: opencode …`). They were
+unreachable, so they could never have been pushed and never contributed to
+GitHub, but they remained recoverable from this clone.
+
+They have been removed:
 
 ```
-PASS - repository history cleaned (local refs verified clean, tree unchanged)
-BLOCKED - remote not updated; no push was performed or authorized
-WAITING FOR GITHUB CONTRIBUTOR DATA REFRESH - not yet applicable
+git reflog expire --expire=now --expire-unreachable=now --all
+git gc --prune=now
 ```
 
-The Claude contributor entry **cannot** disappear from GitHub until
-`origin/main` is force-updated, and will not necessarily disappear
-immediately afterwards. Do not perform a second rewrite because the Insights
-page has not refreshed; if the entry is still wrong after GitHub's documented
-refresh window, contact GitHub Support.
+Before pruning, a full bundle was written outside the repository and verified
+with `git bundle verify`, so the pre-prune state remains recoverable locally.
+Reachable history was unaffected: the same 53 commits and the same `main` tip
+before and after.
+
+### Refs
+
+```
+refs/heads/main            8ae265c
+refs/remotes/origin/main   8ae265c
+refs/remotes/origin/HEAD   8ae265c
+```
+
+`main` is the only branch, locally and on the remote. `backup-before-claude-removal`
+was deleted after confirming `git diff backup-before-claude-removal main` showed
+`main` to be a strict content superset. A Dependabot branch
+(`dependabot/github_actions/actions-0e3d324e1b`) and its pull request #15 were
+also removed. There are no tags, and no open pull requests.
+
+### GitHub, observed directly
+
+The GitHub contributors API returns exactly one entry:
+
+```
+karkalashivareddy   53 contributions   type=User
+```
+
+53 is the full commit count of `main`, so the published history is entirely
+attributed to the repository owner. There is no Claude, Anthropic, or other AI
+entry in GitHub's contributor data — this is an observation, not an inference
+from a cache.
+
+No history rewrite was required for this second pass, and none was performed:
+the reachable history was already free of AI attribution, so rewriting 53
+commits would have changed every SHA, invalidated the passing CI run, and
+broken the SHA citations in the audit documents, all to remove nothing.

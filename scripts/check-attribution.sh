@@ -26,15 +26,38 @@ checked=0
 
 # AI identities that must never appear as author, committer, or co-author.
 # Matched case-insensitively against the full "Name <email>" identity.
+#
+# The deny list is deliberately restricted to identities that are *evidence of
+# AI authorship*.  An earlier version of this script also rejected any address
+# containing "noreply.github.com" or "users.noreply.github.com", on the theory
+# that a noreply address looked machine-made.  That is wrong: GitHub issues
+# `ID+USERNAME@users.noreply.github.com` to every human who enables "Keep my
+# email addresses private", and it is the canonical address of bots including
+# Dependabot itself.  The check therefore failed PR #15
+# (dependabot/github_actions/actions-0e3d324e1b) on a commit authored by
+# `dependabot[bot] <...@users.noreply.github.com>`, and would have rejected any
+# legitimate privacy-preserving human co-author as well.
+#
+# Noreply addresses are now allowed.  Only these specific identities fail:
 identity_is_ai() {
   _who=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  # Vendors and products.  These are specific enough that a real person's
+  # name would have to contain the product name verbatim to collide.
   case "$_who" in
-    *claude* | *anthropic* | *opencode* | *copilot* | *gpt-* | *gemini*)
+    *claude* | *anthropic* | *opencode* | *copilot* | *cursor* | *windsurf* | *devin* | *aider* | *gemini* | *codeium* | *tabnine*)
       return 0
       ;;
   esac
+  # OpenAI-style author strings, e.g. "gpt-4" / "GPT-4o" in a bot name.
   case "$_who" in
-    *@anthropic.com* | *@opencode.ai* | *@noreply.github.com* | *users.noreply.github.com*)
+    *gpt-3* | *gpt-4* | *gpt-5* | *"openai"* | *chatgpt*)
+      return 0
+      ;;
+  esac
+  # AI-specific email domains.  `anthropic.com` and `openai.com` are only ever
+  # present on an AI identity; no GitHub-hosted human identity uses them.
+  case "$_who" in
+    *@anthropic.com* | *@openai.com* | *@opencode.ai* | *@copilot.*)
       return 0
       ;;
   esac

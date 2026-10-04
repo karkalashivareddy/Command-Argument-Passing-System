@@ -2,66 +2,36 @@ import { accessSync, constants, existsSync, lstatSync, realpathSync } from "node
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import type { CapsConfig } from "../config/env.js";
-import { repoRoot } from "../config/env.js";
-import { isWorkloadId, probeWorkload, workloadExecutablePath, workloadIds } from "../execution/workloadCatalog.js";
+import { probeCommand, catalogNames, resetCatalogProbes, verifyExecutableFile } from "../catalog/commands.js";
 import { logger } from "../utils/logger.js";
 
-/**
- * Web-facing command allowlist and executable resolution.
- *
+/*
  * THE TRUST BOUNDARY
  * ------------------
- * The browser may name a command.  It may never name a path, and it may
- * never influence which file is executed.  Every approved command is
- * therefore resolved, once, to an absolute path that this process has
- * verified, and that absolute path is what the engine is asked to exec.
+ * The browser may name a command.  It may never name a path, and it may never
+ * influence which file is executed.  Every approved command is resolved, once,
+ * to an absolute path that this process has verified, and that absolute path is
+ * what the engine is asked to exec.
  *
  * The previous behaviour passed the bare allowlist *name* through to
- * `execvp()`, which re-resolved it against `PATH` at exec time.  That made
- * the gateway's own `access(X_OK)` probe meaningless: a different file at the
+ * `execvp()`, which re-resolved it against `PATH` at exec time.  That made the
+ * gateway's own `access(X_OK)` probe meaningless: a different file at the
  * front of `PATH` would be executed while the gateway reported the probed
  * path.  `PATH` is no longer consulted for any allowlisted command.
- */
-
-/**
- * Commands that are not repository artefacts, so they are resolved once at
- * startup from a controlled search path and then frozen.
  *
- * Shells are deliberately absent: `sh -c` would turn an argv allowlist into
- * arbitrary command execution even though spawn() uses shell:false.
+ * WHERE THE ALLOWLIST LIVES
+ * -------------------------
+ * The set of permitted commands, their argument rules, and their workspace
+ * policy are stated in exactly one place: `src/catalog/commands.ts`.  This
+ * module owns the *path* policy and delegates the command decision to the
+ * catalog.  Two lists would inevitably disagree, and that disagreement would be
+ * a security bug rather than a cosmetic one.
  */
-const SYSTEM_CMDS: readonly string[] = ["echo", "printf", "sleep", "true", "false", "pwd", "cat", "uname"];
-
-/**
- * Directories searched exactly once, in order, when pinning a system command.
- * Each candidate is verified with the same rules as a repository helper, so
- * the only thing this list changes is *where* the trust is taken from.
- */
-const TRUSTED_BIN_DIRS: readonly string[] = [
-  "/usr/bin",
-  "/bin",
-  "/usr/local/bin",
-];
-
-/** Repository-relative helpers built by `make`. */
-const REPO_HELPERS: Record<string, string> = {
-  status_probe: resolve(repoRoot, "build", "status_probe"),
-};
 
 export type Resolution =
   | { ok: true; path: string }
   | { ok: false; reason: string };
 
-/**
- * Verify one candidate path and return its canonical form.
- *
- * `realpath` first so the returned path cannot be re-pointed through a
- * symlinked parent; then `lstat` on the *resolved* path so the final
- * component is known to be a regular file rather than a device, FIFO, or
- * directory.  A symlinked binary is refused rather than followed: the whole
- * point of pinning is that the bytes at the path cannot change underneath
- * the recorded evidence.
- */
 export function validateArgVector(command: string, args: string[]): void {
   if (command.length === 0 || command.length > 256) throw new RedirectionPolicyError("invalid command name");
   if (args.length > 512) throw new RedirectionPolicyError("too many arguments");
@@ -72,100 +42,52 @@ export function validateArgVector(command: string, args: string[]): void {
   }
 }
 
-export function verifyExecutable(candidate: string): Resolution {
-  let real: string;
-  try {
-    real = realpathSync(candidate);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code ?? "UNKNOWN";
-    if (code === "ENOENT") return { ok: false, reason: "not found (run: make)" };
-    if (code === "EACCES") return { ok: false, reason: "permission denied" };
-    return { ok: false, reason: `cannot resolve (${code})` };
-  }
-
-  let info;
-  try {
-    info = lstatSync(real);
-  } catch (err) {
-    return { ok: false, reason: `cannot stat (${(err as NodeJS.ErrnoException).code ?? "UNKNOWN"})` };
-  }
-  if (info.isSymbolicLink()) {
-    return { ok: false, reason: "resolves to a symbolic link" };
-  }
-  if (!info.isFile()) {
-    return { ok: false, reason: "not a regular file" };
-  }
-  try {
-    accessSync(real, constants.X_OK);
-  } catch {
-    return { ok: false, reason: "not executable" };
-  }
-  return { ok: true, path: real };
-}
-
-const accessCache = new Map<string, Resolution>();
-
-/** Verify and memoise, so a missing helper is not re-probed on every request. */
-function resolveOnce(name: string, candidate: string): Resolution {
-  const cached = accessCache.get(name);
-  if (cached !== undefined) return cached;
-  const result = verifyExecutable(candidate);
-  accessCache.set(name, result);
-  return result;
-}
-
 /**
- * Resolve a system command to a pinned absolute path.
+ * Verify that a path is a regular, executable file.
  *
- * The search order is a fixed list of directories, never `PATH`.  Resolution
- * happens once and is memoised, so a later change to the process environment
- * cannot change which binary a later request executes.
+ * Deliberately does NOT enforce containment in the trusted directories:
+ * containment is a policy decision that belongs to the catalog's probe, which
+ * knows which roots it is allowed to search. This helper answers only "is this
+ * a safe executable file?", so it remains usable for a file the caller has
+ * already bounded by other means.
  */
-function resolveSystemCommand(command: string): Resolution {
-  for (const dir of TRUSTED_BIN_DIRS) {
-    const candidate = resolve(dir, command);
-    if (!existsSync(candidate)) continue;
-    const result = resolveOnce(`${dir}/${command}`, candidate);
-    if (result.ok) return result;
-  }
-  return {
-    ok: false,
-    reason: `not found in any trusted directory (${TRUSTED_BIN_DIRS.join(", ")})`,
-  };
+export function verifyExecutable(candidate: string): Resolution {
+  return verifyExecutableFile(candidate);
 }
 
 /**
- * The absolute path that will actually be executed for `command`, or null
- * with the reason logged.  This is the only function the execution path uses,
- * so a command cannot reach `execvp()` without passing through here.
+ * The absolute path that will actually be executed for `command`, or a failure
+ * with the reason.
+ *
+ * This is the only function the execution path uses, so a command cannot reach
+ * `execvp()` without passing through the catalog here.  The failure shapes are
+ * deliberately distinguishable, because they mean different things:
+ *
+ *   - not in the catalog  -> the browser named something undeclared;
+ *   - BLOCKED             -> policy refuses it;
+ *   - UNAVAILABLE         -> declared and permitted, but not installed here.
  */
 export function resolveAllowedExecutable(command: string): Resolution {
-  if (SYSTEM_CMDS.includes(command)) {
-    const r = resolveSystemCommand(command);
-    if (!r.ok) logger.warn("SECURITY", "allowlisted command unavailable", { command, reason: r.reason });
-    return r;
+  const probed = probeCommand(command);
+  if (probed.availability === "AVAILABLE" && probed.resolvedPath !== null) {
+    return { ok: true, path: probed.resolvedPath };
   }
-  if (command in REPO_HELPERS) {
-    return resolveOnce(command, REPO_HELPERS[command]!);
+  if (probed.availability === "BLOCKED") {
+    return { ok: false, reason: probed.reason };
   }
-  if (isWorkloadId(command)) {
-    if (!probeWorkload(command).available) {
-      return { ok: false, reason: "workload binary not built (run: make workloads)" };
-    }
-    // The path derives from the fixed profile id, never from client input.
-    return resolveOnce(command, workloadExecutablePath(command));
-  }
-  return { ok: false, reason: "not on the allowlist" };
+  logger.warn("SECURITY", "allowlisted command unavailable", { command, reason: probed.reason });
+  return { ok: false, reason: probed.reason };
 }
 
-/** Allowlist names, for the capability response. */
+/** Every catalog command name, for the capability response. */
 export function allowedCommands(): string[] {
-  return [...SYSTEM_CMDS, ...Object.keys(REPO_HELPERS), ...workloadIds()];
+  return catalogNames();
 }
 
-/** Test seam: forget memoised probes. */
+/** Test seam: forget every memoised executable probe. */
 export function resetExecutableCache(): void {
-  accessCache.clear();
+  // The catalog owns the probe cache; there is deliberately no second copy here.
+  resetCatalogProbes();
 }
 
 /**

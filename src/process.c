@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <sys/types.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +10,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "limits.h"
 #include "monitor.h"
 #include "process.h"
 #include "signals.h"
@@ -152,8 +154,38 @@ static long long elapsed_ms(long long start_ms, int start_ok)
     return now - start_ms;
 }
 
+/*
+ * Which process an event refers to inside a pipeline.
+ *
+ * Every event a process emits carries the same stage_index / pgid, so that a
+ * PROCESS_EXITED can be paired with the PROCESS_STARTED it terminates using
+ * nothing but the two events.  Without it, a three-stage pipeline emitted three
+ * exit events that all claimed "stage 0 of 0", and the reader could not match
+ * an exit to its own start.
+ *
+ * A single command is NOT a special case here.  It is reported as stage 0 of 1,
+ * which is the truth: one process, first of one.  An earlier version used the
+ * sentinel {-1, 0, 0} to mean "not a pipeline", and that was wrong twice over.
+ * The sentinel produced stage 0 of 0, which is not a position in any list; and
+ * because the single-command STARTED path did not carry the sentinel while the
+ * EXITED path did, one process reported two different stages for its own
+ * lifecycle.  A reader keying events by (pid, stage) would then see that
+ * process's exit as an orphan.
+ *
+ * "Is this a pipeline?" is answered by `stage_count > 1`, which is a fact about
+ * the record rather than an inference from a missing field.
+ */
+typedef struct {
+    int stage_index;
+    int stage_count;
+    pid_t pgid;
+} stage_ctx_t;
+
+static const stage_ctx_t SINGLE_STAGE = { 0, 1, 0 };
+
 static void emit_event(caps_monitor_t *mon, caps_event_type_t type, pid_t pid,
-                       int status, long long duration_ms, char *const argv[])
+                       int status, long long duration_ms, char *const argv[],
+                       stage_ctx_t ctx)
 {
     caps_event_t ev;
     char cmd[256];
@@ -167,10 +199,23 @@ static void emit_event(caps_monitor_t *mon, caps_event_type_t type, pid_t pid,
     ev.status = status;
     ev.duration_ms = duration_ms;
     ev.outcome = CAPS_OUTCOME_EXITED;
+    ev.stage_index = ctx.stage_index;
+    ev.stage_count = ctx.stage_count;
+    ev.pgid = ctx.pgid;
 
     if (argv != NULL) {
-        caps_join_argv(argv, cmd, sizeof cmd);
+caps_join_argv(argv, cmd, sizeof cmd);
         ev.command = cmd;
+        /* The argv elements, so the record carries what was exec'd rather than
+         * only a human-readable joining of it. argv is NULL-terminated, which is
+         * the parser's documented guarantee. */
+        if (argv != NULL) {
+            int n = 0;
+            while (argv[n] != NULL)
+                n++;
+            ev.argv = argv;
+            ev.argv_count = n;
+        }
     } else {
         ev.command = NULL;
     }
@@ -185,7 +230,7 @@ static void emit_event(caps_monitor_t *mon, caps_event_type_t type, pid_t pid,
  */
 static void emit_exit_event(caps_monitor_t *mon, pid_t pid, caps_outcome_t outcome,
                             int status, long long duration_ms,
-                            char *const argv[])
+                            char *const argv[], stage_ctx_t ctx)
 {
     caps_event_t ev;
     char cmd[256];
@@ -199,6 +244,9 @@ static void emit_exit_event(caps_monitor_t *mon, pid_t pid, caps_outcome_t outco
     ev.status = status;
     ev.duration_ms = duration_ms;
     ev.outcome = outcome;
+    ev.stage_index = ctx.stage_index;
+    ev.stage_count = ctx.stage_count;
+    ev.pgid = ctx.pgid;
     caps_join_argv(argv, cmd, sizeof cmd);
     ev.command = cmd;
 
@@ -214,7 +262,8 @@ static void emit_exit_event(caps_monitor_t *mon, pid_t pid, caps_outcome_t outco
  * kernel refused).
  */
 static void emit_exec_error(caps_monitor_t *mon, pid_t pid, int exec_errno,
-                            long long duration_ms, char *const argv[])
+                            long long duration_ms, char *const argv[],
+                            stage_ctx_t ctx)
 {
     caps_event_t ev;
     char cmd[256];
@@ -256,6 +305,9 @@ static void emit_exec_error(caps_monitor_t *mon, pid_t pid, int exec_errno,
     memset(&ev, 0, sizeof ev);
     ev.type = CAPS_EVENT_EXEC_ERROR;
     ev.pid = pid;
+    ev.stage_index = ctx.stage_index;
+    ev.stage_count = ctx.stage_count;
+    ev.pgid = ctx.pgid;
     ev.status = (exec_errno == EACCES) ? 126 : 127;
     ev.errno_value = exec_errno;
     ev.message = reason;
@@ -323,16 +375,27 @@ static int open_redirection(const redirection_t *r)
     int fd;
     struct stat st;
 
+    /*
+     * Every type is listed explicitly.  A catch-all `default:` here once sent
+     * both 2> and 2>> to O_TRUNC, so `2>>` silently truncated the file it was
+     * supposed to append to -- a wrong result with no error anywhere.  Making
+     * the compiler reject a future type that is not listed is the point.
+     */
     switch (r->type) {
     case CAPS_REDIR_IN:
         flags = O_RDONLY | O_NOFOLLOW;
         break;
     case CAPS_REDIR_APPEND:
+    case CAPS_REDIR_ERR_APPEND:
         flags = O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW;
         break;
-    default:
+    case CAPS_REDIR_OUT:
+    case CAPS_REDIR_ERR_OUT:
         flags = O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW;
         break;
+    default:
+        /* Unreachable: every enumeration value is handled above. */
+        return -1;
     }
 
     fd = open(r->path, flags, 0644);
@@ -396,7 +459,18 @@ static void close_redirections(redirection_t *redirs, int nredirs)
 
 /*
  * Called in the child, after fork() and before execvp(): wire the
- * already-open redirection descriptors onto stdin/stdout.
+ * already-open redirection descriptors onto the standard stream each
+ * redirection names.
+ *
+ * The destination comes from `redirs[i].target_fd`, recorded by the parser,
+ * and NOT from a test on the type.  The previous form was
+ *
+ *     target = (type == CAPS_REDIR_IN) ? 0 : 1;
+ *
+ * which sent `2>` and `2>>` to STDOUT: a program's error output would be
+ * written into its data file while the terminal showed nothing.  The failure
+ * is silent, plausible, and exactly the kind of bug a redirection test has to
+ * name explicitly to catch.
  *
  * Descriptor ownership rule: a descriptor is closed only when it is NOT
  * already the destination.  If fd == target, dup2(fd, fd) is a no-op and
@@ -409,14 +483,13 @@ static void apply_redirections(redirection_t *redirs, int nredirs)
 {
     for (int i = 0; i < nredirs; i++) {
         int fd = redirs[i].fd;
-        int target = (redirs[i].type == CAPS_REDIR_IN) ? STDIN_FILENO
-                                                       : STDOUT_FILENO;
+        int target = redirs[i].target_fd;
 
         if (fd == target)
             continue; /* keep the descriptor; it already is the target */
 
         if (dup2(fd, target) < 0) {
-            child_fatal_printf("caps: dup2: %s\n", strerror(errno));
+            child_fatal_printf("caps: dup2(%d): %s\n", target, strerror(errno));
             _exit(1);
         }
         close(fd);
@@ -476,11 +549,11 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
     }
 
     if (open_redirections(redirs, nredirs) < 0) {
-        emit_event(mon, CAPS_EVENT_REDIRECTION_FAILED, 0, 0, 0, argv);
+        emit_event(mon, CAPS_EVENT_REDIRECTION_FAILED, 0, 0, 0, argv, SINGLE_STAGE);
         return EXIT_FAILURE;
     }
     if (nredirs > 0)
-        emit_event(mon, CAPS_EVENT_REDIRECTION_OPENED, 0, 0, 0, argv);
+        emit_event(mon, CAPS_EVENT_REDIRECTION_OPENED, 0, 0, 0, argv, SINGLE_STAGE);
 
     if (make_exec_status_pipe(exec_pipe) != 0) {
         int err = errno;
@@ -528,7 +601,29 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
             errno = exec_errno;
             _exit(126);
         }
-        apply_redirections(redirs, nredirs);
+apply_redirections(redirs, nredirs);
+
+        /*
+         * Resource limits go on immediately before execvp(), which is the only
+         * ordering in which they are guaranteed to be in force for the whole
+         * life of the executed program.  A limit that cannot be applied is
+         * reported through the status pipe like any other launch failure, so
+         * the difference between "configured" and "in force" becomes a recorded
+         * fact rather than a silent divergence.
+         */
+        {
+            char limit_err[320];
+            if (caps_limits_apply(limit_err, sizeof limit_err) != 0) {
+                child_fatal_printf("caps: refusing to exec %s: %s\n", argv[0], limit_err);
+                /* EAGAIN: "resource limit could not be established", which the
+                 * parent maps to a launch failure rather than to exit 127. */
+                exec_errno = EAGAIN;
+                (void)write(exec_pipe[1], &exec_errno, sizeof exec_errno);
+                errno = exec_errno;
+                _exit(126);
+            }
+        }
+
         execvp(argv[0], argv);
         exec_errno = errno;
         (void)write(exec_pipe[1], &exec_errno, sizeof exec_errno);
@@ -540,7 +635,7 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
     }
 
     close(exec_pipe[1]);
-    emit_event(mon, CAPS_EVENT_PROCESS_STARTED, pid, 0, 0, argv);
+    emit_event(mon, CAPS_EVENT_PROCESS_STARTED, pid, 0, 0, argv, SINGLE_STAGE);
     close_redirections(redirs, nredirs);
 
     exec_failed = read_exec_error(exec_pipe[0], &exec_errno) == 1;
@@ -570,14 +665,14 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
          */
         if (exec_failed) {
             emit_exec_error(mon, pid, exec_errno, elapsed_ms(start_ms, start_ok),
-                            argv);
+                            argv, SINGLE_STAGE);
             if (raw_status != NULL)
                 *raw_status = status;
             return (exec_errno == EACCES) ? 126 : 127;
         }
         emit_exit_event(mon, pid,
                         code == 0 ? CAPS_OUTCOME_COMPLETED : CAPS_OUTCOME_EXITED,
-                        code, elapsed_ms(start_ms, start_ok), argv);
+                        code, elapsed_ms(start_ms, start_ok), argv, SINGLE_STAGE);
         if (raw_status != NULL)
             *raw_status = status;
         return code;
@@ -589,7 +684,7 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
         /* Same rule on the signal path: no program ran, so no exit event. */
         if (exec_failed) {
             emit_exec_error(mon, pid, exec_errno, elapsed_ms(start_ms, start_ok),
-                            argv);
+                            argv, SINGLE_STAGE);
             if (raw_status != NULL)
                 *raw_status = status;
             return (exec_errno == EACCES) ? 126 : 127;
@@ -610,7 +705,7 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
             }
         }
         emit_exit_event(mon, pid, CAPS_OUTCOME_SIGNALED, 128 + sig,
-                        elapsed_ms(start_ms, start_ok), argv);
+                        elapsed_ms(start_ms, start_ok), argv, SINGLE_STAGE);
         if (raw_status != NULL)
             *raw_status = status;
         return 128 + sig;
@@ -637,4 +732,470 @@ void process_report_status(const char *command, int status)
     } else if (WIFSIGNALED(status)) {
         caps_error("'%s' terminated by signal %d", command, WTERMSIG(status));
     }
+}
+
+/* ================================================================= pipeline
+ *
+ * Real pipes, real processes, one lifecycle event per stage.
+ */
+
+/*
+ * Wire one stage's standard descriptors in the child, then exec.
+ *
+ * Order is the whole subtlety.  The pipe descriptors are installed FIRST and
+ * the file redirections SECOND, so an explicit redirection always wins over the
+ * pipeline connection.  That gives the right semantics for the two cases that
+ * matter:
+ *
+ *   a | b > out.txt    b's stdout is the file, NOT the pipe
+ *   a < in.txt | b     a's stdin is the file, and a's stdout is the pipe
+ *
+ * Installing them the other way round would silently discard the redirection,
+ * which is the kind of bug a pipeline test has to look for by name.
+ *
+ * Only called in the child, between fork() and execvp().  Every failure path
+ * writes the errno to exec_status_fd and _exit()s; none returns.
+ */
+static void stage_apply_and_exec(caps_stage_t *stage, int in_fd, int out_fd,
+                                 int exec_status_fd)
+{
+    if (signals_child_reset() != 0) {
+        int err = errno;
+        child_fatal_printf("caps: refusing to exec %s: could not restore the "
+                           "default SIGINT disposition (%s); running it with an "
+                           "inherited SIG_IGN would break its signal model\n",
+                           stage->argv[0], strerror(err));
+        (void)write(exec_status_fd, &err, sizeof err);
+        _exit(126);
+    }
+
+    if (in_fd >= 0) {
+        if (dup2(in_fd, STDIN_FILENO) < 0) {
+            int err = errno;
+            child_fatal_printf("caps: dup2(stdin): %s\n", strerror(err));
+            (void)write(exec_status_fd, &err, sizeof err);
+            _exit(126);
+        }
+    }
+    if (out_fd >= 0) {
+        if (dup2(out_fd, STDOUT_FILENO) < 0) {
+            int err = errno;
+            child_fatal_printf("caps: dup2(stdout): %s\n", strerror(err));
+            (void)write(exec_status_fd, &err, sizeof err);
+            _exit(126);
+        }
+    }
+
+    apply_redirections(stage->redirs, stage->nredirs);
+
+    execvp(stage->argv[0], stage->argv);
+    int exec_errno = errno;
+    (void)write(exec_status_fd, &exec_errno, sizeof exec_errno);
+    child_exec_failure(stage->argv[0]);
+    _exit(exec_errno == EACCES ? 126 : 127);
+}
+
+int process_exec_pipeline(caps_pipeline_t *pipeline, int *last_raw_status,
+                          caps_monitor_t *mon)
+{
+    if (last_raw_status != NULL)
+        *last_raw_status = 0;
+
+    if (pipeline == NULL || pipeline->stages == NULL || pipeline->count <= 0) {
+        caps_error("no command provided");
+        return EXIT_FAILURE;
+    }
+
+    /*
+     * A single-stage pipeline IS a single command, and it takes the exact code
+     * path the original engine took.  This is not an optimisation: it means
+     * every behaviour the existing 151-assertion suite pins for one command is
+     * pinned for the one-stage case too, with no chance of the two
+     * implementations drifting apart.
+     */
+    if (pipeline->count == 1) {
+        caps_stage_t *only = &pipeline->stages[0];
+        return process_exec((char *const *)only->argv, only->redirs,
+                            only->nredirs, last_raw_status, mon);
+    }
+
+    int n = pipeline->count;
+
+    /*
+     * Create every pipe BEFORE forking anything.  After the first fork the
+     * child shares the parent's descriptor table, and opening a pipe in a
+     * multi-child program is how descriptors leak into the wrong stage: a
+     * `cat` in stage 0 that still holds stage 2's write end would keep that
+     * pipe alive after stage 1 exits, so stage 2 would block on a read that
+     * never comes.  All pipes exist first, then every child closes what it
+     * does not own.
+     */
+    int (*pipes)[2] = calloc((size_t)(n - 1), sizeof *pipes);
+    if (pipes == NULL) {
+        caps_error("out of memory allocating pipeline pipes");
+        return EXIT_FAILURE;
+    }
+    int opened = 0;
+    for (int i = 0; i < n - 1; i++) {
+        pipes[i][0] = -1;
+        pipes[i][1] = -1;
+        if (pipe(pipes[i]) != 0) {
+            int err = errno;
+            caps_error("pipe between stage %d and stage %d: %s", i, i + 1,
+                       strerror(err));
+            for (int j = 0; j < opened; j++) {
+                close(pipes[j][0]);
+                close(pipes[j][1]);
+            }
+            free(pipes);
+            return EXIT_FAILURE;
+        }
+        opened++;
+    }
+
+    /* Per-stage bookkeeping, so a fork failure can still reap what it started. */
+    pid_t *pids = calloc((size_t)n, sizeof *pids);
+    int *statuses = calloc((size_t)n, sizeof *statuses);
+    int *exec_failed = calloc((size_t)n, sizeof *exec_failed);
+    int *exec_errnos = calloc((size_t)n, sizeof *exec_errnos);
+    /* Two descriptors per stage: the read end and the write end of that
+     * stage's exec-status pipe. */
+    int *exec_fds = calloc((size_t)n * 2, sizeof *exec_fds);
+    long long *start_ms = calloc((size_t)n, sizeof *start_ms);
+    int *reaped = calloc((size_t)n, sizeof *reaped);
+    if (pids == NULL || statuses == NULL || exec_failed == NULL ||
+        exec_errnos == NULL || exec_fds == NULL || start_ms == NULL ||
+        reaped == NULL) {
+        caps_error("out of memory allocating pipeline state");
+        free(pipes);
+        free(pids); free(statuses); free(exec_failed);
+        free(exec_errnos); free(exec_fds); free(start_ms); free(reaped);
+        return EXIT_FAILURE;
+    }
+    for (int i = 0; i < n; i++) {
+        pids[i] = -1;
+        exec_fds[i * 2] = -1;
+        exec_fds[i * 2 + 1] = -1;
+    }
+
+    /*
+     * The pipeline's process group.  Typed pid_t rather than pgid_t because
+     * that is what setpgid(2) takes and what the monitor event field carries;
+     * the two are the same integer.
+     */
+    pid_t pgid = 0;
+    int launch_failed = 0;
+
+    for (int i = 0; i < n; i++) {
+        caps_stage_t *stage = &pipeline->stages[i];
+
+        /*
+         * Open this stage's file redirections in the PARENT, before the fork.
+         * They are inherited by the child, which is the same model the
+         * single-command path uses, and it means a permission error on
+         * `> /root/x` is reported once, by CAPS, instead of once per child.
+         */
+if (open_redirections(stage->redirs, stage->nredirs) < 0) {
+            emit_event(mon, CAPS_EVENT_REDIRECTION_FAILED, 0, 0, 0,
+                       (char *const *)stage->argv,
+                       (stage_ctx_t){ i, n, pgid });
+            launch_failed = 1;
+            break;
+        }
+        if (stage->nredirs > 0) {
+            emit_event(mon, CAPS_EVENT_REDIRECTION_OPENED, 0, 0, 0,
+                       (char *const *)stage->argv,
+                       (stage_ctx_t){ i, n, pgid });
+        }
+
+        {
+            int fds[2] = { -1, -1 };
+            if (make_exec_status_pipe(fds) != 0) {
+                int err = errno;
+                caps_error("exec status pipe for stage %d: %s", i, strerror(err));
+                launch_failed = 1;
+                break;
+            }
+            exec_fds[i * 2] = fds[0];
+            exec_fds[i * 2 + 1] = fds[1];
+        }
+
+        start_ms[i] = 0;
+        (void)monotonic_ms(&start_ms[i]);
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            int err = errno;
+            caps_error("fork for stage %d: %s", i, strerror(err));
+            launch_failed = 1;
+            break;
+        }
+
+        if (pid == 0) {
+            /*
+             * ---- child ----
+             * Only the exec-status write end of THIS stage survives; every
+             * other status pipe write end must be closed or a stage that fails
+             * to exec would block a later stage's parent-side read.
+             */
+            for (int k = 0; k < n; k++) {
+                if (exec_fds[k * 2 + 1] >= 0 && k != i)
+                    close(exec_fds[k * 2 + 1]);
+            }
+
+            /*
+             * Close every pipe end this stage does not own.
+             *
+             * Stage i keeps exactly two descriptors:
+             *   pipes[i-1][0]  the read end of the pipe that FEEDS it   (i > 0)
+             *   pipes[i][1]    the write end of the pipe it FEEDS       (i < n-1)
+             *
+             * Everything else is closed.  Both directions matter:
+             *
+             *   - keeping pipes[i][0] would mean this stage still holds the
+             *     read end of a pipe it does not read, so the producer never
+             *     sees EOF and can block forever;
+             *   - keeping pipes[k][1] for a pipe this stage only reads would
+             *     keep the consumer's copy of the write end open, which is
+             *     what defeats SIGPIPE: `yes | head -1` would spin instead of
+             *     having `yes` killed by SIGPIPE when `head` exits.
+             *
+             * The previous form tested `k == i` to decide the write end, which
+             * closed the very descriptor stage i was about to dup2 onto
+             * stdout.  That surfaced as `dup2(stdout): Bad file descriptor`
+             * on every pipeline.
+             */
+            for (int k = 0; k < n - 1; k++) {
+                int keep_read = (i > 0 && k == i - 1);
+                int keep_write = (i < n - 1 && k == i);
+                if (!keep_read && pipes[k][0] >= 0) close(pipes[k][0]);
+                if (!keep_write && pipes[k][1] >= 0) close(pipes[k][1]);
+            }
+
+            /*
+             * Process group.  Stage 0 becomes the leader so the whole pipeline
+             * is one addressable unit; the rest join it.  The child repeats
+             * setpgid(0,0) for stage 0 to close the race with the parent: if
+             * the child wins, the parent gets EPERM which is ignored, and if
+             * the parent wins the child's call succeeds as a no-op.  A child
+             * that has already exec'd makes the call fail with EPERM, which is
+             * also expected and ignored.
+             */
+            if (i == 0) {
+                (void)setpgid(0, 0);
+            } else if (pgid > 0) {
+                (void)setpgid(0, pgid);
+            }
+
+            int in_fd = (i > 0) ? pipes[i - 1][0] : -1;
+            int out_fd = (i < n - 1) ? pipes[i][1] : -1;
+            stage_apply_and_exec(stage, in_fd, out_fd, exec_fds[i * 2 + 1]);
+            _exit(127); /* unreachable */
+        }
+
+        /* ---- parent ---- */
+        pids[i] = pid;
+        if (i == 0) {
+            pgid = pid;
+            (void)setpgid(pid, pid);
+        } else {
+            (void)setpgid(pid, pgid);
+        }
+
+        if (i == 0) {
+            caps_event_t ev;
+            memset(&ev, 0, sizeof ev);
+            ev.type = CAPS_EVENT_PIPELINE_STARTED;
+            ev.pid = pid;
+            ev.pgid = pgid;
+            ev.stage_index = 0;
+            ev.stage_count = n;
+            ev.command = pipeline->stages[0].argv[0];
+            ev.argv = (char *const *)pipeline->stages[0].argv;
+            ev.argv_count = pipeline->stages[0].argc;
+            caps_monitor_emit(mon, &ev);
+        }
+
+        /* Record the pipe ends in the event so the reader can see the wiring. */
+        {
+            caps_event_t ev;
+            memset(&ev, 0, sizeof ev);
+            ev.type = CAPS_EVENT_PROCESS_STARTED;
+            ev.pid = pid;
+            ev.pgid = pgid;
+            ev.stage_index = i;
+            ev.stage_count = n;
+            ev.command = stage->argv[0];
+            ev.argv = (char *const *)stage->argv;
+            ev.argv_count = stage->argc;
+            caps_monitor_emit(mon, &ev);
+        }
+    }
+
+    /* Close every pipe end the parent still holds. */
+    for (int k = 0; k < n - 1; k++) {
+        if (pipes[k][0] >= 0) close(pipes[k][0]);
+        if (pipes[k][1] >= 0) close(pipes[k][1]);
+    }
+    /* Close the redirection fds the parent opened, before waiting. */
+    for (int i = 0; i < n; i++) {
+        if (pids[i] > 0)
+            close_redirections(pipeline->stages[i].redirs,
+                               pipeline->stages[i].nredirs);
+    }
+
+    /* Read each stage's exec outcome before waiting, so a failed exec is known. */
+    for (int i = 0; i < n; i++) {
+        if (pids[i] <= 0) continue;
+        if (exec_fds[i * 2 + 1] >= 0) {
+            close(exec_fds[i * 2 + 1]);
+            exec_fds[i * 2 + 1] = -1;
+        }
+        if (exec_fds[i * 2] >= 0) {
+            int e = 0;
+            if (read_exec_error(exec_fds[i * 2], &e) == 1) {
+                exec_failed[i] = 1;
+                exec_errnos[i] = e;
+            }
+            close(exec_fds[i * 2]);
+            exec_fds[i * 2] = -1;
+        }
+    }
+
+    /*
+     * Reap every stage.  A stage that was never forked (because an earlier
+     * launch failed) is recorded as such rather than waited on, so the loop
+     * cannot block on a PID that does not exist.
+     */
+    for (int i = 0; i < n; i++) {
+        if (pids[i] <= 0) {
+            caps_event_t ev;
+            memset(&ev, 0, sizeof ev);
+            ev.type = CAPS_EVENT_PROCESS_EXITED;
+            ev.pid = 0;
+            ev.pgid = pgid;
+            ev.stage_index = i;
+            ev.stage_count = n;
+            ev.status = EXIT_FAILURE;
+            ev.outcome = CAPS_OUTCOME_LAUNCH_FAILED;
+            ev.command = pipeline->stages[i].argv[0];
+            ev.argv = (char *const *)pipeline->stages[i].argv;
+            ev.argv_count = pipeline->stages[i].argc;
+            ev.message = "stage_never_launched";
+            caps_monitor_emit(mon, &ev);
+            continue;
+        }
+        if (process_wait_child(pids[i], &statuses[i]) != 0) {
+            int err = errno;
+            emit_failure_event(mon, CAPS_EVENT_WAIT_FAILED, pids[i], err,
+                               "wait_failed", 0,
+                               (char *const *)pipeline->stages[i].argv);
+            reaped[i] = 1;
+            continue;
+        }
+        reaped[i] = 1;
+
+        /*
+         * The stage context for this stage's terminal events.  It must be the
+         * same values the corresponding PROCESS_STARTED carried, or a reader
+         * cannot pair a start with its own exit.
+         */
+        stage_ctx_t ctx = { i, n, pgid };
+
+
+        caps_stage_t *stage = &pipeline->stages[i];
+        int status = statuses[i];
+        if (WIFEXITED(status)) {
+            int code = WEXITSTATUS(status);
+            if (exec_failed[i]) {
+                emit_exec_error(mon, pids[i], exec_errnos[i],
+                                elapsed_ms(start_ms[i], 1),
+                                (char *const *)stage->argv, ctx);
+            } else {
+                emit_exit_event(mon, pids[i],
+                                code == 0 ? CAPS_OUTCOME_COMPLETED
+                                          : CAPS_OUTCOME_EXITED,
+                                code, elapsed_ms(start_ms[i], 1),
+                                (char *const *)stage->argv, ctx);
+            }
+        } else if (WIFSIGNALED(status)) {
+            int sig = WTERMSIG(status);
+            if (exec_failed[i]) {
+                emit_exec_error(mon, pids[i], exec_errnos[i],
+                                elapsed_ms(start_ms[i], 1),
+                                (char *const *)stage->argv, ctx);
+            } else {
+                caps_event_t sigev;
+                char cmd[256];
+                memset(&sigev, 0, sizeof sigev);
+                sigev.type = CAPS_EVENT_SIGNAL_RECEIVED;
+                sigev.pid = pids[i];
+                sigev.status = sig;
+                sigev.outcome = CAPS_OUTCOME_SIGNALED;
+                sigev.stage_index = i;
+                sigev.stage_count = n;
+                sigev.pgid = pgid;
+                caps_join_argv((char *const *)stage->argv, cmd, sizeof cmd);
+                sigev.command = cmd;
+                caps_monitor_emit(mon, &sigev);
+
+                emit_exit_event(mon, pids[i], CAPS_OUTCOME_SIGNALED, 128 + sig,
+                                elapsed_ms(start_ms[i], 1),
+                                (char *const *)stage->argv, ctx);
+            }
+        }
+    }
+
+    /* The pipeline is complete only when every stage has been accounted for. */
+    {
+        caps_event_t ev;
+        memset(&ev, 0, sizeof ev);
+        ev.type = CAPS_EVENT_PIPELINE_COMPLETED;
+        ev.pid = n > 0 ? pids[0] : 0;
+        ev.pgid = pgid;
+        ev.stage_index = -1;
+        ev.stage_count = n;
+        ev.command = pipeline->stages[0].argv[0];
+        ev.argv = (char *const *)pipeline->stages[0].argv;
+        ev.argv_count = pipeline->stages[0].argc;
+        ev.status = launch_failed ? EXIT_FAILURE
+                                  : (n > 0 && WIFEXITED(statuses[n - 1])
+                                         ? WEXITSTATUS(statuses[n - 1])
+                                         : EXIT_FAILURE);
+        ev.outcome = launch_failed ? CAPS_OUTCOME_LAUNCH_FAILED
+                                   : CAPS_OUTCOME_COMPLETED;
+        caps_monitor_emit(mon, &ev);
+    }
+
+    /*
+     * Capture everything the exit path needs BEFORE releasing the state
+     * arrays.  Reading `statuses[n-1]` after free() is a use-after-free that
+     * happens to work often enough to be missed by a casual test, and the
+     * compiler is right to refuse to let it stand.
+     */
+    int last_status = (n > 0) ? statuses[n - 1] : 0;
+    int last_forked = (n > 0) ? (pids[n - 1] > 0) : 0;
+    if (last_raw_status != NULL)
+        *last_raw_status = last_status;
+
+    free(pipes);
+    free(pids); free(statuses); free(exec_failed);
+    free(exec_errnos); free(exec_fds); free(start_ms); free(reaped);
+
+    if (launch_failed) {
+        caps_error("pipeline did not launch every stage");
+        return EXIT_FAILURE;
+    }
+
+    /*
+     * Shell convention: the pipeline's status is the LAST stage's.  A producer
+     * that dies early does not make the pipeline fail on its own, because that
+     * is the normal case for `producer | head`.  Every stage's own status is in
+     * the event stream, so nothing is hidden by this choice.
+     */
+    if (last_forked && WIFEXITED(last_status))
+        return WEXITSTATUS(last_status);
+    if (last_forked && WIFSIGNALED(last_status))
+        return 128 + WTERMSIG(last_status);
+    return EXIT_FAILURE;
 }

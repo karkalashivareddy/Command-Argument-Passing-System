@@ -5,9 +5,12 @@ import { AppShell } from "./components/layout/AppShell";
 import { Spinner } from "./components/ui";
 
 const OverviewPage = lazy(() => import("./pages/OverviewPage"));
+const TerminalPage = lazy(() => import("./pages/TerminalPage"));
 const ExecutePage = lazy(() => import("./pages/ExecutePage"));
 const LivePage = lazy(() => import("./pages/LivePage"));
 const ProcessesPage = lazy(() => import("./pages/ProcessesPage"));
+const ProcessExplorerPage = lazy(() => import("./pages/ProcessExplorerPage"));
+const SystemControlPage = lazy(() => import("./pages/SystemControlPage"));
 const ExecutionPage = lazy(() => import("./pages/ExecutionPage"));
 const ProcessSpacePage = lazy(() => import("./pages/ProcessSpacePage"));
 const ArgumentsPage = lazy(() => import("./pages/ArgumentsPage"));
@@ -37,9 +40,16 @@ export function App() {
       <Routes>
         <Route element={<AppShell />}>
           <Route path="/" element={<OverviewPage />} />
+          <Route path="/terminal" element={<TerminalPage />} />
           <Route path="/execute" element={<ExecutePage />} />
           <Route path="/live" element={<LivePage />} />
           <Route path="/processes" element={<ProcessesPage />} />
+          {/* The host explorer and the system control center are separate surfaces
+              from the CAPS-scoped process view: they read the host collector
+              rather than the gateway's own child telemetry, and they distinguish
+              CAPS-owned work from host processes. */}
+          <Route path="/processes/explorer" element={<ProcessExplorerPage />} />
+          <Route path="/system" element={<SystemControlPage />} />
           <Route path="/execution/:id" element={<ExecutionPage />} />
           <Route path="/execution/:id/3d" element={<ProcessSpacePage />} />
           <Route path="/arguments/:id" element={<ArgumentsPage />} />

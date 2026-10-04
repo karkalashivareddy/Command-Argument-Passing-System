@@ -1,5 +1,13 @@
 # CAPS Linux Runtime Verification
 
+> **Historical record.** The checks below were run on 2026-09-24 against
+> CAPS 1.x and are kept as the first end-to-end execution matrix for this project.
+> For the current release, see
+> [`ground-truth-verification.md`](ground-truth-verification.md) for the
+> host-telemetry pass against raw `/proc`, and
+> [`cross-view-trace.md`](cross-view-trace.md) for a CAPS 2.0 execution traced
+> through every surface with captured identifiers.
+
 This record describes the Linux runtime and browser checks run on 2026-09-24. Linux execution used the installed Ubuntu WSL2 distribution, not Git Bash or MinGW.
 
 ## Environment

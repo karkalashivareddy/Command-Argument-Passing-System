@@ -121,8 +121,20 @@ static int interactive_loop(caps_monitor_t *mon, int quiet_ui)
          */
         char **argv = NULL;
         int argc = 0;
-        if (parser_parse(raw, &argv, &argc) < 0) {
-            caps_error("memory allocation failure");
+        /*
+         * The REPL tokenizes with the full lexer, not the legacy
+         * whitespace splitter, so that quoting and escapes work and so that a
+         * '|' inside a quoted argument stays data instead of splitting the
+         * line.  The pipeline is then built from the token stream by
+         * parser_parse_pipeline(), which is the only place a command line is
+         * interpreted.
+         */
+        if (parser_tokenize(raw, &argv, &argc) < 0) {
+            if (argc < 0) {
+                caps_error("memory allocation failure");
+            } else {
+                caps_error("syntax error: %s", parser_last_error());
+            }
             emit_simple_event(mon, CAPS_EVENT_COMMAND_PARSE_ERROR, raw);
             continue;
         }
@@ -133,48 +145,83 @@ static int interactive_loop(caps_monitor_t *mon, int quiet_ui)
 
         emit_simple_event(mon, CAPS_EVENT_COMMAND_RECEIVED, raw);
 
-        redirection_t *redirs = NULL;
-        int nredirs = 0;
-        if (parser_split_redirections(argv, &argc, &redirs, &nredirs) < 0) {
-            emit_simple_event(mon, CAPS_EVENT_COMMAND_PARSE_ERROR, raw);
+        /*
+         * Built-in commands (`exit`, `help`, `cd`, ...) are handled in-process
+         * and never reach fork().  The test is on argv[0] alone, not on the
+         * argument count: `exit 42` is the built-in with an argument, and
+         * routing it to execvp() would look for a program called "exit" and
+         * report 127 for what is really a successful `exit 42`.
+         */
+        if (builtin_is_builtin(argv[0])) {
+            redirection_t *bredirs = NULL;
+            int bargc = argc;
+            int bnredirs = 0;
+            int split_rc = parser_split_redirections(argv, &bargc, &bredirs,
+                                                     &bnredirs);
+            if (split_rc < 0) {
+                caps_error("syntax error: %s", parser_last_error());
+                emit_simple_event(mon, CAPS_EVENT_COMMAND_PARSE_ERROR, raw);
+                parser_free_argv(argv);
+                continue;
+            }
+            {
+                char joined[256];
+                caps_join_argv(argv, joined, sizeof joined);
+                emit_simple_event(mon, CAPS_EVENT_PARSED, joined);
+            }
+            int bstatus = 0;
+            builtin_result_t res = builtin_run(bargc, argv, last_status, &bstatus);
+            if (res == CAPS_BUILTIN_EXIT) {
+                parser_free_argv(argv);
+                parser_free_redirections(bredirs, bnredirs);
+                last_status = bstatus;
+                break;
+            }
+            if (bnredirs > 0) {
+                caps_error("redirection is not supported for built-in commands");
+                bstatus = 1;
+            }
+            last_status = bstatus;
             parser_free_argv(argv);
+            parser_free_redirections(bredirs, bnredirs);
             continue;
         }
-        if (argc == 0) {
-            caps_error("syntax error: no command to redirect");
+
+        caps_pipeline_t pipeline;
+        int prc = parser_parse_pipeline(raw, &pipeline);
+        parser_free_argv(argv);
+        if (prc != 0) {
+            caps_error("syntax error: %s", parser_last_error());
             emit_simple_event(mon, CAPS_EVENT_COMMAND_PARSE_ERROR, raw);
-            parser_free_argv(argv);
-            parser_free_redirections(redirs, nredirs);
             continue;
         }
 
         {
             char joined[256];
-            caps_join_argv(argv, joined, sizeof joined);
+            caps_join_argv(pipeline.stages[0].argv, joined, sizeof joined);
             emit_simple_event(mon, CAPS_EVENT_PARSED, joined);
+        }
+        if (pipeline.count > 1) {
+            caps_event_t pev;
+            char label[128];
+            memset(&pev, 0, sizeof pev);
+            pev.type = CAPS_EVENT_PIPELINE_PARSED;
+            pev.stage_count = pipeline.count;
+            pev.stage_index = -1;
+            pev.command = pipeline.stages[0].argv[0];
+            snprintf(label, sizeof label, "%d stages", pipeline.count);
+            pev.message = label;
+            caps_monitor_emit(mon, &pev);
         }
 
         int status = 0;
-        builtin_result_t res = builtin_run(argc, argv, last_status, &status);
-        if (res == CAPS_BUILTIN_EXIT) {
-            last_status = status;
-            parser_free_argv(argv);
-            parser_free_redirections(redirs, nredirs);
-            break;
-        }
-        if (res == CAPS_BUILTIN_HANDLED && nredirs > 0) {
-            caps_error("redirection is not supported for built-in commands");
-            status = 1;
-        }
-        if (res == CAPS_NOT_BUILTIN) {
-            int raw_status = 0;
-            status = process_exec(argv, redirs, nredirs, &raw_status, mon);
-            process_report_status(argv[0], raw_status);
-        }
+        int raw_status = 0;
+        status = process_exec_pipeline(&pipeline, &raw_status, mon);
+        if (pipeline.count > 0 && pipeline.stages[0].argv != NULL)
+            process_report_status(pipeline.stages[0].argv[0], raw_status);
 
         last_status = status;
-        parser_free_argv(argv);
-        parser_free_redirections(redirs, nredirs);
+        parser_free_pipeline(&pipeline);
     }
 
     free(line);
@@ -229,6 +276,137 @@ static int parse_debug_mode(void)
     return 0;
 }
 
+/*
+ * Lex a command line and print the pipeline that WOULD be executed, without
+ * executing anything.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * The gateway must validate every command in a line against its catalog before
+ * anything runs.  If the gateway parsed the line itself, there would be two
+ * lexers, and they would eventually disagree about a quoting edge case -- at
+ * which point the gateway could approve a command the engine then executes,
+ * which is precisely the failure the catalog exists to prevent.
+ *
+ * So the engine is the only lexer, and the gateway asks it what the argv
+ * vectors are.  The output is one JSON object describing every stage, and the
+ * validation is applied to exactly the argv that will later be exec'd.
+ *
+ * Usage: caps --inspect "<command line>"
+ * Output: one JSON object on stdout, exit 0 on a parseable line, 2 on a
+ *         syntax error (with the reason on stderr), 1 on an internal failure.
+ */
+static int inspect_line_mode(const char *line)
+{
+    caps_pipeline_t pipeline;
+    int rc = parser_parse_pipeline(line, &pipeline);
+
+    if (rc != 0) {
+        fprintf(stderr, "%s\n", parser_last_error());
+        parser_free_pipeline(&pipeline);
+        return 2;
+    }
+
+    printf("{\"stages\":%d,\"pipeline\":[", pipeline.count);
+    for (int i = 0; i < pipeline.count; i++) {
+        caps_stage_t *s = &pipeline.stages[i];
+        if (i > 0)
+            printf(",");
+        printf("{\"index\":%d,\"argv\":[", i);
+        for (int k = 0; k < s->argc; k++) {
+            if (k > 0)
+                printf(",");
+            /*
+             * The surrounding double quotes are part of the JSON syntax and are
+             * emitted here; caps_json_escape() escapes only the *contents*.
+             * Emitting the escaped text without the quotes produces
+             * `"argv":[seq,1,5]`, which is not JSON at all -- and it fails
+             * silently enough that the values look correct in a casual read.
+             * A caller parsing this output would reject the whole document
+             * and conclude the command line was malformed.
+             */
+            fputc('"', stdout);
+            caps_json_escape(stdout, s->argv[k]);
+            fputc('"', stdout);
+        }
+        printf("],\"redirections\":[");
+        for (int r = 0; r < s->nredirs; r++) {
+            if (r > 0)
+                printf(",");
+            const char *op;
+            switch (s->redirs[r].type) {
+            case CAPS_REDIR_IN:         op = "<";   break;
+            case CAPS_REDIR_OUT:        op = ">";   break;
+            case CAPS_REDIR_APPEND:     op = ">>";  break;
+            case CAPS_REDIR_ERR_OUT:    op = "2>";  break;
+            default:                    op = "2>>"; break;
+            }
+            printf("{\"op\":\"%s\",\"fd\":%d,\"target\":", op,
+                   s->redirs[r].target_fd);
+            /* Quoted for the same reason argv is: the surrounding quotes are
+             * JSON syntax, and caps_json_escape() escapes only the contents. */
+            fputc('"', stdout);
+            caps_json_escape(stdout, s->redirs[r].path);
+            fputc('"', stdout);
+            printf("}");
+        }
+        printf("],\"stdin_source\":\"%s\",\"stdout_dest\":\"%s\"}",
+               s->stdin_source, s->stdout_dest);
+    }
+    printf("]}\n");
+    parser_free_pipeline(&pipeline);
+    return 0;
+}
+
+/*
+ * Execute a command line as a pipeline, under the monitor.
+ *
+ * Usage: caps --run-line [--json] "<command line>"
+ *
+ * The line is lexed and split here, so the argv each stage receives is the
+ * argv this process built -- not something the caller supplied pre-split.  A
+ * caller that wanted a different argv would have to lie about the line, and
+ * then the recorded evidence would not match what ran.
+ */
+static int run_line_mode(caps_monitor_t *mon, const char *line)
+{
+    caps_pipeline_t pipeline;
+    int rc = parser_parse_pipeline(line, &pipeline);
+
+    if (rc != 0) {
+        caps_error("syntax error: %s", parser_last_error());
+        emit_simple_event(mon, CAPS_EVENT_COMMAND_PARSE_ERROR, line);
+        parser_free_pipeline(&pipeline);
+        return 2;
+    }
+
+    emit_simple_event(mon, CAPS_EVENT_COMMAND_RECEIVED, line);
+    {
+        char joined[256];
+        caps_join_argv(pipeline.stages[0].argv, joined, sizeof joined);
+        emit_simple_event(mon, CAPS_EVENT_PARSED, joined);
+    }
+    if (pipeline.count > 1) {
+        caps_event_t pev;
+        char label[64];
+        memset(&pev, 0, sizeof pev);
+        pev.type = CAPS_EVENT_PIPELINE_PARSED;
+        pev.stage_count = pipeline.count;
+        pev.stage_index = -1;
+        pev.command = pipeline.stages[0].argv[0];
+        snprintf(label, sizeof label, "%d stages", pipeline.count);
+        pev.message = label;
+        caps_monitor_emit(mon, &pev);
+    }
+
+    int raw_status = 0;
+    int status = process_exec_pipeline(&pipeline, &raw_status, mon);
+    if (pipeline.count > 0 && pipeline.stages[0].argv != NULL)
+        process_report_status(pipeline.stages[0].argv[0], raw_status);
+    parser_free_pipeline(&pipeline);
+    return status;
+}
+
 int main(int argc, char *argv[])
 {
     /*
@@ -246,6 +424,14 @@ int main(int argc, char *argv[])
 
     if (argc == 2 && strcmp(argv[1], "--parse") == 0)
         return parse_debug_mode();
+
+    /*
+     * caps --inspect "<line>": report the pipeline, execute nothing.  Handled
+     * before the monitor flags because it has no monitor and its output is the
+     * whole point.
+     */
+    if (argc == 3 && strcmp(argv[1], "--inspect") == 0)
+        return inspect_line_mode(argv[2]);
 
     if (argc == 2 && strcmp(argv[1], "--help") == 0) {
         usage(stderr);
@@ -269,6 +455,34 @@ int main(int argc, char *argv[])
             json = 1;
             i++;
         }
+    }
+
+    /* caps --run-line [--json] "<line>" */
+    int run_line = 0;
+    if (argc > i && strcmp(argv[i], "--run-line") == 0) {
+        run_line = 1;
+        i++;
+        if (argc > i && strcmp(argv[i], "--json") == 0) {
+            json = 1;
+            i++;
+        }
+    }
+
+    if (run_line) {
+        caps_monitor_t *mon = caps_monitor_create(stderr, json);
+        if (mon == NULL) {
+            caps_error("monitor setup failed");
+            return EXIT_FAILURE;
+        }
+        if (i >= argc) {
+            caps_error("--run-line requires a command line argument");
+            caps_monitor_destroy(mon);
+            return EXIT_FAILURE;
+        }
+        int rc = run_line_mode(mon, argv[i]);
+        caps_monitor_finish(mon);
+        caps_monitor_destroy(mon);
+        return rc;
     }
 
     if (monitor) {
@@ -318,9 +532,20 @@ int main(int argc, char *argv[])
                     return EXIT_FAILURE;
                 }
             }
+            /*
+             * target_fd MUST be set here.  apply_redirections() reads the
+             * destination from this field rather than inferring it from
+             * `type`, and a redirection_t built without it defaults to 0 --
+             * so `--redir-out file` would dup2() the file onto STDIN and the
+             * program's output would go to the parent's stdout instead of the
+             * file.  That regression is silent: the session reports COMPLETED
+             * with the right exit code and the file is simply empty, so only a
+             * test that checks the FILE's contents can see it.
+             */
             redirs[nredirs].type = type;
             redirs[nredirs].path = argv[i + 1]; /* borrowed; lives for the run */
             redirs[nredirs].fd = -1;
+            redirs[nredirs].target_fd = caps_redir_fd(type);
             i += 2;
             nredirs++;
         }

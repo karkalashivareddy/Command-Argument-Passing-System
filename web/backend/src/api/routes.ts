@@ -22,8 +22,11 @@ import {
   resolveAllowedExecutable,
   validateArgVector,
 } from "../security/policy.js";
+import { ArgumentError, validateArguments } from "../catalog/validation.js";
 import { isTerminalEventType, type CanonicalEvent } from "../types/observability.js";
 import { telemetryCapabilities } from "../telemetry/capabilities.js";
+import { inspectThermalGuard } from "../execution/thermalGuard.js";
+import { pidfdCapability } from "../execution/pidfd.js";
 import {
   isWorkloadId,
   materializeWorkloadArgv,
@@ -199,10 +202,14 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
     const engine = engineProbe();
     const workspace = workspaceProbe();
     const onLinux = platform() === "linux";
-    const telemetry = telemetryCapabilities({
+    // Async because the process-identity half of the capability answer is a real
+    // pidfd probe, not a static declaration. Publishing "VERIFIED" without
+    // measuring would make the strongest claim in the API an unverified one.
+    const telemetry = await telemetryCapabilities({
       enabled: onLinux,
       source: onLinux ? "/proc/<tracked-pid>/{stat,status,io}" : "UNAVAILABLE",
     });
+    const identity = await pidfdCapability();
     return {
       version,
       platform: onLinux ? "linux/posix" : platform(),
@@ -215,6 +222,86 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
         maxTimeoutMs: config.maxTimeoutMs,
         maxOutputBytes: config.maxOutputBytes,
       },
+      /*
+       * Guardrails, published as three separable things per limit:
+       * `configured` is what was set, `enforced` says whether the gateway can
+       * actually apply it, and the two are allowed to disagree.
+       *
+       * A limit that is configured but not enforced is the failure this
+       * structure exists to make visible. Reporting a flat number invites the
+       * reader to assume enforcement, and an unenforced limit that looks
+       * enforced is worse than no limit at all.
+       */
+      guardrails: {
+        wallTime: {
+          configuredBytesOrMs: config.guardrails.wallTimeMs,
+          unit: "ms",
+          enforced: true,
+          mechanism: "the engine's own timeout; the gateway escalates with an identity-verified SIGKILL",
+        },
+        wallTimeCeiling: { configuredBytesOrMs: config.guardrails.maxWallTimeMs, unit: "ms", enforced: true },
+        stdout: {
+          configuredBytesOrMs: config.guardrails.stdoutBytes,
+          unit: "bytes",
+          enforced: true,
+          mechanism: "the engine stops the child when a stream exceeds the cap and records the truncation",
+        },
+        stderr: {
+          configuredBytesOrMs: config.guardrails.stderrBytes,
+          unit: "bytes",
+          enforced: true,
+          mechanism:
+            "stderr is bounded separately from stdout; an unbounded stderr fills its pipe and would deadlock a child that is otherwise healthy",
+        },
+        cpuTime: {
+          configuredBytesOrMs: config.guardrails.cpuBudgetMs,
+          unit: "ms of kernel-reported CPU time",
+          enforced: config.guardrails.cpuBudgetMs > 0,
+          mechanism:
+            config.guardrails.cpuBudgetMs > 0
+              ? "compared against the kernel's own accounting after each wait; a process that exhausts its CPU budget is terminated"
+              : "not configured; CPU time is observed and recorded but not limited",
+          caveat: "This is CPU time, not wall-clock time. A process sleeping on I/O consumes none.",
+        },
+        addressSpace: {
+          configuredBytesOrMs: config.guardrails.addressSpaceBytes,
+          unit: "bytes of virtual address space (RLIMIT_AS)",
+          enforced: config.guardrails.addressSpaceBytes > 0,
+          mechanism:
+            config.guardrails.addressSpaceBytes > 0
+              ? "RLIMIT_AS applied to the child before exec"
+              : "not configured",
+          caveat:
+            "RLIMIT_AS caps VIRTUAL ADDRESS SPACE, not physical memory. It bears no simple relation to RSS or to the machine's RAM: a modest limit can be exhausted by mappings that never touch a page, and a generous one says nothing about resident memory. It is reported as address space everywhere in CAPS for this reason.",
+        },
+        concurrency: {
+          configuredBytesOrMs: config.guardrails.maxConcurrent,
+          unit: "simultaneous executions",
+          enforced: true,
+          mechanism: "a request beyond the limit is refused with 503 rather than queued indefinitely",
+        },
+        thermal: await (async () => {
+          const guard = inspectThermalGuard(config.thermalGuard);
+          return {
+            enabled: config.thermalGuard.enabled,
+            availability: guard.availability,
+            reason: guard.unavailableReason ?? guard.selected?.selectionReason ?? "not inspected",
+            sensor: guard.selected?.name ?? null,
+            sensorPath: guard.selected?.path ?? null,
+            warningC: config.thermalGuard.warningC,
+            criticalC: config.thermalGuard.criticalC,
+            action: config.thermalGuard.action,
+            scope: "CAPS-owned workloads only; never an unrelated host process",
+            restrictions: [
+              "no writes to /sys/class/thermal",
+              "no writes to /sys/class/hwmon",
+              "no MSR access",
+              "no fan control",
+              "no temperature synthesis when no sensor exists",
+            ],
+          };
+        })(),
+      },
       workspace: workspace.relativePath,
       workspaceAvailable: workspace.available,
       security: {
@@ -224,7 +311,28 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
         executableResolution: "absolute verified path; PATH is never consulted for an allowlisted command",
         redirectionHardening: "O_NOFOLLOW plus a regular-file check at open time",
       },
-      redirection: { supported: true, modes: ["in", "out", "append"], stderr: false },
+      /*
+       * Stderr redirection is reported per route, not as one global flag.
+       *
+       * It used to publish `stderr: false`, which was true of
+       * /api/sessions -- whose request schema accepts only in/out/append -- and
+       * false in general: the terminal grammar accepts `2>` and `2>>`, the engine
+       * implements them (CAPS_REDIR_ERR_OUT / _APPEND, opened O_WRONLY|O_CREAT
+       * with O_NOFOLLOW), and the target is validated against the workspace
+       * policy. A single flag cannot describe that, and a reader who trusted it
+       * would conclude the capability is absent from the product.
+       */
+      redirection: {
+        supported: true,
+        modes: ["in", "out", "append"],
+        stderr: true,
+        stderrByRoute: {
+          "/api/sessions": false,
+          "/api/terminal/execute": true,
+        },
+        stderrNote:
+          "stderr redirection is a terminal-route feature. POST /api/sessions accepts only in/out/append and rejects a stderr slot with 400. Both routes validate the target against the workspace policy and the engine opens it with O_NOFOLLOW.",
+      },
       signals: { supported: ["SIGINT", "SIGTERM", "SIGKILL", "SIGQUIT", "SIGTSTP"], identityVerified: true },
       workloads: {
         count: workloadCapabilities().length,
@@ -233,6 +341,27 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
         limits: WORKLOAD_LIMITS,
       },
       telemetry,
+      /*
+       * Process identity, from the real probe rather than from a declaration.
+       *
+       * This is the answer to "what does a signal sent by CAPS actually
+       * guarantee?", and the guarantee is different depending on whether pidfd is
+       * available. Publishing a fixed "VERIFIED" would make the strongest claim
+       * in the API an unmeasured one on exactly the hosts where it is weakest.
+       */
+      processIdentity: {
+        model: identity.available
+          ? "pidfd: a kernel handle bound to one specific process"
+          : identity.confidence === "UNVERIFIED"
+            ? "start-ticks validation against /proc/<pid>/stat"
+            : "unavailable: CAPS will not signal a process whose identity it cannot establish",
+        confidence: identity.confidence,
+        reason: identity.reason,
+        kernel: identity.kernel,
+        terminationMechanism: identity.available ? "pidfd" : identity.confidence === "UNVERIFIED" ? "start-ticks" : "unavailable",
+        invariant:
+          "CAPS signals only processes it started, and only after checking that the kernel still reports the identity it recorded at spawn. A PID on its own is never sufficient, because PIDs are reused.",
+      },
       observability: {
         timeline: { enabled: true, axis: "seconds-relative-to-first-event" },
         annotations: true,
@@ -305,17 +434,53 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
       }
     }
 
+    /*
+     * The catalog already declares, per command, which positional arguments are
+     * paths and how many leading positionals are patterns rather than paths.
+     *
+     * This route used to special-case `cat` and hand-check its arguments, which
+     * left the other thirteen path-taking commands -- head, tail, wc, stat,
+     * file, grep, sort, uniq, cut, sed, awk, du, ls -- completely unchecked on
+     * the primary execution route. `grep root /etc/passwd` returned the matching
+     * line. Nothing enforced the per-command argument schemas published at
+     * /api/catalog either.
+     *
+     * So the schema is enforced here, from the same registry the catalog is
+     * generated from. One validator, both routes: a rule that exists only on
+     * /api/terminal/* is a rule the flagship execution path does not have.
+     */
+    /*
+     * The per-command argument schema and the workspace path policy, from the
+     * same registry the catalog is generated from.
+     *
+     * This route used to special-case `cat` and hand-check its arguments, which
+     * left the other thirteen path-taking commands -- head, tail, wc, stat,
+     * file, grep, sort, uniq, cut, sed, awk, du, ls -- completely unchecked on
+     * the primary execution route. `grep root /etc/passwd` returned the matching
+     * line. Nothing enforced the per-command schemas published at /api/catalog
+     * either, so `seq --not-a-flag` was accepted.
+     *
+     * `validateArguments` is the same function the terminal route uses, so a rule
+     * that exists on one route is not absent from the other. Validated AFTER the
+     * workload argv is materialised, because the materialized vector is what
+     * actually reaches execvp.
+     */
+    let validatedArgs: string[];
     try {
-      if (body.command === "cat") {
-        for (const path of body.args) assertReadableFileInWorkspace(config, path);
-      }
+      validatedArgs = [...validateArguments(body.command, args, config)];
+    } catch (err) {
+      const reason = err instanceof ArgumentError ? err.message : `Arguments rejected for "${body.command}".`;
+      return sendError(reply, 422, "ARGUMENT_REJECTED", reason, rid);
+    }
+
+    try {
       for (const slot of ["in", "out", "append"] as const) {
         const target = body.redirections?.[slot];
         if (target !== undefined) assertTargetInWorkspace(config, target);
       }
     } catch (err) {
       if (err instanceof RedirectionPolicyError) {
-        return sendError(reply, 422, body.command === "cat" ? "FILE_ARGUMENT_REJECTED" : "REDIRECTION_REJECTED", err.message, rid);
+        return sendError(reply, 422, "REDIRECTION_REJECTED", err.message, rid);
       }
       return sendError(reply, 422, "REDIRECTION_REJECTED", "Redirection target rejected.", rid);
     }
@@ -323,7 +488,10 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
     const result = runner.start({
       command: body.command,
       executable: resolved.path,
-      args,
+      // The validated vector, not the raw one. `validatedArgs` is what the
+      // catalog's schema and the workspace policy actually approved, so passing
+      // `args` here would record an execution nobody checked.
+      args: validatedArgs,
       redirections: body.redirections ?? {},
       timeoutMs,
     });

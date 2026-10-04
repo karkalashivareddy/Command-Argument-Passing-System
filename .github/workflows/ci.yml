@@ -38,6 +38,46 @@ jobs:
       - name: No AI author, committer, or co-author
         run: sh scripts/check-attribution.sh HEAD
 
+      - name: Attribution gate accepts legitimate identities and rejects AI ones
+        run: sh tests/scripts/test_attribution.sh scripts/check-attribution.sh
+
+  # ------------------------------------------------------- repository gates
+  # These are the checks that decide whether the repository's own claims are
+  # true: that every declared version location agrees, that no build artifact or
+  # database was committed, that no text file is missing its final newline, and
+  # that no document links to something which is not there.
+  #
+  # `make test-scripts` is run alongside the gates themselves because a gate that
+  # is never exercised on a deliberately broken fixture cannot be distinguished
+  # from one that always passes.
+  repository-gates:
+    name: repository gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Every gate, against the real repository
+        run: make test-scripts
+
+      - name: No build artifacts, databases, or local paths committed
+        run: sh scripts/check-repository-hygiene.sh
+
+      - name: Text files end with a newline
+        run: sh scripts/check-trailing-newline.sh
+
+      - name: Lockfiles are consistent with their manifests
+        run: sh scripts/check-lockfiles.sh
+
+      - name: The version gate is itself trustworthy
+        run: sh scripts/check-version.test.sh
+
   # ---------------------------------------------------------------- C engine
   c-engine:
     name: C engine (${{ matrix.cc }})
@@ -238,8 +278,14 @@ jobs:
         run: cat "$RUNNER_TEMP/gateway.log" || true
 
   # ---------------------------------------------------------------- hygiene
+  # Discovery of build artifacts, databases, and local paths is a full-history
+  # concern, so it keeps its own job with fetch-depth 0.
+  #
+  # check-docs.sh belongs to the gate job above rather than being duplicated
+  # here: `make test-scripts` already runs it, and running the same check twice
+  # in one workflow buys nothing but a second place for it to disagree.
   repository-hygiene:
-    name: repository hygiene
+    name: repository hygiene (history scope)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -250,11 +296,8 @@ jobs:
       - name: No build artifacts, databases, or local paths committed
         run: sh scripts/check-repository-hygiene.sh
 
-      - name: Text files end with a newline
-        run: sh scripts/check-trailing-newline.sh
-
-      - name: Lockfiles are consistent with their manifests
-        run: sh scripts/check-lockfiles.sh
+      - name: No AI author, committer, or co-author anywhere in history
+        run: sh scripts/check-attribution.sh
 
   # ------------------------------------------------------ dependency hygiene
   dependency-audit:

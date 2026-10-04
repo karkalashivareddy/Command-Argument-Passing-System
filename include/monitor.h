@@ -25,6 +25,7 @@ typedef enum {
     CAPS_EVENT_COMMAND_RECEIVED = 1,  /* a raw command line was read      */
     CAPS_EVENT_PARSED,                /* tokenization/redirection split ok */
     CAPS_EVENT_COMMAND_PARSE_ERROR,   /* parse or redirection syntax error */
+    CAPS_EVENT_PIPELINE_PARSED,       /* a multi-stage pipeline was built */
     CAPS_EVENT_REDIRECTION_OPENED,    /* all redirection files opened      */
     CAPS_EVENT_REDIRECTION_FAILED,    /* a redirection file could not open */
     CAPS_EVENT_PROCESS_STARTED,       /* fork() created the child          */
@@ -33,6 +34,8 @@ typedef enum {
     CAPS_EVENT_EXEC_ERROR,            /* execvp() failed in the child      */
     CAPS_EVENT_WAIT_FAILED,           /* waitpid() failed permanently     */
     CAPS_EVENT_EXECUTION_FAILED,      /* CAPS could not launch the child   */
+    CAPS_EVENT_PIPELINE_STARTED,      /* first stage of a pipeline forked  */
+    CAPS_EVENT_PIPELINE_COMPLETED,    /* every stage of a pipeline reaped  */
     CAPS_EVENT_SESSION_SUMMARY        /* monitor session summary           */
 } caps_event_type_t;
 
@@ -98,6 +101,39 @@ typedef struct {
      */
     caps_outcome_t outcome;
     const char *command;
+    /*
+     * The argv vector this event describes, element by element, as a borrowed
+     * array of `argv_count` pointers.  NULL when the event has no argv.
+     *
+     * WHY THE ELEMENTS AND NOT JUST `command`
+     * ---------------------------------------
+     * `command` is the argv joined for humans into one readable string. That is
+     * lossy and unrecoverable: an element containing a space and two elements
+     * that do not both render as the same text, so a consumer that wanted the
+     * real argv would have to split the string again -- which is a second lexer,
+     * and the two would eventually disagree about one quoting case.
+     *
+     * Emitting the elements makes the record reconstructable. A stage in a
+     * pipeline is a distinct process, and "which program, with which arguments"
+     * is part of what happened to it, not a display detail.
+     */
+    char *const *argv;
+    int argv_count;
+    /*
+     * Pipeline position, 0-based, or -1 for a single-command execution.
+     *
+     * A pipeline stage is a real process with a real lifecycle, and the only
+     * way the reader can tell which of three processes an event refers to is
+     * by its position.  Encoding it on the event keeps PROCESS_STARTED and
+     * PROCESS_EXITED as the two lifecycle events for every process, whether it
+     * is the only one or one of several, instead of inventing a parallel set of
+     * "stage started" events that the invariants would then have to reconcile.
+     */
+    int stage_index;
+    /* Total stages in this execution, or 0 when it is a single command. */
+    int stage_count;
+    /* The pipeline's process group id (== stage 0's pid), or 0 if unknown. */
+    pid_t pgid;
 } caps_event_t;
 
 typedef struct caps_monitor caps_monitor_t;

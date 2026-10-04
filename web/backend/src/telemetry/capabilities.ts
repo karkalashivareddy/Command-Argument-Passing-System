@@ -7,6 +7,7 @@ import {
   UNSUPPORTED_TELEMETRY_CATEGORIES,
   type SnapshotMetricKey,
 } from "./types.js";
+import { pidfdCapability, type IdentityConfidence } from "../execution/pidfd.js";
 
 /**
  * The capability response is a claim about what the observatory observes, so
@@ -79,9 +80,57 @@ export interface TelemetryCapabilities {
   counterResetRule: string;
   identityVerification: string;
   notCollected: string[];
+  /**
+   * How strongly the gateway can address a process it is about to signal.
+   *
+   * Published because the answer changes what a reader should believe about a
+   * termination. Under `VERIFIED` the kernel itself guarantees the signal
+   * reached the observed process. Under `UNVERIFIED` the guarantee comes from a
+   * start-ticks comparison the gateway performed, which is sound but is our
+   * check rather than the kernel's. Under `UNAVAILABLE` termination declines
+   * rather than guess.
+   */
+  processIdentity: ProcessIdentityCapability;
 }
 
-export function telemetryCapabilities(options: { enabled: boolean; source: string }): TelemetryCapabilities {
+export interface ProcessIdentityCapability {
+  /** The identity tuple the gateway treats as a process reference. */
+  model: string;
+  confidence: IdentityConfidence;
+  /** Always present. Never empty, and never an invented success. */
+  reason: string;
+  /** Kernel release the measurement was taken on, or null when unreadable. */
+  kernel: string | null;
+  /** The mechanism that carries a SIGKILL escalation on this host. */
+  terminationMechanism: "pidfd" | "start-ticks" | "unavailable";
+  /**
+   * The invariant, stated as a claim the implementation must uphold.
+   *
+   * Exposed as text so a client can display the guarantee rather than
+   * re-deriving it, and so the wording can only change with the code.
+   */
+  invariant: string;
+}
+
+export async function processIdentityCapability(): Promise<ProcessIdentityCapability> {
+  const cap = await pidfdCapability();
+  return {
+    model: "(pid, startTicks, bootId)",
+    confidence: cap.confidence,
+    reason: cap.reason,
+    kernel: cap.kernel,
+    // UNAVAILABLE means the helper itself is unusable, so no termination
+    // mechanism can be exercised at all. UNVERIFIED means pidfd is absent but
+    // start-ticks validation still runs, which is a working mechanism with a
+    // weaker guarantee. Collapsing the two would misdescribe the host.
+    terminationMechanism: cap.available ? "pidfd" : cap.confidence === "UNAVAILABLE" ? "unavailable" : "start-ticks",
+    invariant:
+      "A signal is never delivered to a bare PID. Where pidfd is available the kernel binds the target, so a recycled PID cannot be signalled. " +
+      "Where it is not, the recorded start ticks are compared against /proc/<pid>/stat immediately before the signal, and a mismatch refuses the signal.",
+  };
+}
+
+export async function telemetryCapabilities(options: { enabled: boolean; source: string }): Promise<TelemetryCapabilities> {
   const metricProvenance: Record<string, MetricProvenanceClass> = {};
   for (const key of SNAPSHOT_METRIC_KEYS) metricProvenance[key] = classifyMetric(key);
 
@@ -121,6 +170,7 @@ export function telemetryCapabilities(options: { enabled: boolean; source: strin
     counterResetRule: "A cumulative counter that decreases between two samples is reported as UNAVAILABLE, never as zero, because a decrease means the identity changed rather than that nothing was measured.",
     identityVerification: "A sampled PID is accepted only while its procfs PPID matches the gateway-spawned CAPS process and its start ticks stay constant; otherwise sampling stops for that execution.",
     notCollected: UNSUPPORTED_TELEMETRY_CATEGORIES.map((category) => category.label),
+    processIdentity: await processIdentityCapability(),
   };
 }
 

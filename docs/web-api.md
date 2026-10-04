@@ -130,6 +130,11 @@ what is **not**, so a UI cannot imply coverage the sampler does not provide.
 | `redirections.*` | optional; each value must be a non-empty, non-blank, workspace-relative name |
 | `timeoutMs` | ≥ 1000, clamped to `maxTimeoutMs` |
 
+This route takes **one command**. It has no stderr slot: `redirections` is a
+strict object of `in`/`out`/`append`, so a `stderr` key is a 400 rather than a
+silently ignored field. For stderr redirection, and for pipelines, use
+[`POST /api/terminal/execute`](#post-apiterminalexecute).
+
 Errors:
 
 | Code | Status | When |
@@ -249,6 +254,43 @@ data: {"sessionId":"exec_…","status":"COMPLETED","exitCode":0,"signal":null,"d
 
 The same ordering, across every session, with a bounded preload of the most
 recent events.
+
+## Terminal
+
+### `POST /api/terminal/execute`
+
+```json
+{ "commandLine": "seq 1 2000 | head -1 2> head.err", "timeoutMs": 30000 }
+```
+
+Executes a **whole command line** rather than one command: pipelines, `2>` /
+`2>>` stderr redirection, and every other redirection form in the grammar
+published by `GET /api/terminal/grammar`. This is the only route that accepts
+`2>`.
+
+```json
+{
+  "sessionId": "exec_...",
+  "stageCount": 2,
+  "commands": ["seq", "head"],
+  "resolvedExecutables": ["/usr/bin/seq", "/usr/bin/head"],
+  "timeoutMs": 30000,
+  "eventsUrl": "/api/sessions/exec_.../events"
+}
+```
+
+Validation runs **first and in full**: a line with one unacceptable stage runs
+nothing at all, rather than running the stages that happened to be valid. Each
+stage's command is replaced by the absolute path the gateway verified before
+the line reaches the engine, so the argv recorded in the event stream is that
+verified path, not a name the child would resolve against its own `PATH`.
+
+| Code | Status | When |
+| --- | --- | --- |
+| `INVALID_ARGUMENT` | 400 | body shape is wrong |
+| `TERMINAL_SYNTAX` | 400 | the line does not parse |
+| `TERMINAL_POLICY` | 403 | a stage is refused by policy; the response names `stageIndex` |
+| `CONCURRENCY_LIMIT_REACHED` | 429 | the gateway is at `maxConcurrent` |
 
 ## Control
 

@@ -1,5 +1,9 @@
 # CAPS — Process Execution Observatory
 
+**Version: 2.0.0** - Linux process execution, host observability, and pipeline evidence
+
+
+
 [![CI](https://github.com/karkalashivareddy/Command-Argument-Passing-System/actions/workflows/ci.yml/badge.svg)](https://github.com/karkalashivareddy/Command-Argument-Passing-System/actions/workflows/ci.yml)
 ![C11](https://img.shields.io/badge/engine-C11%20%2F%20POSIX-111827) ![Node](https://img.shields.io/badge/gateway-Node.js%2022-5FA04E) ![React](https://img.shields.io/badge/ui-React%2019-61DAFB) ![TypeScript](https://img.shields.io/badge/language-TypeScript-3178C6) ![SQLite](https://img.shields.io/badge/store-SQLite%20%28node%3Asqlite%29-003B57)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
@@ -484,19 +488,31 @@ cropped to hide a state.
 
 ### Flight recorder — a real `sleep` execution, with live procfs telemetry
 
-![Live execution: 12 procfs samples, a contiguous 20-event stream, and the terminal lifecycle](docs/screenshots/04-live-execution.png)
+![Live execution: procfs samples, a contiguous event stream, and the terminal lifecycle](docs/screenshots/06-live-execution.png)
 
 This is the evidence model rendered. The header shows `CAPS ONLINE`; the sample
-panel reports 12 persisted `process.snapshot` events with their provenance
-(`OBSERVED` for the procfs fields, `DERIVED` for the time range); the event
-stream declares itself *contiguous · no gaps*; and the stream ends with
+panel reports persisted `process.snapshot` events with their provenance
+(`OBSERVED` for the procfs fields, `DERIVED` for the time range) and says
+`UNAVAILABLE` with a reason wherever the kernel published no valid sample; the
+event stream declares itself *contiguous · no gaps*; and the stream ends with
 `process.exited` → `session.summary` → `execution.completed`. The recorded
 command label is the **absolute resolved path** of the executed binary, not the
 allowlist name — that is the executable-resolution boundary made visible.
 
+### Pipeline evidence — three real stages, three real PIDs
+
+![Pipeline evidence: per-stage pid, pgid, and the argv the engine handed to execve](docs/screenshots/05-pipeline-evidence.png)
+
+`echo caps pipeline | tr a-z A-Z | wc -c` run as one command line through the
+terminal's lexer. Each stage shows the PID the kernel assigned it, the one
+process group they share (which is what makes a timeout reach all of them), and
+the argv the engine actually passed to `execve` — not a label re-split by the
+browser. Where the engine bounded a long argv, the card says how many elements it
+dropped instead of showing a short vector as if it were the whole one.
+
 ### 3D Process Space
 
-![3D Process Space: process tree view, resource lens selector, and the 3D/Table view switch](docs/screenshots/06-process-space-3d.png)
+![3D Process Space: process tree view, resource lens selector, and the 3D/Table view switch](docs/screenshots/08-process-space-3d.png)
 
 The same evidence, placed spatially: `X` a deterministic process lane, `Y`
 process depth, `Z` execution time. Note the honest empty state — *NO PROCESS
@@ -504,26 +520,40 @@ SELECTED* — rather than a node invented to fill the frame.
 
 ### A real workload, with real telemetry
 
-![Controlled workload: CPU, memory and I/O on one PID](docs/screenshots/05-workload-telemetry.png)
+![Controlled workload: CPU, memory and I/O on one PID](docs/screenshots/07-workload-telemetry.png)
 
 ### Replay — reconstruction, not re-execution
 
-![Replay of a persisted execution](docs/screenshots/07-replay.png)
+![Replay of a persisted execution](docs/screenshots/09-replay.png)
+
+### Host explorer — CAPS-owned work separated from everything else
+
+![Process explorer: the host's real processes with ownership stated](docs/screenshots/11-process-explorer.png)
+
+Every row carries its own provenance. A `—` in the PSS or I/O columns is a
+statement that the kernel published no usable sample for that process, with the
+reason on hover — never a zero. The Owner column separates the processes this
+gateway started, and therefore verified identity for and can signal, from the host
+processes it only watches.
+
+### System control center — what this host can and cannot do
+
+![System control: pidfd identity confidence, guardrails, thermal availability](docs/screenshots/12-system-control.png)
 
 | Surface | What it shows |
 | --- | --- |
 | ![Overview](docs/screenshots/01-overview.png) | Overview: recorded executions, live stream, readiness |
-| ![Execute](docs/screenshots/02-execute.png) | Execute: the structured request the gateway validates |
-| ![Flight recorder](docs/screenshots/03-flight-recorder.png) | Flight recorder: the canonical event timeline |
-| ![Analytics](docs/screenshots/09-analytics.png) | Analytics: aggregates over the persisted event store |
-| ![Compare](docs/screenshots/10-compare.png) | Compare: two real executions side by side |
-| ![Processes](docs/screenshots/08-processes.png) | Processes: observed identities and their state |
-| ![Signals](docs/screenshots/11-signals.png) | Signals: the fail-closed `SIGINT` model |
-| ![Redirection](docs/screenshots/12-redirection.png) | Redirection: descriptor lifecycle and `O_NOFOLLOW` |
-| ![Architecture](docs/screenshots/13-architecture.png) | Architecture: the pipeline as the app presents it |
-| ![Settings](docs/screenshots/14-settings.png) | Settings: engine probe, limits, readiness, retention |
-| ![Responsive](docs/screenshots/15-responsive.png) | Narrow viewport: the layout degrades rather than overflowing |
-
+| ![Terminal](docs/screenshots/02-terminal.png) | Terminal: a command line lexed by the engine before it runs |
+| ![Execute](docs/screenshots/03-execute.png) | Execute: the structured request the gateway validates |
+| ![Flight recorder](docs/screenshots/04-flight-recorder.png) | Flight recorder: the canonical event timeline |
+| ![Analytics](docs/screenshots/13-analytics.png) | Analytics: aggregates over the persisted event store |
+| ![Compare](docs/screenshots/14-compare.png) | Compare: two real executions side by side |
+| ![Processes](docs/screenshots/10-processes.png) | Processes: observed identities and their state |
+| ![Signals](docs/screenshots/15-signals.png) | Signals: the fail-closed `SIGINT` model |
+| ![Redirection](docs/screenshots/16-redirection.png) | Redirection: descriptor lifecycle and `O_NOFOLLOW` |
+| ![Architecture](docs/screenshots/17-architecture.png) | Architecture: the pipeline as the app presents it |
+| ![Settings](docs/screenshots/18-settings.png) | Settings: engine probe, limits, readiness, retention |
+| ![Responsive](docs/screenshots/19-responsive.png) | Narrow viewport: the layout degrades rather than overflowing |
 
 
 1. Open **Execute** (`E`). Run `echo Hello CAPS`.
@@ -594,21 +624,32 @@ why, is in
 | --- | --- | --- |
 | GCC strict build (`-Werror`) | PASS | `make CC=gcc CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -g"` |
 | Clang strict build (`-Werror`) | NOT RUN here | configured in the CI matrix; clang is not installed on this machine |
-| C unit + integration suite | PASS | `make test` — 13 suites |
-| C ASan + UBSan (leak detection) | PASS | `make test-asan` |
+| C unit + integration suite | PASS | `make test` — **16 suites, 239 assertions** |
+| C ASan + UBSan (leak detection) | PASS | `make test-asan` — the same 16 suites, 239 assertions |
 | Controlled workload suite | PASS | `make test-workloads` |
 | Workload sanitizers | PASS | `make test-workloads-asan` |
 | Backend typecheck + build | PASS | `npm run typecheck && npm run build` |
-| Backend tests | PASS | **185 tests**, 12 files — `node node_modules/vitest/vitest.mjs run` |
+| Backend tests | PASS | **433 tests**, 26 files — `node node_modules/vitest/vitest.mjs run` |
 | Frontend typecheck + production build | PASS | `npm run typecheck && npm run build` |
-| Frontend tests | PASS | **139 tests**, 9 files |
+| Frontend tests | PASS | **247 tests**, 13 files |
 | Real gateway integration (real engine, real workloads) | PASS | `web/backend/tests/api/server.test.ts` — 32 tests |
-| Replay integrity (13 invariants) | PASS | `web/backend/src/events/invariants.ts` + its unit suite |
+| Catalog schema vs the real program interface | PASS | `web/backend/tests/unit/catalogSchema.test.ts` |
+| stderr redirection: capability matches both routes | PASS | `web/backend/tests/api/stderrRedirection.test.ts` |
+| Pipeline stage accounting (I11, I14) | PASS | `web/backend/tests/api/pipeline.test.ts`, `tests/test_pipeline.sh` |
+| CAPS-owned attribution, end to end | PASS | `web/backend/tests/api/ownership.test.ts` |
+| pidfd identity (incl. a real zombie) | PASS | `tests/test_pidfd.sh` |
+| Resource limits reach the child | PASS | `tests/test_limits.sh` |
+| Thermal guard decisions | PASS | `tests/unit/thermalGuard.test.ts`, `thermalGuardConfig.test.ts` |
+| Failure injection | PASS | `tests/unit/failureInjection.test.ts` |
+| Ground truth vs raw `/proc` | PASS | [docs/ground-truth-verification.md](docs/ground-truth-verification.md) — **59 checks** |
+| Catalog examples through the engine lexer | PASS | 40 of 40 |
+| Cross-view consistency (one real execution) | PASS | [docs/cross-view-trace.md](docs/cross-view-trace.md) |
 | Cross-view correlation (2D ≡ 3D) | PASS | `web/frontend/src/lib/hardening.test.ts` |
 | SSE resume, race-free delivery, no synthetic sequence | PASS | `scripts/browser-smoke.sh` — 15 assertions |
 | WebGL / 2D / table fallbacks | PASS | `web/frontend/src/components/space/SpaceErrorBoundary.tsx` |
 | Repository hygiene (no artifacts, secrets, local paths) | PASS | `scripts/check-repository-hygiene.sh` |
-| Documentation links (53 relative links, 33 files) | PASS | `scripts/check-docs.sh` |
+| Documentation links | PASS | `scripts/check-docs.sh` |
+| Version consistency + the gate's own self-test | PASS | `scripts/check-version.sh`, `scripts/check-version.test.sh` |
 | Commit attribution integrity | PASS | `scripts/check-attribution.sh` |
 | Visual-regression (pixel diff) | NOT APPLICABLE | no such system exists in this repository and none is claimed |
 
@@ -701,31 +742,50 @@ Command-Argument-Passing-System/
 
 ## Limitations
 
-These are deliberate scope boundaries. They are what keep the system
-explainable and every claim evidence-backed.
+Full detail, with the reason for each, in
+**[docs/limitations.md](docs/limitations.md)**. The headline boundaries:
 
-* **Single-node execution model.** One command at a time, per session, on one
-  host. There is no distributed ingestion and no multi-host aggregation.
-* **Linux only.** The engine is POSIX; the telemetry is `/proc`. On any other
-  platform the gateway starts and reports telemetry as unavailable rather than
+* **No shell.** There is no `sh -c`, no glob expansion, no `$VAR`, no command
+  substitution, no `&&`/`||`/`;` chaining, and no heredocs. CAPS has exactly one
+  lexer — the one in the C engine — and the browser and gateway both call it
+  rather than re-implementing it. Two lexers eventually disagree about one quoting
+  case, always in the unsafe direction.
+* **Not every Linux command.** Only an explicit allowlist with per-command
+  argument schemas. Unknown commands are refused with a reason.
+* **Pipelines are `|`-only.** No `&&`, no `||`, no stderr redirection.
+* **`du` takes files, not directories.** The workspace policy admits regular
+  files only, so `du .` is refused even though `du` normally defaults to the
+  current directory. Permitting it would open directory traversal on the host
+  filesystem.
+* **No per-process network I/O.** Linux publishes no per-process byte counters in
+  procfs. Host interface counters are reported; per-process attribution is not
+  attempted, because any figure would be a model rather than a measurement.
+* **Execution-scoped telemetry follows one PID.** The sampler follows the single
+  PID CAPS reported, so a program's own descendants are not discovered. The
+  **host** inventory is separate and does build a parent/child tree.
+* **Linux only.** The engine is POSIX; the telemetry is `/proc` and `/sys`. On any
+  other platform the gateway reports telemetry as unavailable rather than
   inventing values.
-* **One observed process per execution.** The sampler follows the single PID
-  CAPS reported. Descendants are not discovered, so there is no process tree
-  and no per-descendant metric.
-* **No eBPF, no syscall tracing, no cgroup accounting, no kernel tracepoints,
-  no GPU telemetry, no network I/O.** Only kernel-exposed procfs counters.
-* **Allowlisted execution.** CAPS runs a fixed set of commands. It is not a
-  general remote-execution product and is not designed to be one.
-* **Loopback security boundary.** Safe for a single user on one machine. There
-  is no multi-tenant security model, no RBAC, and no per-user isolation.
-* **Output channels share a descriptor.** CAPS diagnostics and the target's
-  stderr are separated line-wise, not at descriptor level.
-* **3D requires WebGL**, with real 2D and table fallbacks. The fallbacks are
-  functional but not equivalent in visual density.
-* **No pixel-diff verification.** See the note under Verification.
-* **WSL2 is verified, bare Windows is not.** The engine and the gateway
-  integration suite are exercised on WSL2. The frontend unit tests also run on
-  Windows.
+* **Single-node.** One host, no distributed ingestion, no multi-host aggregation.
+* **No eBPF, syscall tracing, cgroup accounting, tracepoints, or GPU telemetry.**
+  Kernel-exposed procfs counters only.
+* **Loopback security boundary.** Safe for a single user on one machine. No
+  multi-tenant model, no RBAC, no per-user isolation. A confined workspace is not
+  a privilege boundary: there are no namespaces, seccomp, or cgroups.
+* **`kill`, `pkill`, and `killall` are refused.** They can reach processes CAPS
+  does not own. CAPS signals only what it started, and verifies kernel identity
+  first.
+* **3D requires WebGL**, with functional 2D and table fallbacks that are less
+  dense visually.
+* **No pixel-diff verification.** The browser suite asserts behaviour, not
+  pixels. See [docs/testing.md](docs/testing.md).
+* **WSL2 is verified, bare Windows is not** — and WSL2 is a guest, so its
+  `/proc` figures describe the guest kernel, not physical hardware. CPU frequency
+  is typically `UNAVAILABLE` there, and thermal discovery depends on what the
+  guest exposes.
+* **Clang is verified in CI, not locally.** The development environment used for
+  this release has no Clang and no package-installation rights. The local run is
+  GCC with `-Werror` plus ASan/UBSan.
 
 ## Future scope
 
@@ -753,19 +813,25 @@ Nothing on the planned list is claimed anywhere else in this repository.
 | [SECURITY.md](SECURITY.md) | The threat model, what is enforced, and what is out of scope |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to build, verify, and the authorship policy |
 | [CHANGELOG.md](CHANGELOG.md) | What was built, in order |
-| [docs/architecture.md](docs/architecture.md) | **The reference**: pipeline, boundaries, invariants, lifecycle |
+| [docs/limitations.md](docs/limitations.md) | **What CAPS does not do** — read this before assuming coverage |
+| [docs/architecture.md](docs/architecture.md) | The reference: pipeline, boundaries, invariants, lifecycle |
 | [docs/observability-model.md](docs/observability-model.md) | What is observed, what is not, and provenance |
+| [docs/host-telemetry.md](docs/host-telemetry.md) | Every host metric, its kernel source, and its provenance |
+| [docs/guardrails.md](docs/guardrails.md) | What is enforced, by which layer, and what is not |
 | [docs/web-architecture.md](docs/web-architecture.md) | Gateway module layout, event model, storage |
 | [docs/web-api.md](docs/web-api.md) | Endpoint reference |
-| [docs/telemetry.md](docs/telemetry.md) | Every procfs field, its source, and its sampling policy |
+| [docs/telemetry.md](docs/telemetry.md) | Per-execution telemetry for CAPS-owned children |
 | [docs/monitor.md](docs/monitor.md) | The C monitor protocol and its event types |
 | [docs/process-lifecycle.md](docs/process-lifecycle.md) | `fork`/`exec`/`wait` semantics as CAPS implements them |
+| [docs/process-microscope.md](docs/process-microscope.md) | Per-process telemetry and identity verification |
 | [docs/signals.md](docs/signals.md) | The signal model and its fail-closed policy |
 | [docs/redirection.md](docs/redirection.md) | Descriptor lifecycle and the `O_NOFOLLOW` policy |
-| [docs/process-microscope.md](docs/process-microscope.md) | Per-process telemetry and identity verification |
 | [docs/three-dimensional-observatory.md](docs/three-dimensional-observatory.md) | The 3D scene, its coordinate semantics, and its fallbacks |
 | [docs/realtime-visualization.md](docs/realtime-visualization.md) | The shared cursor and cross-view synchronization |
 | [docs/workload-lab.md](docs/workload-lab.md) | Each workload, its bounds, and what it demonstrates |
+| [docs/testing.md](docs/testing.md) | Every verification command, and what runs where |
+| [docs/ground-truth-verification.md](docs/ground-truth-verification.md) | **Every figure compared against the raw kernel file it claims to come from** |
+| [docs/cross-view-trace.md](docs/cross-view-trace.md) | **A recorded trace of one execution through every surface** |
 | [docs/runtime-verification.md](docs/runtime-verification.md) | How to verify a running instance by hand |
 | [docs/faculty-demo.md](docs/faculty-demo.md) | A guided demonstration script |
 | [docs/development-phases.md](docs/development-phases.md) | Historical: how the project was built up |

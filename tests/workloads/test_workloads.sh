@@ -191,21 +191,65 @@ fi
 # 6. caps_fork_tree creates a real, bounded, fully reaped process tree.
 # ---------------------------------------------------------------------------
 echo "== caps_fork_tree =="
-# /proc/<pid>/task/<tid>/children is a bare, space-separated PID list — it
-# has no "PPid:" label, so it is read directly.
+# /proc/<pid>/task/<tid>/children is a bare, space-separated PID list — it has
+# no "PPid:" label, so it is read directly.
+#
+# `cat` rather than an input redirect. A redirect over a glob is an "ambiguous
+# redirect" error in bash as soon as it matches more than one path, and the
+# number of task directories is not fixed: an AddressSanitizer build creates
+# extra threads, so /proc/<pid>/task/*/children matches two files and the
+# redirect fails. The failure looks like "this process has no children", which
+# is why the sanitizer run reported zero children for a workload that had them.
 read_children() {
-    tr -s ' \t' '\n' <"/proc/$1/task"/*/children 2>/dev/null |
+    cat "/proc/$1/task"/*/children 2>/dev/null |
+        tr -s ' \t' '\n' |
         grep -E '^[0-9]+$' || true
 }
 
 "$dir/caps_fork_tree" 4 2 >"$tmp/tree.out" 2>"$tmp/tree.err" &
 tree_pid=$!
-sleep 1
+
+# Poll for the tree rather than sleeping a fixed interval.
+#
+# A fixed `sleep 1` is a race that passes on a fast machine and fails under
+# AddressSanitizer, where start-up is several times slower: the children are
+# forked later than the sample, so the suite reports "exposed 0 direct
+# children" for a workload that did exactly what it was asked. Sampling
+# repeatedly over a window removes the race and works at any speed.
+#
+# The window must stay inside the workload's own 4-second budget, otherwise the
+# tree can exit before it is observed and the failure would be genuine.
+wait_for() {
+    # wait_for <expected-count> <description>
+    local want="$1" what="$2" i
+    for i in $(seq 1 60); do
+        if [ "$(read_children "$tree_pid" | wc -l | tr -d ' ')" -ge "$want" ]; then
+            return 0
+        fi
+        # The process must still be alive; once it exits the tree is gone.
+        kill -0 "$tree_pid" 2>/dev/null || return 1
+        sleep 0.05
+    done
+    return 1
+}
+
+wait_for 2 "direct children" || true
 tree_children=$(read_children "$tree_pid" | wc -l | tr -d ' ')
 grandchild_count=0
-for child in $(read_children "$tree_pid"); do
-    gc=$(read_children "$child" | wc -l | tr -d ' ')
-    grandchild_count=$((grandchild_count + gc))
+# The grandchild appears one level deeper and therefore later than the direct
+# children, so it needs its own wait rather than being read on the same sample.
+# Sampling it once immediately after the children appear was a second race: the
+# fork that creates the grandchild had not happened yet, so the assertion failed
+# for a correct workload.
+for _ in $(seq 1 40); do
+    grandchild_count=0
+    for child in $(read_children "$tree_pid"); do
+        gc=$(read_children "$child" | wc -l | tr -d ' ')
+        grandchild_count=$((grandchild_count + gc))
+    done
+    [ "${grandchild_count:-0}" -ge 1 ] && break
+    kill -0 "$tree_pid" 2>/dev/null || break
+    sleep 0.05
 done
 wait "$tree_pid"
 tree_status=$?
@@ -221,6 +265,10 @@ else
     failmsg "caps_fork_tree exposed no grandchild"
 fi
 # No zombies may survive: the parent reaps every worker.
+#
+# The wait above has already returned, so the parent is gone and reaping is
+# complete; a short settle only guards against the kernel's own teardown of the
+# /proc entries, and is not where the correctness of this assertion comes from.
 sleep 1
 zombies=$(awk -v p="$tree_pid" '$4==p {c++} END{print c+0}' /proc/[0-9]*/stat 2>/dev/null)
 [ "${zombies:-0}" -eq 0 ] || failmsg "caps_fork_tree left $zombies unreaped child(ren)"

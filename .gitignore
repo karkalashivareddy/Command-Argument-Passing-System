@@ -39,3 +39,15 @@ data/
 web/frontend/docs/
 *.env.local
 *.env.*.local
+
+# Scratch files left in the repository root by ad-hoc runs. None is source, and
+# none is referenced by the engine, the gateway, or any test. `output.txt` in
+# particular collides by name with the workspace file the `du` catalog example
+# uses, so ignoring the name is safe precisely because nothing at the root is.
+/output.txt
+/output.txtx
+/shape.cjs
+
+# A personal slide deck, not part of the source tree. Tracked here rather than
+# deleted so it stays on disk without becoming a repository artifact.
+*.pptx

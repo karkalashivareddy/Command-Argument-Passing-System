@@ -298,11 +298,11 @@ export default function ExecutePage() {
 
           <Field label="Timeout">
             <select value={timeoutMs ?? ""} onChange={(e) => setTimeoutMs(e.target.value ? Number(e.target.value) : null)} className={inputCls} disabled={disabled}>
-              <option value="">Default ({(capabilities?.limits.defaultTimeoutMs ?? 30000) / 1000}s)</option>
+              <option value="">Default ({capabilities === null ? "…" : `${capabilities.limits.defaultTimeoutMs / 1000}s`})</option>
               {requiredTimeout > 0 && <option value={String(requiredTimeout)}>Workload budget + margin ({requiredTimeout / 1000}s)</option>}
               <option value="5000">5s</option>
               <option value="15000">15s</option>
-              <option value={String(capabilities?.limits.maxTimeoutMs ?? 120000)}>Max ({(capabilities?.limits.maxTimeoutMs ?? 120000) / 1000}s)</option>
+              <option value={String(capabilities?.limits.maxTimeoutMs)}>Max ({capabilities === null ? "…" : `${capabilities.limits.maxTimeoutMs / 1000}s`})</option>
             </select>
             {timeoutTooShort && (
               <p className="mt-1 flex items-start gap-1.5 text-[11.5px] text-[var(--red)]">
@@ -315,7 +315,13 @@ export default function ExecutePage() {
 
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line-0)] pt-4">
             <div className="flex gap-2">
-              <Badge tone="neutral">max concurrent {capabilities?.limits.maxConcurrent ?? 4}</Badge>
+              {/*
+              The gateway's configured concurrency, or nothing at all. A baked-in
+              `?? 4` would put a number on screen and label it as the operator's
+              setting while `/api/capabilities` had not answered yet -- and this
+              page states elsewhere that its limits are never guessed client-side.
+            */}
+            {capabilities !== null && <Badge tone="neutral">max concurrent {capabilities.limits.maxConcurrent}</Badge>}
               {activeProfile !== null && <Badge tone={activeProfile.available ? "neutral" : "warn"}>{activeProfile.available ? activeProfile.executableRelativePath : "unavailable"}</Badge>}
               <Badge tone="neutral">{engineState === "online" ? "engine ready" : engineState}</Badge>
             </div>

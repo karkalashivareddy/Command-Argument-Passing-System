@@ -81,29 +81,33 @@ describe("process identity (PID-reuse safety)", () => {
     expect(readProcessIdentity(null)).toBeNull();
   });
 
-  it("refuses to escalate without a recorded identity", () => {
+  it("refuses to escalate without a recorded identity", async () => {
     resetIdentityCache();
-    const r = escalateTo(null, "SIGKILL");
+    const r = await escalateTo(null, "SIGKILL");
     expect(r.sent).toBe(false);
     expect(r.reason).toMatch(/bare PID/);
   });
 
-  it("refuses to signal a PID whose identity no longer matches", () => {
+  it("refuses to signal a PID whose identity no longer matches", async () => {
     resetIdentityCache();
     // Our own PID exists, but with start ticks that do not match: this is
     // exactly the recycled-PID case, and the escalation must not fire.
     const real = readProcessIdentity(process.pid);
     expect(real).not.toBeNull();
-    const r = escalateTo({ pid: process.pid, startTicks: (real!.startTicks + 1) % 1_000_000 }, "SIGKILL");
+    const r = await escalateTo({ pid: process.pid, startTicks: (real!.startTicks + 1) % 1_000_000 }, "SIGKILL");
     expect(r.sent).toBe(false);
-    expect(r.reason).toMatch(/reused|different process/);
+    // Both layers are allowed to refuse, and which one fired depends on
+    // whether this kernel provides pidfd. Both state the same fact -- the PID
+    // no longer identifies the tracked process -- so the assertion accepts
+    // either wording rather than pinning the test to one mechanism.
+    expect(r.reason).toMatch(/recycl|reused|different process/);
     // The test process is demonstrably still alive.
     expect(process.kill(process.pid, 0)).toBe(true); // signal 0 = liveness probe
   });
 
-  it("refuses to escalate to a process that no longer exists", () => {
+  it("refuses to escalate to a process that no longer exists", async () => {
     resetIdentityCache();
-    const r = escalateTo({ pid: 2 ** 22 - 1, startTicks: 1 }, "SIGKILL");
+    const r = await escalateTo({ pid: 2 ** 22 - 1, startTicks: 1 }, "SIGKILL");
     expect(r.sent).toBe(false);
     expect(r.reason).toMatch(/gone/);
   });

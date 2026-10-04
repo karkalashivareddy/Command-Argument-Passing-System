@@ -2,6 +2,12 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
+import {
+  validateThermalGuardConfig,
+  type SensorSelector,
+  type ThermalGuardConfig,
+} from "../execution/thermalGuard.js";
+
 /**
  * Repo-root detection: this file lives at <repo>/web/backend/src/config/env.ts.
  * Ascending four levels from the module directory reaches the repository root.
@@ -18,7 +24,7 @@ export const repoRoot = resolve(HERE, "../../../..");
  * CAPS_VERSION is generated from it at build time (see Makefile) and the npm
  * package versions are asserted against it in tests/unit/version.test.ts.
  */
-export const PRODUCT_VERSION = "1.1.0";
+export const PRODUCT_VERSION = "2.0.0";
 
 /** Loopback literals that are the only acceptable local bind targets. */
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -55,6 +61,46 @@ const envSchema = z.object({
   /** Graceful window between SIGTERM and SIGKILL during shutdown and timeout. */
   CAPS_TERMINATE_GRACE_MS: z.coerce.number().int().min(0).max(60_000).default(2000),
   CAPS_LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+
+  /*
+   * Thermal guard.
+   *
+   * Off by default, and the default is a deliberate position rather than an
+   * omission: a guard that silently changes whether a workload runs, on a host
+   * that may expose no sensor at all, is a surprise. Enabling it is an explicit
+   * decision made alongside explicit thresholds.
+   *
+   * The sensor selector is a single string rather than nested configuration so
+   * that every accepted value is visible in the environment, and so an invalid
+   * one is rejected at startup instead of being silently treated as `auto` --
+   * which is what would happen if an unrecognised selector defaulted.
+   */
+  CAPS_THERMAL_GUARD_ENABLED: z.coerce.boolean().default(false),
+  CAPS_THERMAL_GUARD_SENSOR: z.enum(["auto", "package"]).default("auto"),
+  CAPS_THERMAL_GUARD_SENSOR_NAME: z.string().min(1).max(128).optional(),
+  CAPS_THERMAL_GUARD_SENSOR_PATH: z.string().min(1).max(512).optional(),
+  CAPS_THERMAL_GUARD_WARNING_C: z.coerce.number().min(-273.15).max(200).default(80),
+  CAPS_THERMAL_GUARD_CRITICAL_C: z.coerce.number().min(-273.15).max(200).default(95),
+  CAPS_THERMAL_GUARD_ACTION: z.enum(["WARN", "TERM", "TERM_THEN_KILL"]).default("WARN"),
+  CAPS_THERMAL_GUARD_TERM_GRACE_MS: z.coerce.number().int().min(0).max(60_000).default(2000),
+
+  /*
+   * Guardrails.
+   *
+   * Address space is NOT a memory budget. RLIMIT_AS caps the total virtual
+   * address space a process may map, which on a 64-bit host is numerically
+   * enormous and bears no simple relation to physical RAM: a modest AS limit
+   * can be hit by mmap alone, and a generous one says nothing about RSS. It is
+   * named AS everywhere in the config and the UI for exactly that reason.
+   *
+   * The CPU budget is in USER_HZ-seconds of kernel-reported CPU time, which is
+   * what `wait4()`/`getrusage()` report and what `/proc/<pid>/stat` publishes,
+   * so it is directly comparable with the telemetry rather than a separate
+   * accounting convention.
+   */
+  CAPS_CPU_BUDGET_MS: z.coerce.number().int().min(0).max(3_600_000).default(0),
+  CAPS_ADDRESS_SPACE_LIMIT_BYTES: z.coerce.number().int().min(0).max(1 << 46).default(0),
+  CAPS_STDERR_MAX_BYTES: z.coerce.number().int().min(1024).max(64 * 1024 * 1024).default(1024 * 1024),
 });
 
 export type CapsConfig = {
@@ -74,6 +120,39 @@ export type CapsConfig = {
   retentionSweepMs: number;
   terminateGraceMs: number;
   logLevel: "debug" | "info" | "warn" | "error";
+  thermalGuard: import("../execution/thermalGuard.js").ThermalGuardConfig;
+  guardrails: GuardrailConfig;
+};
+
+/**
+ * Resource limits applied to every CAPS-spawned child.
+ *
+ * Every field distinguishes "configured limit" from "observed usage" from
+ * "enforcement result" in the API surface that publishes it, because a limit
+ * that cannot be shown to have been applied is indistinguishable from a limit
+ * that was written down and ignored.
+ *
+ * A zero means "not limited", and is reported as such rather than as a limit of
+ * zero bytes, which would refuse every execution.
+ */
+export type GuardrailConfig = {
+  /** Wall-clock ceiling. Always enforced; the engine's own timeout. */
+  wallTimeMs: number;
+  /** Maximum of wall-time and any per-execution request. */
+  maxWallTimeMs: number;
+  /** Per-stream stdout ceiling. */
+  stdoutBytes: number;
+  /** Per-stream stderr ceiling. Stderr is bounded separately: an unbounded
+   *  stderr fills a pipe and deadlocks a child that is otherwise healthy. */
+  stderrBytes: number;
+  /** CPU-time budget in USER_HZ-derived milliseconds. 0 means unlimited. */
+  cpuBudgetMs: number;
+  /** RLIMIT_AS in bytes. 0 means unlimited. NOT a physical-memory limit. */
+  addressSpaceBytes: number;
+  /** Simultaneous executions across the gateway. */
+  maxConcurrent: number;
+  /** Whether the thermal guard is enabled at all. */
+  thermalGuardEnabled: boolean;
 };
 
 /** True for a literal that only accepts connections from this machine. */
@@ -168,7 +247,66 @@ export function loadConfig(): CapsConfig {
     retentionSweepMs: env.CAPS_RETENTION_SWEEP_MS,
     terminateGraceMs: env.CAPS_TERMINATE_GRACE_MS,
     logLevel: env.CAPS_LOG_LEVEL,
+    thermalGuard: thermalGuardFromEnv(env),
+    guardrails: {
+      wallTimeMs: env.CAPS_DEFAULT_TIMEOUT_MS,
+      maxWallTimeMs: env.CAPS_MAX_TIMEOUT_MS,
+      stdoutBytes: env.CAPS_MAX_OUTPUT_BYTES,
+      stderrBytes: env.CAPS_STDERR_MAX_BYTES,
+      cpuBudgetMs: env.CAPS_CPU_BUDGET_MS,
+      addressSpaceBytes: env.CAPS_ADDRESS_SPACE_LIMIT_BYTES,
+      maxConcurrent: env.CAPS_MAX_CONCURRENT,
+      thermalGuardEnabled: env.CAPS_THERMAL_GUARD_ENABLED,
+    },
   };
+}
+
+/**
+ * Build the thermal guard configuration from the environment.
+ *
+ * The three selector variables are mutually exclusive, and specifying two is
+ * refused here rather than resolved by precedence. A silent precedence rule
+ * would leave an operator who set both believing they had chosen the second.
+ */
+function thermalGuardFromEnv(env: z.infer<typeof envSchema>): ThermalGuardConfig {
+  const set = [
+    env.CAPS_THERMAL_GUARD_SENSOR_NAME !== undefined ? "CAPS_THERMAL_GUARD_SENSOR_NAME" : null,
+    env.CAPS_THERMAL_GUARD_SENSOR_PATH !== undefined ? "CAPS_THERMAL_GUARD_SENSOR_PATH" : null,
+  ].filter((v): v is string => v !== null);
+
+  if (set.length > 1) {
+    throw new Error(
+      `CAPS_THERMAL_GUARD_SENSOR_NAME and CAPS_THERMAL_GUARD_SENSOR_PATH are mutually exclusive, but both were set (${set.join(", ")}). ` +
+        `Remove one.`,
+    );
+  }
+
+  const sensor: SensorSelector =
+    env.CAPS_THERMAL_GUARD_SENSOR_PATH !== undefined
+      ? { kind: "path", path: env.CAPS_THERMAL_GUARD_SENSOR_PATH }
+      : env.CAPS_THERMAL_GUARD_SENSOR_NAME !== undefined
+        ? { kind: "name", name: env.CAPS_THERMAL_GUARD_SENSOR_NAME }
+        : env.CAPS_THERMAL_GUARD_SENSOR === "package"
+          ? { kind: "package" }
+          : { kind: "auto" };
+
+  const config: ThermalGuardConfig = {
+    enabled: env.CAPS_THERMAL_GUARD_ENABLED,
+    sensor,
+    warningC: env.CAPS_THERMAL_GUARD_WARNING_C,
+    criticalC: env.CAPS_THERMAL_GUARD_CRITICAL_C,
+    action: env.CAPS_THERMAL_GUARD_ACTION,
+    termGraceMs: env.CAPS_THERMAL_GUARD_TERM_GRACE_MS,
+  };
+
+  const problems = validateThermalGuardConfig(config);
+  if (problems.length > 0) {
+    throw new Error(
+      `Invalid thermal guard configuration:\n  - ${problems.join("\n  - ")}\n` +
+        `The gateway is refusing to start rather than running a guard whose thresholds cannot all be true.`,
+    );
+  }
+  return config;
 }
 
 /** Redact a token for logging: never log the value, only whether one exists. */

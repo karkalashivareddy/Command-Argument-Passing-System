@@ -40,3 +40,37 @@ void caps_join_argv(char *const argv[], char *dst, size_t size)
     }
     dst[pos] = '\0';
 }
+
+void caps_json_escape(FILE *out, const char *s)
+{
+    if (s == NULL) {
+        fputs("", out);
+        return;
+    }
+    for (const unsigned char *p = (const unsigned char *)s; *p != '\0'; p++) {
+        unsigned char c = *p;
+        switch (c) {
+        case '"':  fputs("\\\"", out); break;
+        case '\\': fputs("\\\\", out); break;
+        case '\n': fputs("\\n", out);  break;
+        case '\r': fputs("\\r", out);  break;
+        case '\t': fputs("\\t", out);  break;
+        case '\b': fputs("\\b", out);  break;
+        case '\f': fputs("\\f", out);  break;
+        default:
+            if (c < 0x20) {
+                /*
+                 * Any other control byte has no short escape, so it is
+                 * emitted as \u00XX.  Passing it through would produce a JSON
+                 * document no parser accepts, which is worse than useless: the
+                 * caller would see a parse error and conclude the command line
+                 * was rejected, when in fact the command was fine.
+                 */
+                fprintf(out, "\\u%04x", c);
+            } else {
+                fputc((int)c, out);
+            }
+            break;
+        }
+    }
+}

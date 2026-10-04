@@ -24,6 +24,9 @@ export type CanonicalEventType =
   | "process.exited"
   | "process.exec_error"
   | "process.wait_failed"
+  | "pipeline.parsed"
+  | "pipeline.started"
+  | "pipeline.completed"
   | "process.launch_failed"
   | "signal.received"
   | "session.summary";

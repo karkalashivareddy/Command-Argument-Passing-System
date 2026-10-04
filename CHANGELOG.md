@@ -1,11 +1,149 @@
+## 2.0.0 - Process identity, host observability, and the CAPS terminal
+
+### Process identity
+
+- pidfd-based process addressing through a new `build/caps_pidfd` helper, because
+  Node exposes no pidfd API. The target is bound with `pidfd_open`, its start
+  ticks are verified, and only then is it signalled.
+- A pidfd cannot be re-pointed by the kernel, so a recycled PID cannot be
+  signalled. Where pidfd is unavailable the start-ticks check still runs, and the
+  recorded `mechanism` says which one carried the signal.
+- Identity confidence is classified `VERIFIED`, `UNVERIFIED`, or `UNAVAILABLE`,
+  and published at `/api/capabilities` with the kernel it was measured on.
+
+### Thermal guard
+
+- An admission check that runs before a CAPS-owned workload starts, with
+  `WARN`, `TERM`, and `TERM_THEN_KILL` actions.
+- Discovery is authoritative. With no sensor the guard reports UNAVAILABLE with
+  the reason and admits the workload explicitly carrying no thermal
+  justification, rather than reading an absent sensor as a cool machine.
+- It never writes to sysfs or hwmon, never touches an MSR, and never signals a
+  process it did not spawn.
+
+### Guardrails
+
+- `RLIMIT_AS`, `RLIMIT_CPU`, `RLIMIT_FSIZE` and `RLIMIT_CORE` applied in the
+  child immediately before `execvp`, so the limits are provably in force for the
+  whole life of the executed program.
+- Address space is reported as address space, never as physical memory.
+
+### The CAPS terminal
+
+- A catalog-backed terminal whose validation calls the C engine's own lexer. The
+  gateway never parses a command line, so two lexers cannot disagree about one
+  quoting case.
+- POSIX short-option composition, numeric short forms, and per-command value
+  flags, so the forms people actually type are the forms that work.
+- Every published catalog example is verified against the validator, which
+  found and fixed several examples the catalog itself refused.
+
+### Pipeline and stage evidence
+
+- Per-stage `argv` emitted as separate JSON elements, bounded with the
+  truncation declared rather than silent.
+- Structural invariants I11 and I14 over `(pid, stage)` keys, and a shared
+  reducer so the live and replay views cannot disagree.
+
+### Defects found by running the system
+
+Every item below was found by executing CAPS 2.0 and reading what came back, not
+by reading the code. Each had a passing test suite behind it.
+
+- **CAPS-owned processes were never identified as CAPS-owned.** The registry
+  declared a per-session `childIdentity` and read it when deciding ownership, but
+  nothing ever assigned it, so every identity key was `pid@?#bootId`, matched no
+  live row, and the ownership distinction the Process Explorer exists to draw was
+  permanently `false`. Identity is now captured at `process.started` — the safest
+  instant, because the child was just forked and an unreaped child keeps its PID
+  reserved — and `SystemService` passes the ownership set to the discovery that
+  actually serves `/api/system/processes`.
+- **`processIdentity` was never published.** `/api/capabilities` ran the real
+  pidfd probe and discarded it, so the System Control Center read `undefined` and
+  crashed. The probe's verdict is now published, with the kernel it was measured
+  on.
+- **Per-stage `argv` never reached the browser.** The engine emitted it and the
+  normalizer dropped it, so the pipeline evidence card showed "not recorded" for
+  stages that had demonstrably started. `argv`, its truncation metadata, and the
+  stage's `stdin`/`stdout` wiring now survive the boundary.
+- **Pipe wiring was read from the wrong event.** `writesToPipe` was taken from
+  `process.started`; the engine publishes it on `command.parsed`. Every stage's
+  output was labelled as collected by the gateway.
+- **Two product pages crashed on first paint.** The frontend's `HostProcessRow`
+  type described fields the gateway has never sent. The type is now a
+  transcription of the wire shape, and a test asserts the two agree field for
+  field.
+- **The screenshot tool could not run and wrote to the wrong tree.** Playwright
+  was imported but not installed, and the repository root resolved to `web/`, so
+  a successful capture produced nineteen correct and completely undiscoverable
+  images.
+- **The version gate could not fail correctly.** Four independent defects made it
+  report a clean tree as broken and a broken tree as clean, including a README
+  check that read only the first marker. It is now exercised against deliberately
+  drifted fixtures, and a mutation that fails to apply is itself reported as a
+  failure.
+- **`git diff --check` failed.** Eight files had picked up CRLF, which git reads
+  as trailing whitespace. They are normalised back to the line endings they had
+  before.
+- **The catalog described a different program than the one it names.**
+  `status_probe`'s schema said "one positional, an integer 0..255", while the
+  helper takes `exit N | signal S | print A B ...`. It refused the documented
+  form with `"exit" is not a plain non-negative integer`, it accepted a bare
+  `status_probe 7` that the helper answers with its unknown-mode status 3, and it
+  made the playground's own example return 422. Three API integration tests were
+  failing on it. `ArgumentSchema` gained `leadingChoices` and
+  `choiceIntegerOperands`, because the type of the second operand depends on the
+  mode and no existing field could say so.
+- **`GET /api/capabilities` reported stderr redirection as unavailable.**
+  `redirection.stderr: false` is true of `POST /api/sessions` and false of the
+  product: `POST /api/terminal/execute` accepts `2>` and `2>>`, the grammar
+  publishes both, and the engine implements them. The response now reports the
+  split per route instead of one flag that cannot describe it.
+- **Two counters were rendered as a hard `0` when they had never been measured.**
+  Minor and major page faults are gated on separate sample counts, but the
+  Analytics card collapsed them into one number, so two major-fault samples and
+  one minor-fault sample printed `min 0`. The block I/O card did the same to read
+  and write. Each half now renders its own unavailable state, and the backend
+  publishes `minorFaultSamples` alongside `majorFaultSamples`.
+- **Two pages displayed limits and totals the gateway had not sent.**
+  Execute offered a 30 s default, a 120 s maximum, and a concurrency of 4 from
+  `?? ` fallbacks; Process Explorer reported the returned row count as the host's
+  process count even when the request limit truncated it. Both now render the
+  server's value, or nothing.
+- **A source file was binary.** `lib/terminal.ts` used a raw NUL byte as a join
+  separator. The separator is still NUL — it is injective where a space is not —
+  but it is now written `"\0"`, so the file is ASCII and grep can see it. Nothing
+  had failed, which is why it survived: no gate inspects file encoding.
+
+### Documentation
+
+- [`docs/host-telemetry.md`](docs/host-telemetry.md) — every host metric, its
+  kernel source, and its provenance.
+- [`docs/guardrails.md`](docs/guardrails.md) — what is enforced, by which layer,
+  and what is configured but not enforced.
+- [`docs/limitations.md`](docs/limitations.md) — what CAPS does not do.
+- [`docs/testing.md`](docs/testing.md) — every verification command.
+- [`docs/ground-truth-verification.md`](docs/ground-truth-verification.md) — 59
+  checks against raw `/proc` and `/sys`.
+- [`docs/cross-view-trace.md`](docs/cross-view-trace.md) — one real execution
+  traced through every surface, with captured identifiers.
+
+Two routes were documented by a claim rather than by a description:
+`/api/terminal/execute` had no entry in `docs/web-api.md` at all, and the stderr
+capability was documented as absent. Both are now stated per route, and
+`web/backend/tests/api/stderrRedirection.test.ts` holds the capability response
+to what the two routes actually accept.
+
 # Changelog
 
 CAPS is not published to a registry, so these are project milestones rather
-than semantic releases. The current version is **1.1.0** and has a single
+than semantic releases. The current version is **2.0.0** and has a single
 canonical source: `PRODUCT_VERSION` in
 `web/backend/src/config/env.ts`, projected into the C engine by
-`scripts/generate-version.sh` and asserted against both `package.json` files by
-`scripts/check-lockfiles.sh`.
+`scripts/generate-version.sh` and asserted against both `package.json` files, both
+lockfiles, `include/version.h`, the README marker, and this changelog by
+`scripts/check-version.sh` — which is itself tested against deliberately drifted
+fixtures by `scripts/check-version.test.sh`.
 
 ---
 

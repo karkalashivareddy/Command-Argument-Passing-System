@@ -1,6 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 
 import type { ProcessRecord, SessionStatus } from "../types/observability.js";
+import { identityKey } from "../telemetry/system/processes.js";
 import type { ProcessIdentity } from "./terminator.js";
 import { logger } from "../utils/logger.js";
 
@@ -111,6 +112,28 @@ export class ExecutionRegistry {
   touch(sessionId: string, now = Date.now()): void {
     const s = this.sessions.get(sessionId);
     if (s) s.lastEventAt = now;
+  }
+
+  /**
+   * Identity keys of every process CAPS has started and still owns.
+   *
+   * The full triple -- PID, start ticks, boot id -- is what makes this safe. A
+   * PID alone is reused, and a host process row whose PID happens to equal a
+   * finished session's would otherwise be advertised as ours and as signalable.
+   * A row is only ours when all three still match.
+   *
+   * Terminal sessions are excluded: once a session is final the process is gone,
+   * and claiming ownership of whatever inherits its PID would be wrong.
+   */
+  ownedIdentityKeys(bootId: string | null): ReadonlySet<string> {
+    const keys = new Set<string>();
+    for (const s of this.sessions.values()) {
+      if (isTerminalState(s.state)) continue;
+      const pid = s.childPid;
+      if (pid === null) continue;
+      keys.add(identityKey(pid, s.childIdentity?.startTicks ?? null, bootId));
+    }
+    return keys;
   }
 
   listProcesses(): ProcessRecord[] {

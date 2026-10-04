@@ -111,3 +111,12 @@ void builtin_print_help(void)
             "fork() + execvp(); its arguments are passed as the program's\n"
             "argv[1..]. The parent then waits with waitpid().\n");
 }
+
+int builtin_is_builtin(const char *name)
+{
+    if (name == NULL)
+        return 0;
+    return strcmp(name, "exit") == 0 ||
+           strcmp(name, "cd") == 0 ||
+           strcmp(name, "help") == 0;
+}

@@ -8,7 +8,11 @@ BUILD   := build
 TARGET  := caps
 VERSION_HEADER := include/version.h
 
-SRCS    := $(wildcard src/*.c)
+# src/pidfd.c is deliberately excluded from the engine. It is its own
+# executable (build/caps_pidfd), because Node has no pidfd API and the gateway
+# execs this helper rather than linking it. Globbing it into SRCS gave the
+# binary two `main` definitions and broke the link.
+SRCS    := $(filter-out src/pidfd.c,$(wildcard src/*.c))
 OBJS    := $(SRCS:src/%.c=$(BUILD)/%.o)
 DEPS    := $(OBJS:.o=.d)
 
@@ -35,14 +39,45 @@ TESTS   := tests/test_smoke.sh \
            tests/test_monitor.sh \
            tests/test_lifecycle.sh \
            tests/test_waitpolicy.sh \
-           tests/test_wait_failure.sh
+           tests/test_wait_failure.sh \
+           tests/test_pipeline.sh
 HELPER  := $(BUILD)/status_probe
+PIDFD   := $(BUILD)/caps_pidfd
+# A real zombie cannot be produced from a shell: bash reaps its own jobs and an
+# orphaned child is re-parented to init, which reaps it at once. This helper
+# holds an unreaped child so the zombie assertions actually execute instead of
+# being skipped.
+ZOMBIE  := $(BUILD)/zombie_maker
+PIDFD_TESTS := tests/test_pidfd.sh
+# Asserts on the CHILD's own /proc/<pid>/limits, so it needs the engine but no
+# helper binary.
+LIMIT_TESTS := tests/test_limits.sh
 
 # Controlled-workload tests (run the real workload binaries)
 WL_TESTS := tests/workloads/test_workloads.sh
 
+# Repository-tooling gates and their own tests.  Two halves, and both matter:
+#
+#   * each gate run against the real repository -- a gate nobody ever executes
+#     on real input is a claim, not a check;
+#   * each gate run against throwaway fixtures, including deliberately broken
+#     ones -- a gate that always passes is just as useless, and only a fixture
+#     that must fail can tell those two cases apart.
+#
+# These are kept out of $(TESTS) because that loop passes the engine binary to
+# each case, which a gate over git metadata or version strings neither needs nor
+# accepts.  check-version.test.sh resolves its own gate from its own location;
+# the extra argument is harmless and keeps one loop for both.
+GATE_TESTS := tests/scripts/test_attribution.sh \
+              scripts/check-version.test.sh
+
+GATES := scripts/check-attribution.sh \
+         scripts/check-version.sh \
+         scripts/check-docs.sh
+
+
 # Tests that need the status_probe helper binary
-HELPER_TESTS := *execution*|*exit_status*|*signals*|*monitor*
+HELPER_TESTS := *execution*|*exit_status*|*signals*|*monitor*|*pipeline*
 
 # waitpid() failure-policy probes (link the non-main objects directly)
 WAIT_HELPER := $(BUILD)/wait_probe
@@ -95,6 +130,17 @@ $(WORKLOAD_BIN_DIR):
 $(HELPER): tests/helpers/status_probe.c | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
 
+# The pidfd capability probe and PID-reuse-safe signal delivery. The gateway
+# has no native pidfd API, so it execs this helper; signals are rare enough that
+# the exec cost is irrelevant next to addressing the right process.
+$(PIDFD): src/pidfd.c | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
+
+$(ZOMBIE): tests/helpers/zombie_maker.c | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
+
+tests/test_pidfd.sh: $(PIDFD)
+
 # Links the execution objects (minus main) so the probe can call
 # process_wait_child() directly.
 WAIT_OBJS := $(filter-out $(BUILD)/main.o,$(OBJS))
@@ -106,7 +152,7 @@ $(WAIT_HELPER): tests/helpers/wait_probe.c $(WAIT_OBJS) | $(BUILD)
 # needs the helper binaries that only the test targets used to build. Exposed
 # as its own target so a job that runs the suite without `make test` still
 # gets a runnable fixture instead of a session that can never start.
-test-helpers: $(HELPER) $(WAIT_HELPER)
+test-helpers: $(HELPER) $(WAIT_HELPER) $(PIDFD) $(ZOMBIE)
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -114,15 +160,17 @@ $(BUILD):
 run: $(TARGET)
 	./$(TARGET)
 
-test: $(TARGET) $(HELPER) $(WAIT_HELPER)
-	@set -e; for t in $(TESTS); do \
+# The limits suite exercises caps_memory_burn, so it depends on `workloads`.
+test: $(TARGET) $(HELPER) $(WAIT_HELPER) $(PIDFD) $(ZOMBIE) $(WORKLOAD_BINS)
+	@set -e; for t in $(TESTS) $(PIDFD_TESTS) $(LIMIT_TESTS); do \
 		echo "== $$t =="; \
 		case "$$t" in \
 			$(WAIT_TESTS)) ./$$t ./$(WAIT_HELPER);; \
 			$(HELPER_TESTS)) ./$$t ./$(TARGET) ./$(HELPER);; \
+			tests/test_pidfd.sh) ./$$t ./$(PIDFD) ./$(ZOMBIE);; \
 			*) ./$$t ./$(TARGET);; \
 		esac; \
-		done; \
+	done; \
 	echo "ALL TESTS PASSED"
 
 # Controlled workloads are exercised against the real binaries so the
@@ -134,17 +182,37 @@ test-workloads: workloads
 	done; \
 	echo "ALL WORKLOAD TESTS PASSED"
 
+# Repository-tooling gates.  The attribution gate is run over the real history
+# first, so a contaminated commit fails here exactly as it fails in CI, and
+# then over synthetic fixtures that pin which identities it must accept and
+# which it must reject.
+test-scripts:
+	@set -e; \
+	for g in $(GATES); do \
+		echo "== $$g (real repository) =="; \
+		sh $$g; \
+	done; \
+	for t in $(GATE_TESTS); do \
+		echo "== $$t =="; \
+		sh $$t scripts/check-attribution.sh; \
+	done; \
+	echo "ALL SCRIPT TESTS PASSED"
+
 # AddressSanitizer + UBSan build (rebuilds sources directly into one binary)
 $(SAN_TARGET): $(SRCS) include/*.h $(VERSION_HEADER)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN_FLAGS) -o $@ $(SRCS)
 
-test-asan: $(SAN_TARGET) $(HELPER) $(WAIT_HELPER)
-	@set -e; for t in $(TESTS); do \
+# The pidfd and limits suites run against the sanitized engine too. Both drive
+# real child processes, so they exercise the fork/exec path that ASan is
+# instrumented to watch -- which is the point of running them at all.
+test-asan: $(SAN_TARGET) $(HELPER) $(WAIT_HELPER) $(PIDFD) $(ZOMBIE) $(WORKLOAD_BINS)
+	@set -e; for t in $(TESTS) $(PIDFD_TESTS) $(LIMIT_TESTS); do \
 		echo "== $$t (asan) =="; \
 		case "$$t" in \
-			$(WAIT_TESTS)) ASAN_OPTIONS=detect_leaks=1 ./$$t ./$(WAIT_HELPER);; \
-			$(HELPER_TESTS)) ASAN_OPTIONS=detect_leaks=1 ./$$t ./$(SAN_TARGET) ./$(HELPER);; \
-			*) ASAN_OPTIONS=detect_leaks=1 ./$$t ./$(SAN_TARGET);; \
+			$(WAIT_TESTS)) ASAN_OPTIONS="$(WL_ASAN_OPTIONS)" ./$$t ./$(WAIT_HELPER);; \
+			tests/test_pidfd.sh) ASAN_OPTIONS="$(WL_ASAN_OPTIONS)" ./$$t ./$(PIDFD) ./$(ZOMBIE);; \
+			$(HELPER_TESTS)) ASAN_OPTIONS="$(WL_ASAN_OPTIONS)" ./$$t ./$(SAN_TARGET) ./$(HELPER);; \
+			*) ASAN_OPTIONS="$(WL_ASAN_OPTIONS)" ./$$t ./$(SAN_TARGET);; \
 		esac; \
 	done; \
 	echo "ALL ASAN TESTS PASSED"
@@ -152,10 +220,25 @@ test-asan: $(SAN_TARGET) $(HELPER) $(WAIT_HELPER)
 # Sanitizer build of the controlled workloads, then the same test suite.
 # Leak detection matters most here: every workload owns a workspace and,
 # for the memory/mixed cases, an anonymous mapping.
+# ASan options for the workload suite.
+#
+# allocator_may_return_null=1 and hard_rss_limit_mb are not cosmetic. ASan
+# reserves a large shadow region and its allocator aborts the process on a failed
+# allocation by default. In a memory-constrained environment -- WSL2, a
+# container, a small CI runner -- five instrumented workloads run back to back
+# can exhaust that budget, and the result is not a failed test but the loss of
+# the whole VM. Capping the allocator converts an unrecoverable environment
+# failure into an ordinary test failure that can be read and acted on.
+#
+# detect_leaks=1 is deliberate for these binaries: each workload is a short-lived
+# program that allocates and frees in a loop, so a leak is a real finding, and the
+# programs are small enough that leak checking is cheap.
+WL_ASAN_OPTIONS := allocator_may_return_null=1:hard_rss_limit_mb=1024:detect_leaks=1
+
 test-workloads-asan: $(WL_SAN_BINS)
 	@set -e; for t in $(WL_TESTS); do \
 		echo "== $$t (asan) =="; \
-		ASAN_OPTIONS=detect_leaks=1 ./$$t $(WL_SAN_DIR); \
+		ASAN_OPTIONS="$(WL_ASAN_OPTIONS)" UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=0 ./$$t $(WL_SAN_DIR); \
 	done; \
 	echo "ALL WORKLOAD ASAN TESTS PASSED"
 
@@ -164,7 +247,7 @@ clean:
 
 -include $(DEPS)
 
-.PHONY: all version workloads run test test-workloads test-asan \
+.PHONY: all version workloads run test test-scripts test-workloads test-asan \
         test-workloads-asan clean web web-backend web-frontend web-install
 
 $(WL_SAN_DIR):

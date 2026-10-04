@@ -16,9 +16,28 @@ const CAPS_EVENT_NAMES: Record<string, CanonicalEventType> = {
   SIGNAL_RECEIVED: "signal.received",
   EXEC_ERROR: "process.exec_error",
   WAIT_FAILED: "process.wait_failed",
+  PIPELINE_PARSED: "pipeline.parsed",
+  PIPELINE_STARTED: "pipeline.started",
+  PIPELINE_COMPLETED: "pipeline.completed",
   EXECUTION_FAILED: "process.launch_failed",
   SESSION_SUMMARY: "session.summary",
 };
+
+/**
+ * Engine events that are about one specific stage of the execution.
+ *
+ * Everything else is session-scoped and deliberately carries no `stage`.
+ */
+const STAGE_SCOPED: ReadonlySet<string> = new Set([
+  "PROCESS_STARTED",
+  "PROCESS_EXITED",
+  "SIGNAL_RECEIVED",
+  "EXEC_ERROR",
+  "WAIT_FAILED",
+  "PIPELINE_PARSED",
+  "PIPELINE_STARTED",
+  "PIPELINE_COMPLETED",
+]);
 
 /** Outcomes the engine is allowed to report; anything else is treated as unknown. */
 const OUTCOMES: readonly EngineOutcome[] = [
@@ -50,6 +69,28 @@ function rawPayload(raw: RawCapsEvent): Record<string, unknown> {
   const payload: Record<string, unknown> = {};
   if (str(raw.command) !== null) payload.label = raw.command;
   if (num(raw.pid) !== null) payload.pid = raw.pid;
+
+  /*
+   * Pipeline position, carried only on stage-scoped events.
+   *
+   * A session-level event -- `command.received`, `command.parsed`, the
+   * summary -- describes the whole execution and genuinely belongs to no
+   * stage.  It therefore carries NO `stage` field at all, rather than a
+   * sentinel: "this event is not about one stage" is real information, and the
+   * event type already says so.  The alternative, a sentinel, forced every
+   * reader to special-case a magic number and made a malformed event
+   * indistinguishable from a legitimately stage-less one.
+   *
+   * So the fallbacks below apply only where a stage is required, and there the
+   * engine has already emitted one.  If a fallback ever fires there, the record
+   * is malformed, and I13/I14 are what report it.
+   */
+  if (STAGE_SCOPED.has(str(raw.event) ?? "")) {
+    payload.stage = num(raw.stage) ?? -1;
+    payload.stages = num(raw.stages) ?? 0;
+  }
+  const pgid = num(raw.pgid);
+  if (pgid !== null) payload.pgid = pgid;
   if (num(raw.exit_code) !== null) payload.exitCode = raw.exit_code;
   if (num(raw.duration_ms) !== null) payload.durationMs = raw.duration_ms;
   if (num(raw.signal) !== null) payload.signal = raw.signal;
@@ -72,6 +113,41 @@ function rawPayload(raw: RawCapsEvent): Record<string, unknown> {
   if (num(raw.launch_errors) !== null) payload.launch_errors = raw.launch_errors;
   if (typeof raw.observed_cleanly === "boolean") payload.observed_cleanly = raw.observed_cleanly;
   if (num(raw.average_duration_ms) !== null) payload.averageDurationMs = raw.average_duration_ms;
+
+  /*
+   * The argv the engine actually handed to execve, per stage.
+   *
+   * This used to be dropped here, which quietly removed the only authoritative
+   * record of what each stage ran. Everything downstream then had to reconstruct
+   * it: the pipeline evidence surface read `argv` from `process.started`, found
+   * nothing, and rendered "not recorded: the stage produced no start event" for
+   * stages that had demonstrably started -- on a screenshot whose whole purpose
+   * was to show the argv.
+   *
+   * The gateway does NOT rebuild it. The joined `label` is already lossy (an
+   * element containing a space and two elements without both render the same), so
+   * re-splitting the label here would be a second lexer, and two lexers
+   * eventually disagree about one quoting case.
+   *
+   * `argv_truncated` travels with it. A shortened argv is not a short one: the
+   * elements after the cut are unknown, not absent, and a reader has to be able
+   * to tell those apart.
+   */
+  if (Array.isArray(raw.argv)) payload.argv = raw.argv.map((a) => String(a));
+  if (raw.argv_truncated === true) payload.argv_truncated = true;
+  if (num(raw.argv_elements_dropped) !== null) payload.argv_elements_dropped = raw.argv_elements_dropped;
+  if (num(raw.argv_elements_total) !== null) payload.argv_elements_total = raw.argv_elements_total;
+
+  /*
+   * Where each stage's stdin and stdout go, as the engine labelled them.
+   *
+   * These are the engine's own strings ("pipe", "terminal", a filename) taken from
+   * the parse result, so the record can say "this stage's output is a pipe" instead
+   * of the reader inferring it from a neighbouring field.
+   */
+  if (str(raw.stdin_source) !== null) payload.stdinSource = raw.stdin_source;
+  if (str(raw.stdout_dest) !== null) payload.stdoutDest = raw.stdout_dest;
+
   return payload;
 }
 

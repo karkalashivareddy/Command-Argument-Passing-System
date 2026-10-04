@@ -15,7 +15,7 @@ import { parseCapsLine } from "./parser.js";
 import { classifyLine, splitLines } from "./output.js";
 import { gatewayEvent, normalizeCapsEvent } from "./normalizer.js";
 import { ExecutionRegistry, type ActiveSession } from "./registry.js";
-import { escalateTo, forgetIdentity, signalChild, terminateGracefully, type ProcessIdentity } from "./terminator.js";
+import { escalateTo, forgetIdentity, rememberIdentity, signalChild, terminateGracefully, type ProcessIdentity } from "./terminator.js";
 
 /** Displayed/recorded flag names for each redirection, matching open()/dup2(). */
 const REDIR_FLAGS: Record<keyof RedirectionSpec, string> = {
@@ -32,10 +32,26 @@ function keepTail(buf: string, chunk: string, limit: number): string {
 
 export interface StartExecutionInput {
   command: string;
+  /**
+   * The full command line, when the caller is the terminal rather than a
+   * structured request.
+   *
+   * The line is NOT lexed by the gateway.  It is handed to the engine, which
+   * lexes it with the same C lexer it will use to execute, and the gateway
+   * validates the resulting argv through `caps --inspect` first.  Two lexers
+   * would eventually disagree about a quoting edge case, and at that point the
+   * gateway could approve a command the engine then runs -- which is the exact
+   * failure the catalog exists to prevent.
+   *
+   * Mutually exclusive with `executable` + `redirections`: a line carries its
+   * own redirections, and the `--redir-*` flags are a structured-request
+   * mechanism.
+   */
+  commandLine?: string;
   /** Absolute, verified path of the binary that will actually be executed. */
-  executable: string;
-  args: string[];
-  redirections: RedirectionSpec;
+  executable?: string;
+  args?: string[];
+  redirections?: RedirectionSpec;
   timeoutMs: number;
 }
 
@@ -106,18 +122,24 @@ export class ExecutionRunner {
       // Session row, redirection rows, and the first event are one unit of
       // work.  A failure part-way through would otherwise leave a session with
       // no events, which replay cannot represent.
+      //
+      // A command-line request carries its redirections inside the line, so it
+      // contributes no redirection rows: duplicating them here would claim the
+      // gateway opened a file it never opened.
+      const args = input.args ?? [];
+      const redirections: RedirectionSpec = input.commandLine === undefined ? (input.redirections ?? {}) : {};
       const redirDetail: Array<{ slot: string; target: string; flags: string }> = [];
-      if (input.redirections.in) redirDetail.push({ slot: "in", target: input.redirections.in, flags: REDIR_FLAGS.in });
-      if (input.redirections.out) redirDetail.push({ slot: "out", target: input.redirections.out, flags: REDIR_FLAGS.out });
-      if (input.redirections.append) redirDetail.push({ slot: "append", target: input.redirections.append, flags: REDIR_FLAGS.append });
+      if (redirections.in) redirDetail.push({ slot: "in", target: redirections.in, flags: REDIR_FLAGS.in });
+      if (redirections.out) redirDetail.push({ slot: "out", target: redirections.out, flags: REDIR_FLAGS.out });
+      if (redirections.append) redirDetail.push({ slot: "append", target: redirections.append, flags: REDIR_FLAGS.append });
 
       const firstEventId = newId("evt");
       try {
         this.sessions.createWithFirstEvent({
           id: sessionId,
           command: input.command,
-          args: input.args,
-          redirections: input.redirections,
+          args,
+          redirections,
           redirectionsDetail: redirDetail,
           timeoutMs: input.timeoutMs,
           startedAt,
@@ -127,7 +149,15 @@ export class ExecutionRunner {
             type: "execution.created",
             source: "gateway",
             timestamp: startedAt,
-            payload: { command: input.command, argumentCount: input.args.length, timeoutMs: input.timeoutMs },
+            payload: {
+              command: input.command,
+              argumentCount: args.length,
+              timeoutMs: input.timeoutMs,
+              // Recorded so replay can reconstruct what the user typed, not
+              // just the first stage's argv. The full argv per stage arrives
+              // with each process.started event.
+              ...(input.commandLine === undefined ? {} : { commandLine: input.commandLine }),
+            },
           },
         });
       } catch (err) {
@@ -154,20 +184,44 @@ export class ExecutionRunner {
     input: StartExecutionInput,
     startedAt: string,
   ): StartResult | null {
-    // The executable is an absolute, verified path.  argv[0] of the *engine's*
-    // child is that path, so the kernel executes exactly the file the gateway
-    // probed -- never whatever a PATH lookup would have found.
+    const args = input.args ?? [];
+    const redirections: RedirectionSpec = input.commandLine === undefined ? (input.redirections ?? {}) : {};
+
+    /*
+     * The engine's argv[0] is always this absolute, verified path, so the
+     * kernel executes exactly the file the gateway probed -- never whatever a
+     * PATH lookup would have found.
+     */
     const capsArgv: string[] = [this.config.capsExecutable, "--monitor", "--json"];
-    if (input.redirections.in) capsArgv.push("--redir-in", input.redirections.in);
-    if (input.redirections.out) capsArgv.push("--redir-out", input.redirections.out);
-    if (input.redirections.append) capsArgv.push("--redir-append", input.redirections.append);
-    capsArgv.push(input.executable, ...input.args);
+
+    if (input.commandLine !== undefined) {
+      /*
+       * Command-line form.  The line carries its own redirections, so the
+       * --redir-* flags are deliberately NOT added: passing both would apply
+       * the redirection twice, and the recorded evidence would claim a file
+       * the gateway never opened.
+       *
+       * The line is a single argv element, not a shell string.  spawn() is
+       * called with shell:false, so the engine receives it verbatim and lexes
+       * it itself.  No shell ever sees this string.
+       */
+      capsArgv.push("--run-line", input.commandLine);
+    } else {
+      if (redirections.in) capsArgv.push("--redir-in", redirections.in);
+      if (redirections.out) capsArgv.push("--redir-out", redirections.out);
+      if (redirections.append) capsArgv.push("--redir-append", redirections.append);
+      capsArgv.push(input.executable!, ...args);
+    }
 
     logger.info("EXECUTION", "spawning caps", {
       sessionId,
       command: input.command,
-      argumentCount: input.args.length,
-      argvBytes: Buffer.byteLength(input.executable) + input.args.reduce((t, a) => t + Buffer.byteLength(a), 0),
+      form: input.commandLine === undefined ? "structured" : "command-line",
+      argumentCount: args.length,
+      argvBytes:
+        input.commandLine === undefined
+          ? Buffer.byteLength(input.executable ?? "") + args.reduce((t, a) => t + Buffer.byteLength(a), 0)
+          : Buffer.byteLength(input.commandLine),
       cwd: this.config.workspace,
     });
 
@@ -191,7 +245,17 @@ export class ExecutionRunner {
     const active: ActiveSession = {
       sessionId,
       command: input.command,
-      argv: [input.command, ...input.args],
+      /*
+       * The session's summary argv, used by the `/argv` endpoint for display.
+       *
+       * For a command-line request this records the first stage's command only.
+       * The authoritative per-stage argv is NOT reconstructed here: it arrives
+       * in each `process.started` event from the engine, which built it. A
+       * gateway-side reconstruction would be a second, divergent answer to
+       * "what argv did this process receive", which is precisely the kind of
+       * duplication this product's evidence model exists to avoid.
+       */
+      argv: input.commandLine === undefined ? [input.command, ...args] : [input.command],
       state: "STARTING",
       process: child,
       childPid: null,
@@ -391,6 +455,23 @@ export class ExecutionRunner {
         active.processReaped = false;
         if (ev.pid !== null) this.sessions.setPid(sessionId, ev.pid);
         if (typeof ev.pid === "number") {
+          /*
+           * Capture the kernel identity NOW, at the moment the engine reports the
+           * fork, rather than lazily when a signal is first sent.
+           *
+           * This is the safest instant to do it: the child was just created by
+           * this gateway and has not been reaped, so an unreaped child keeps its
+           * PID reserved and the value cannot already belong to something else.
+           *
+           * It also has to happen here. The identity is what makes a process
+           * attributable (`capsOwned` in the host inventory) and what a delayed
+           * SIGKILL is validated against. Capturing it only on the first signal
+           * meant a process that was never signalled had no identity at all --
+           * which is every process that simply ran to completion -- so ownership
+           * was structurally unreachable and the Process Explorer could never
+           * show a single CAPS-owned row.
+           */
+          active.childIdentity = rememberIdentity(ev.pid);
           // One sampler loop for this execution, started with an immediate
           // first sample so even a very short process is observed once.
           this.telemetry.start({
@@ -694,9 +775,20 @@ export class ExecutionRunner {
     if (active?.escalation) await active.escalation;
   }
 
-  /** Direct, identity-checked kill used only by the shutdown sequence. */
-  killVerified(pid: number | null, identity: ProcessIdentity | null): void {
-    if (pid === null) return;
-    escalateTo(identity, "SIGKILL");
+  /**
+   * Direct, identity-checked kill used only by the shutdown sequence.
+   *
+   * Async because a pidfd-bound escalation forks a helper; the caller is
+   * already on a shutdown path where one turn of latency is irrelevant, and
+   * making this synchronous would mean either blocking the event loop on a
+   * fork or dropping the pidfd guarantee.
+   */
+  killVerified(pid: number | null, identity: ProcessIdentity | null): Promise<void> {
+    if (pid === null) return Promise.resolve();
+    return escalateTo(identity, "SIGKILL").then((outcome) => {
+      if (!outcome.sent) {
+        logger.info("EXECUTION", "shutdown kill declined", { pid, reason: outcome.reason });
+      }
+    });
   }
 }

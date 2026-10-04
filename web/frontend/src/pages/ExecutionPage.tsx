@@ -8,6 +8,7 @@ import { EventStream } from "../components/execution/EventStream";
 import { OutputPanel } from "../components/execution/OutputPanel";
 import { PeaksPanel } from "../components/execution/PeaksPanel";
 import { Pipeline } from "../components/execution/Pipeline";
+import { PipelineEvidenceView } from "../components/execution/PipelineEvidence";
 import { ProcessGraph } from "../components/execution/ProcessGraph";
 import { ProcessTelemetry } from "../components/execution/ProcessTelemetry";
 import { RedirectionDiagram } from "../components/execution/RedirectionDiagram";
@@ -309,6 +310,18 @@ export default function ExecutionPage() {
           <Pipeline events={activeEvents} status={activeStatus} />
         </div>
       </Card>
+
+      {/*
+       * Per-stage evidence, from the record rather than from the diagram above.
+       *
+       * A stage graph answers "what shape was the run"; this answers "what did
+       * each stage actually do" -- its pid, its process group, the argv the
+       * engine handed to execve, and whether it was ever reaped. Both render
+       * from `activeEvents`, so a live run and its replay cannot disagree, and a
+       * stage that never started stays visible as a stage that never started
+       * instead of quietly disappearing from the total.
+       */}
+      <PipelineEvidenceView events={activeEvents} />
 
       {/* Process topology + argument vector */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">

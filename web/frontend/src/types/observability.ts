@@ -21,7 +21,23 @@ export type CanonicalEventType =
   | "process.launch_failed"
   | "execution.cancelled"
   | "signal.received"
-  | "session.summary";
+  | "session.summary"
+  /*
+   * Pipeline envelope events.
+   *
+   * These describe the pipeline as a whole rather than one stage, and they are
+   * NOT terminal session events: a session still ends with execution.completed or
+   * execution.failed after every stage has been reaped. Recording them as
+   * terminal would end the session at the moment the envelope closed, before the
+   * gateway had finalised the record.
+   *
+   * They carry the declared stage count, which is what lets a reader tell a
+   * three-stage pipeline from a two-stage one even when a stage produced no
+   * events at all.
+   */
+  | "pipeline.parsed"
+  | "pipeline.started"
+  | "pipeline.completed";
 
 export interface CanonicalEvent {
   id: string;
@@ -156,9 +172,15 @@ export interface AnalyticsOverview {
     cpuTimeExecutions: number;
     averageCpuPercent: number | null;
     cpuPercentSamples: number;
+    /**
+     * Minor and major faults are gated on SEPARATE sample counts, so both are
+     * published. Collapsing them into one count is what let the UI render a hard
+     * `0` for minor faults when only major faults had enough samples.
+     */
     averageMinorFaults: number | null;
     averageMajorFaults: number | null;
     maxMajorFaults: number | null;
+    minorFaultSamples: number;
     majorFaultSamples: number;
     averageRcharBytesPerSec: number | null;
     maxRcharBytesPerSec: number | null;

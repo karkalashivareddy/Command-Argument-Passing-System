@@ -99,8 +99,20 @@ export function PeaksPanel({ events, cursorMs, onSeek }: { events: CanonicalEven
         <PeakCard
           icon={<HardDrive className="h-3.5 w-3.5" />}
           label="Block I/O totals"
-          value={peaks.totalReadBytes === null && peaks.totalWriteBytes === null ? "UNAVAILABLE" : `${formatMiB(peaks.totalReadBytes ?? 0)} / ${formatMiB(peaks.totalWriteBytes ?? 0)}`}
-          detail={peaks.totalReadBytes === null && peaks.totalWriteBytes === null ? "No valid block counters" : "read / write · last valid observation"}
+          // Read and write are tracked independently, so `?? 0` was reachable:
+          // with a read peak but no write peak the card printed "1.20 MiB /
+          // 0.00 MiB" while the detail line claimed "last valid observation".
+          // Each half now renders its own unavailable state.
+          value={
+            peaks.totalReadBytes === null && peaks.totalWriteBytes === null
+              ? "UNAVAILABLE"
+              : `r ${peaks.totalReadBytes === null ? "—" : formatMiB(peaks.totalReadBytes)} · w ${peaks.totalWriteBytes === null ? "—" : formatMiB(peaks.totalWriteBytes)}`
+          }
+          detail={
+            peaks.totalReadBytes === null && peaks.totalWriteBytes === null
+              ? "No valid block counters"
+              : `read / write · last valid observation${peaks.totalReadBytes === null ? " (no read counter)" : ""}${peaks.totalWriteBytes === null ? " (no write counter)" : ""}`
+          }
           note="OBSERVED · read_bytes/write_bytes"
           tone="neutral"
         />

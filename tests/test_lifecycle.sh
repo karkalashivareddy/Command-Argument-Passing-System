@@ -150,16 +150,34 @@ repl 'cat < in.txt > copy.txt' >/dev/null
 [ "$(cat copy.txt 2>/dev/null)" = "from-file" ] \
   && pass "'<' reads the file into a '>' target" \
   || bad "'<' did not read the file (copy.txt=[$(cat copy.txt 2>/dev/null)])"
-# CAPS is not a shell: "2>" is a plain argument, not a stderr redirection.
-# The honest contract is that it is passed through verbatim and stderr
-# redirection is not supported -- never silently reinterpreted.
-o=$(repl 'echo x 2> e.txt')
-printf '%s' "$o" | grep -q PROCESS_STARTED \
-  && pass "'2>' is not an operator CAPS supports" \
-  || bad "'2>' caused a parse failure"
+# stderr redirection IS supported.  This test previously asserted the opposite,
+# pinning the contract "2> is a plain argument, never a redirection".  That was
+# correct when CAPS understood only <, >, and >>, and it is wrong now that
+# "2>" and "2>>" are implemented.  The updated assertion is deliberately the
+# strong form: not merely "no parse error", but that the stderr stream really
+# lands in the named file and really does not land on the terminal.
+o=$(repl 'sh -c "echo out; echo err 1>&2" 2> e.txt' 2>/dev/null)
 [ -e e.txt ] \
-  && bad "'2>' silently created a stderr redirection target" \
-  || pass "'2>' did not create a stderr target (stderr redirection unsupported)"
+  && pass "'2>' created a stderr redirection target" \
+  || bad "'2>' did not create a stderr target"
+grep -q 'err' e.txt 2>/dev/null \
+  && pass "the program's stderr really landed in the '2>' file" \
+  || bad "e.txt=[$(cat e.txt 2>/dev/null)] did not contain the stderr text"
+grep -q 'out' e.txt 2>/dev/null \
+  && bad "stdout leaked into the stderr file" \
+  || pass "stdout did not leak into the '2>' file"
+rm -f e.txt
+
+# 2>> appends rather than truncating, which is the whole reason it is a
+# separate operator from 2>.
+o=$(repl 'sh -c "echo one 1>&2" 2> a.txt' 2>/dev/null)
+o=$(repl 'sh -c "echo two 1>&2" 2>> a.txt' 2>/dev/null)
+if [ -e a.txt ] && grep -q one a.txt && grep -q two a.txt; then
+  pass "'2>>' appended to the existing stderr file"
+else
+  bad "'2>>' did not append (a.txt=[$(cat a.txt 2>/dev/null)])"
+fi
+rm -f a.txt
 cd "$ROOT" || exit 1
 
 echo

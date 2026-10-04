@@ -1,16 +1,36 @@
 import Fastify from "fastify";
 
 import { registerRoutes } from "./api/routes.js";
+import { registerSystemRoutes } from "./api/system.js";
+import { registerCatalogRoutes } from "./api/catalog.js";
+import { registerTerminalRoutes } from "./api/terminal.js";
 import { describeAuth, isLoopbackHost, loadConfig, PRODUCT_VERSION, type CapsConfig } from "./config/env.js";
 import { openDatabase } from "./db/database.js";
 import { EventRepository } from "./db/repositories/events.js";
 import { SessionRepository } from "./db/repositories/sessions.js";
+import { SystemRepository } from "./db/repositories/system.js";
+import { SystemService } from "./events/systemStream.js";
 import { EventBus } from "./events/bus.js";
 import { ExecutionRunner } from "./execution/runner.js";
 import { ExecutionRegistry } from "./execution/registry.js";
+import { readBootId } from "./telemetry/system/read.js";
 import { logger, configureLogger } from "./utils/logger.js";
 
 export const VERSION = PRODUCT_VERSION;
+
+/**
+ * The host's boot id, read once.
+ *
+ * `startTicks` is only meaningful within one boot, so the identity keys that
+ * decide whether a process is CAPS-owned have to be scoped by it. Cached because
+ * it cannot change while the gateway runs, and reading /proc on every sample
+ * would be a syscall bought for nothing.
+ */
+let cachedBootId: { value: string | null } | null = null;
+function hostBootId(): string | null {
+  if (cachedBootId === null) cachedBootId = { value: readBootId({ proc: "/proc", sys: "/sys" }) };
+  return cachedBootId.value;
+}
 
 export interface BuildServerOverrides {
   config?: Partial<CapsConfig>;
@@ -27,8 +47,16 @@ export async function buildServer(overrides: BuildServerOverrides = {}) {
   let databaseOk = true;
   const sessions = new SessionRepository(db);
   const events = new EventRepository(db);
+  const systemRepo = new SystemRepository(db);
   const bus = new EventBus();
   const registry = new ExecutionRegistry(config.maxConcurrent);
+  const system = new SystemService({
+    repository: systemRepo,
+    // Read fresh on every sample rather than captured once: ownership changes as
+    // sessions start and finish, and a captured set would keep claiming a PID
+    // the kernel has since handed to something else.
+    capsOwnedIdentities: () => registry.ownedIdentityKeys(hostBootId()),
+  });
   const runner = new ExecutionRunner(config, sessions, events, bus, registry, db);
 
   // The loopback boundary is a startup invariant, not a request-time hope.
@@ -46,7 +74,12 @@ export async function buildServer(overrides: BuildServerOverrides = {}) {
     bodyLimit: 256 * 1024,
   });
 
-  app.addHook("onClose", async () => runner.close());
+  app.addHook("onClose", async () => {
+    // Stop the host collector before the runner so no snapshot is written while
+    // the database is closing.
+    system.stop();
+    runner.close();
+  });
 
   app.addHook("onRequest", async (req, reply) => {
     reply.header("x-caps-observatory", `CAPS Process Execution Observatory ${VERSION}`);
@@ -76,6 +109,10 @@ export async function buildServer(overrides: BuildServerOverrides = {}) {
     }
   });
 
+  registerSystemRoutes(app, { system, systemRepo, version: VERSION, retentionDays: config.retentionDays });
+  registerCatalogRoutes(app, { version: VERSION });
+  registerTerminalRoutes(app, { config, runner });
+
   registerRoutes(app, {
     config,
     sessions,
@@ -98,10 +135,45 @@ export async function buildServer(overrides: BuildServerOverrides = {}) {
   app.get("/", async () => ({
     name: "CAPS Process Execution Observatory",
     version: VERSION,
-    api: ["/api/health", "/api/ready", "/api/capabilities", "/api/sessions", "/api/analytics/overview"],
+    api: [
+      "/api/health",
+      "/api/ready",
+      "/api/capabilities",
+      "/api/sessions",
+      "/api/analytics/overview",
+      "/api/system/snapshot",
+      "/api/system/capabilities",
+      "/api/system/processes",
+      "/api/system/thermal",
+      "/api/system/frequency",
+      "/api/system/analytics",
+      "/api/system/health",
+      "/api/system/stream",
+    ],
   }));
 
-  return { app, config, db, sessions, events, bus, registry, runner, markDatabaseDown: () => { databaseOk = false; } };
+  // The host collector starts once the app is listening, so a request that
+  // arrives immediately after boot finds a collector that is already running
+  // rather than one that has not been asked for anything yet.
+  app.addHook("onReady", async () => {
+    system.start();
+  });
+
+  return {
+    app,
+    config,
+    db,
+    sessions,
+    events,
+    bus,
+    registry,
+    runner,
+    system,
+    systemRepo,
+    markDatabaseDown: () => {
+      databaseOk = false;
+    },
+  };
 }
 
 function isLoopbackAddress(address: string): boolean {

@@ -1,4 +1,4 @@
-type Scope = "SERVER" | "EXECUTION" | "SSE" | "STORAGE" | "SECURITY" | "TELEMETRY" | "CONFIG";
+type Scope = "SERVER" | "EXECUTION" | "SSE" | "STORAGE" | "SECURITY" | "TELEMETRY" | "CONFIG" | "SYSTEM" | "CATALOG";
 
 const ORDER = ["debug", "info", "warn", "error"] as const;
 export type LogLevel = (typeof ORDER)[number];

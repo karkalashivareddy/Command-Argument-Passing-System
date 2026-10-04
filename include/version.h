@@ -7,6 +7,6 @@
 #ifndef CAPS_VERSION_H
 #define CAPS_VERSION_H
 
-#define CAPS_VERSION "1.1.0"
+#define CAPS_VERSION "2.0.0"
 
 #endif /* CAPS_VERSION_H */
