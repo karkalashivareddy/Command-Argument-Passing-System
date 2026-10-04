@@ -122,24 +122,50 @@ documentation:
 | No secrets in child env or logs | `web/backend/src/execution/runner.ts`, `web/backend/src/utils/logger.ts` | `scripts/check-repository-hygiene.sh` |
 | No committed secrets or local paths | `scripts/check-repository-hygiene.sh` | CI `repository-hygiene` job |
 
-## Manual GitHub configuration (not representable in the repository)
+## GitHub security configuration
 
-These settings live in the GitHub UI or via the API and cannot be committed.
-They are listed here so the gap is explicit rather than assumed.
+### Enabled on this repository
 
-* **Branch protection on `main`** — require the `attribution`, `c-engine
-  (gcc)`, `c-engine (clang)`, `backend`, `frontend`, `integration`, and
-  `browser-smoke` checks to pass before merging; require the branch to be up
-  to date; disallow force pushes.
-* **Ruleset** — restrict deletion of `main` and of tags; require review for
-  changes under `src/`, `web/backend/src/security/`, and `web/backend/src/db/`.
-* **Secret scanning and push protection** — enable both in Settings → Code
-  security. Dependabot alerts are enabled by `.github/dependabot.yml`, but the
-  alert *processing* setting is a repository setting.
-* **Two required reviewers** on pull requests that touch the security boundary.
+| Feature | State | Why |
+| --- | --- | --- |
+| Secret scanning | enabled | Detects committed credentials. |
+| Push protection | enabled | Blocks a secret before it reaches history. |
+| Dependency graph | enabled | 503 packages resolved from the two lockfiles. |
+| Dependabot alerts | enabled | Six open advisories, all triaged below. |
+| CodeQL (C/C++, JavaScript/TypeScript) | enabled, buildless | Runs on every push to `main`. |
+| Ruleset `main-destructive-update-guard` | active on the default branch | Blocks **branch deletion** and **force pushes**. It deliberately does *not* require reviews or status checks: this is a single-owner project, and a required-review rule would lock the owner out of their own repository. |
 
-Until these are configured, the repository's protections are the code and the
-CI checks above, and nothing more.
+### Still manual
+
+* **Dependabot security updates** (`dependabot_security_updates`) — this
+  repository's Dependabot config is present and version updates work, but turning
+  on automatic security-update PRs requires the `admin:repo_hook` OAuth scope,
+  which has not been granted to the automation used here.
+
+### Open advisories, triaged
+
+Six open Dependabot alerts, all **medium**, all the same advisory
+(`GHSA-82fw-gwwq-j7x9` / `CVE-2026-84373`) against `vitest` /
+`@vitest/mocker` in both packages.
+
+* **It is a development-dependency issue.** `vitest` is a `devDependency`; it is
+  never bundled, never installed by `npm ci --omit=dev` in a deployment, and never
+  loaded by the gateway or the frontend at runtime.
+* **It is a dev-server issue.** The advisory requires an attacker who can reach a
+  running Vitest/Vite dev server's unauthenticated HMR WebSocket. CAPS's CI runs
+  the test suite on an ephemeral runner with no exposed port, and the product
+  ships a static production bundle.
+* **There is no fix in the line this repository is on.** The advisory is fixed in
+  Vitest 4.1.11 and 5.0.0, and states that the 3.x line is not maintained and will
+  not receive the fix. Moving to the fix therefore means a semver-major migration
+  of the test runner, which `.github/dependabot.yml` deliberately routes through
+  human review rather than through config.
+* **CI fails the build on anything worse.** The `dependency audit` job runs
+  `npm audit --audit-level=high` for both packages, so a high or critical
+  advisory — in a dev dependency or a runtime one — breaks the build.
+
+This is an accepted, documented risk rather than an unexamined one. It is
+revisited whenever the test runner is next upgraded for other reasons.
 
 ## Verifying the boundary yourself
 
