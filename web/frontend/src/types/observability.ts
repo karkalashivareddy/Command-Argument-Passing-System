@@ -422,6 +422,8 @@ export interface SessionComparison {
     majorFaultsDelta: number | null;
     rcharDeltaBytes: number | null;
     wcharDeltaBytes: number | null;
+    readBytesDelta: number | null;
+    writeBytesDelta: number | null;
   };
 }
 

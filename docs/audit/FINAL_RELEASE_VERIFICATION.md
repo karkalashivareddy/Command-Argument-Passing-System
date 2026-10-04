@@ -1,3 +1,12 @@
+> **HISTORICAL REPORT — superseded.**
+> This document records the verification run of the **1.1.0** release-hardening
+> milestone (2026-09-29). Its measurements, counts and status table describe that
+> commit, not the current product.
+>
+> The current product is **2.0.0**. The authoritative final verification report is
+> **[RELEASE_VERIFICATION_2_0_0.md](RELEASE_VERIFICATION_2_0_0.md)**.
+> This file is kept, unedited, because it is genuine evidence of what was checked
+> at that point — deleting it would destroy the record rather than fix it.
 # Final release verification
 
 Every result below is from an actual run of this work, not from a previous

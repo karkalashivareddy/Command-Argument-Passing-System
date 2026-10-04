@@ -51,6 +51,16 @@ export interface SystemEvent {
 }
 
 export const SYSTEM_SSE_FRAME = "caps.system";
+/**
+ * Terminal frame, written immediately before the socket is closed.
+ *
+ * It is advertised in the capability document, so it has to be emitted. A client
+ * that has been told an end frame exists and never receives one cannot tell a
+ * clean shutdown from a dropped connection, and will sit there waiting -- or, on
+ * a proxy that closes idle sockets, reconnect forever. The end frame carries no
+ * `id:`, for the same reason the session stream's does: a terminal marker is not
+ * a position in the stream and must not overwrite the resume cursor.
+ */
 export const SYSTEM_SSE_END_FRAME = "system.end";
 
 /** Live buffer depth per subscriber before frames are dropped. */
@@ -145,6 +155,25 @@ export class SystemService {
   /** The most recent process rows. */
   get processes(): readonly HostProcess[] {
     return this.latestProcesses;
+  }
+
+  /**
+   * The exact ownership set the discovery pass annotates rows against.
+   *
+   * Public, and deliberately a getter rather than a cached field, because it is
+   * re-read on every sample: a process CAPS started two seconds ago must be
+   * CAPS-owned now, and a process that has exited must not be.
+   *
+   * The Process Detail route builds a row OUTSIDE the discovery pass, by
+   * re-reading procfs at request time. That row arrives with `capsOwned` unset,
+   * because ownership cannot be decided from procfs. Any consumer of that route
+   * must therefore annotate it with THIS set -- the same one the list route
+   * uses -- or the two views of one process report different ownership for the
+   * same (pid, startTicks, bootId), which is the contradiction this accessor
+   * exists to make impossible.
+   */
+  ownedIdentityKeys(): ReadonlySet<string> {
+    return this.capsOwnedIdentities();
   }
 
   /** Whether this kernel supports PSS at all, probed once. */
@@ -249,7 +278,23 @@ export class SystemService {
         }
       }
 
-      this.emit({ sequence: 0, type: "system.processes", timestamp: snapshot.timestamp, payload: { processes } });
+      /*
+ * The process frames and the snapshot frame share ONE global sequence, and it is
+ * the resume position.
+ *
+ * `system.processes` used to be emitted with a hard-coded `sequence: 0`, so its
+ * SSE `id:` was always `id: 0`. A client that reconnected and echoed that back as
+ * `Last-Event-ID` rewound its resume position to the very beginning of the
+ * retained history, silently re-receiving the entire backlog -- which is exactly
+ * the opposite of what a resume is for, and it did so on every reconnect.
+ *
+ * The event therefore takes a real sequence from the same counter, and it is
+ * taken AFTER persistence has been attempted so a subscriber can never be handed
+ * a position the store has not accepted. Both frames describe the same snapshot,
+ * so they are adjacent and strictly ordered.
+ */
+const processEventSequence = this.sequence + 1;
+this.emit({ sequence: processEventSequence, type: "system.processes", timestamp: snapshot.timestamp, payload: { processes } });
     } else if (this.persist) {
       try {
         this.repository.save(snapshot, []);

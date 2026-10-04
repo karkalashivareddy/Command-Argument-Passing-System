@@ -119,6 +119,80 @@ async function findOwnedRow(pid: number, timeoutMs = 6000): Promise<Record<strin
     await app.inject({ method: "POST", url: `/api/sessions/${sessionId}/terminate`, payload: { signal: "SIGINT" } });
   });
 
+  it("keeps a CAPS-owned process CAPS-owned through Process Detail", async () => {
+    /*
+     * The cross-view contradiction this test exists to close.
+     *
+     * The Process Detail route re-reads procfs at request time so it can show a
+     * precise PSS figure. That fresh read skips discovery, and ownership is
+     * settled during discovery -- so the detail row came back with
+     * `capsOwned: false` for a process the inventory beside it reported as
+     * `capsOwned: true`. Same (pid, startTicks, bootId), two answers.
+     *
+     * It matters more than an ordinary display bug: Process Detail is the view a
+     * user opens to decide whether a process is attributable and signalable. A
+     * `false` there is an instruction not to touch a process CAPS owns, and a
+     * `true` there for someone else's process would be an instruction to signal
+     * work that has nothing to do with this gateway.
+     */
+    const accepted = await app.inject({
+      method: "POST",
+      url: "/api/sessions",
+      payload: { command: "sleep", args: ["6"], timeoutMs: 20_000 },
+    });
+    expect(accepted.statusCode).toBe(202);
+    const { sessionId } = accepted.json() as { sessionId: string };
+
+    let pid: number | null = null;
+    for (let i = 0; i < 60 && pid === null; i += 1) {
+      const live = await app.inject({ method: "GET", url: "/api/processes" });
+      const rows = (live.json() as { processes: Array<{ sessionId: string; pid: number }> }).processes;
+      const mine = rows.find((p) => p.sessionId === sessionId);
+      if (mine !== undefined) pid = mine.pid;
+      if (pid === null) await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(pid, "the gateway should have recorded a pid for the child").not.toBeNull();
+
+    const row = await findOwnedRow(pid as unknown as number);
+    expect(row, "the running child should appear in the host inventory").not.toBeNull();
+    expect(row!.capsOwned, "the inventory must report the child as CAPS-owned").toBe(true);
+
+    const key = (row!.identity as { key: string }).key;
+
+    // Fetch the SAME identity through the detail route, which is the view that
+    // used to disagree.
+    const detail = await app.inject({ method: "GET", url: `/api/system/processes/${encodeURIComponent(key)}` });
+    expect(detail.statusCode, "Process Detail must serve the identity the inventory published").toBe(200);
+    const detailProcess = (detail.json() as { process: Record<string, unknown> }).process;
+
+    expect(
+      detailProcess.capsOwned,
+      `Process Detail reported capsOwned=${String(detailProcess.capsOwned)} for ${key}, which the inventory reports as CAPS-owned. The two views must use the same ownership identity set.`,
+    ).toBe(true);
+
+    // Consistency is not limited to the boolean: the identity itself, the row
+    // state, and the resolved parent confidence all come from the same settled
+    // annotation, so they must agree too.
+    expect((detailProcess.identity as { key: string }).key).toBe(key);
+    expect((detailProcess.identity as { pid: number }).pid).toBe(pid);
+    expect((detailProcess.identity as { startTicks: number | null }).startTicks).toBe(
+      (row!.identity as { startTicks: number | null }).startTicks,
+    );
+    expect((detailProcess.rowState as string)).toBe((row!.rowState as string));
+    expect((detailProcess.relationshipConfidence as { value: string }).value).toBe(
+      (row!.relationshipConfidence as { value: string }).value,
+    );
+
+    // A detail row is never left "not settled yet": that placeholder means the
+    // annotation step did not run, which is the defect itself.
+    expect(
+      (detailProcess.relationshipConfidence as { reason: string | null }).reason,
+      "a detail row must not carry the unsettled placeholder",
+    ).not.toMatch(/Not settled yet/);
+
+    await app.inject({ method: "POST", url: `/api/sessions/${sessionId}/terminate`, payload: { signal: "SIGINT" } });
+  });
+
   it("reports a host process as not CAPS-owned", async () => {
     // PID 1 is the one process guaranteed to exist and to be nobody's child.
     const res = await app.inject({ method: "GET", url: "/api/system/processes?limit=2000" });

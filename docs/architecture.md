@@ -258,7 +258,11 @@ Stated once, and repeated verbatim in
 * **No syscall tracing, eBPF, or cgroup accounting.**
 * **No network I/O**, and `/proc/<pid>/io` is not per-device.
 * **No file-descriptor census.**
-* **No stderr redirection**, and no low-level `open`/`dup2`/`close` events.
+* **No low-level `open`/`dup2`/`close` events.** Redirection *is* supported
+  (`<`, `>`, `>>`, `2>`, `2>>`, on a single command or on one stage of a
+  pipeline); what is not modelled is the descriptor-level syscall trail behind
+  it. The engine reports `REDIRECTION_OPENED` and `REDIRECTION_FAILED` and then
+  performs the `open`/`dup2`, and nothing below that is observed.
 * **No descendant or sibling processes** beyond the sampled child.
 * **CAPS diagnostics and the target's stderr share one descriptor** and are
   separated line-wise, not at descriptor level. The classification is exact

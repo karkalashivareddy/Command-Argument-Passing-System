@@ -582,26 +582,26 @@ int process_exec(char *const argv[], redirection_t *redirs, int nredirs,
         if (signals_child_reset() != 0) {
             /*
              * Fail closed on the signal model.  POSIX exec preserves SIG_IGN,
-             * so execvp()ing while SIGINT is still ignored would hand the
-             * executed program a disposition CAPS never promised: the child
-             * would survive Ctrl+C while the REPL carried on.  Refusing the
-             * launch is more honest than running a program whose signal
-             * semantics are wrong, and the refusal travels on the status pipe
-             * like any other launch failure so the parent classifies it
-             * instead of guessing.
+             * so execvp()ing while SIGINT or SIGPIPE is still ignored would
+             * hand the executed program a disposition CAPS never promised: the
+             * child would survive Ctrl+C, and a pipeline producer would take
+             * EPIPE instead of dying of SIGPIPE.  Refusing the launch is more
+             * honest than running a program whose signal semantics are wrong,
+             * and the refusal travels on the status pipe like any other launch
+             * failure so the parent classifies it instead of guessing.
              */
             int err = errno;
             child_fatal_printf("caps: refusing to exec %s: could not restore "
-                               "the default SIGINT disposition (%s); running "
-                               "it with an inherited SIG_IGN would break its "
-                               "signal model\n",
+                               "the default SIGINT/SIGPIPE dispositions (%s); "
+                               "running it with an inherited SIG_IGN would "
+                               "break its signal model\n",
                                argv[0], strerror(err));
             exec_errno = err ? err : EINVAL;
             (void)write(exec_pipe[1], &exec_errno, sizeof exec_errno);
             errno = exec_errno;
             _exit(126);
         }
-apply_redirections(redirs, nredirs);
+        apply_redirections(redirs, nredirs);
 
         /*
          * Resource limits go on immediately before execvp(), which is the only
@@ -740,7 +740,8 @@ void process_report_status(const char *command, int status)
  */
 
 /*
- * Wire one stage's standard descriptors in the child, then exec.
+ * Wire one stage's standard descriptors in the child, then apply the child's
+ * resource limits, then exec.
  *
  * Order is the whole subtlety.  The pipe descriptors are installed FIRST and
  * the file redirections SECOND, so an explicit redirection always wins over the
@@ -762,8 +763,9 @@ static void stage_apply_and_exec(caps_stage_t *stage, int in_fd, int out_fd,
     if (signals_child_reset() != 0) {
         int err = errno;
         child_fatal_printf("caps: refusing to exec %s: could not restore the "
-                           "default SIGINT disposition (%s); running it with an "
-                           "inherited SIG_IGN would break its signal model\n",
+                           "default SIGINT/SIGPIPE dispositions (%s); running "
+                           "it with an inherited SIG_IGN would break its "
+                           "signal model\n",
                            stage->argv[0], strerror(err));
         (void)write(exec_status_fd, &err, sizeof err);
         _exit(126);
@@ -787,6 +789,37 @@ static void stage_apply_and_exec(caps_stage_t *stage, int in_fd, int out_fd,
     }
 
     apply_redirections(stage->redirs, stage->nredirs);
+
+    /*
+     * Every stage of a pipeline gets the configured limits, on exactly the
+     * same terms as a single command: applied in the child, immediately before
+     * execvp(), so the limit is in force for the whole life of that stage's
+     * program.
+     *
+     * This used to run only on the single-command path.  A configured
+     * RLIMIT_AS/RLIMIT_CPU/RLIMIT_FSIZE therefore protected `caps caps_cpu_burn`
+     * and silently did nothing for `caps caps_cpu_burn | cat`, which is the
+     * worse of the two failures: the limit was reported as configured, the
+     * operator believed they were protected, and nothing was enforcing
+     * anything for the stage that actually did the work.
+     *
+     * A limit that cannot be applied is reported on the stage's status pipe and
+     * the stage is refused, exactly as on the single-command path.  Failing
+     * closed here is what keeps "configured" and "in force" from diverging; a
+     * silently unenforced limit is the defect this closes.
+     */
+    {
+        char limit_err[320];
+        if (caps_limits_apply(limit_err, sizeof limit_err) != 0) {
+            child_fatal_printf("caps: refusing to exec %s: %s\n",
+                               stage->argv[0], limit_err);
+            /* EAGAIN: "resource limit could not be established", which the
+             * parent maps to a launch failure rather than to exit 127. */
+            int err = EAGAIN;
+            (void)write(exec_status_fd, &err, sizeof err);
+            _exit(126);
+        }
+    }
 
     execvp(stage->argv[0], stage->argv);
     int exec_errno = errno;
@@ -895,7 +928,7 @@ int process_exec_pipeline(caps_pipeline_t *pipeline, int *last_raw_status,
          * single-command path uses, and it means a permission error on
          * `> /root/x` is reported once, by CAPS, instead of once per child.
          */
-if (open_redirections(stage->redirs, stage->nredirs) < 0) {
+        if (open_redirections(stage->redirs, stage->nredirs) < 0) {
             emit_event(mon, CAPS_EVENT_REDIRECTION_FAILED, 0, 0, 0,
                        (char *const *)stage->argv,
                        (stage_ctx_t){ i, n, pgid });
@@ -1101,7 +1134,6 @@ if (open_redirections(stage->redirs, stage->nredirs) < 0) {
          * cannot pair a start with its own exit.
          */
         stage_ctx_t ctx = { i, n, pgid };
-
 
         caps_stage_t *stage = &pipeline->stages[i];
         int status = statuses[i];

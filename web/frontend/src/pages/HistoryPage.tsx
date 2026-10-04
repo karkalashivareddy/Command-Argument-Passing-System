@@ -17,14 +17,31 @@ export default function HistoryPage() {
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<(typeof FILTERS)[number]>("ALL");
   const [limit, setLimit] = useState(25);
+  /*
+   * A failed query is a state, not an empty result.
+   *
+   * `.catch(() => ({ sessions: [], total: 0 }))` rendered an empty table
+   * captioned "0 sessions" whenever the gateway was unreachable. That is a
+   * specific false claim: it says this installation has never run anything,
+   * which is indistinguishable from a real answer and is exactly the claim a
+   * history page must never make on the gateway's behalf.
+   */
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const data = await api
-      .listSessions({ limit, status: status === "ALL" ? undefined : status, q: q.trim() || undefined })
-      .catch(() => ({ sessions: [], total: 0 }));
-    setRows(data.sessions);
-    setTotal(data.total);
+    try {
+      const data = await api.listSessions({
+        limit,
+        status: status === "ALL" ? undefined : status,
+        q: q.trim() || undefined,
+      });
+      setRows(data.sessions);
+      setTotal(data.total);
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err));
+    }
     setLoading(false);
   }, [limit, status, q]);
 
@@ -58,13 +75,23 @@ export default function HistoryPage() {
             </button>
           ))}
         </div>
-        <span className="ml-auto text-[11.5px] text-[var(--fg-3)]">{total} sessions</span>
+        <span className="ml-auto text-[11.5px] text-[var(--fg-3)]">
+          {loadError !== null ? "total unavailable" : `${total} sessions`}
+        </span>
       </div>
 
       <Card pad={false} title="Sessions" subtitle="Refresh the page to re-query the gateway">
         {loading ? (
           <div className="px-4 py-8">
             <Spinner label="Loading history…" />
+          </div>
+        ) : loadError !== null ? (
+          <div className="px-4">
+            <EmptyState
+              icon={<HistoryIcon className="h-5 w-5" />}
+              title="History could not be read"
+              body={`The gateway did not answer, so this list is unknown rather than empty. ${loadError}`}
+            />
           </div>
         ) : rows.length === 0 ? (
           <div className="px-4">

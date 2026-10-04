@@ -92,7 +92,19 @@ export default function ProcessExplorerPage(): React.JSX.Element {
       const res = await catalogApi.hostProcesses({ limit: 500, withPss: true });
       setRows(res.processes);
       setTotal(res.total);
-      setPssSupported(res.pssSupported);
+      /*
+       * The gateway reports PSS support as a full metric, not a bare boolean:
+       * `null` before the probe has run, `{ value: false }` on a kernel without
+       * smaps_rollup. Assigning the metric object straight into a `boolean |
+       * null` state meant `pssSupported === false` was never true, so the notice
+       * below could never render and a host where PSS is impossible looked
+       * exactly like a host where it merely has not been sampled yet.
+       *
+       * `null` is kept as null rather than collapsed to true: "not probed yet" and
+       * "supported" are different answers, and only one of them is safe to show
+       * a PSS column for.
+       */
+      setPssSupported(res.pssSupported === null ? null : res.pssSupported.value);
       setPssNote(res.pssNote);
       setError(null);
     } catch (err) {

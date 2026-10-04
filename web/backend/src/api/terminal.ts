@@ -155,7 +155,16 @@ export function registerTerminalRoutes(app: FastifyInstance, deps: TerminalRoute
     });
 
     if ("error" in started) {
-      const status = started.error.code === "CONCURRENCY_LIMIT_REACHED" ? 429 : 500;
+      // See the identical mapping in api/routes.ts: a thermal refusal is a
+      // configured, observable condition the caller should retry later, not a
+      // 500 and not a rate limit. The terminal is the primary way CAPS-owned
+      // workloads are started, so this path has to enforce the guard too.
+      const status =
+        started.error.code === "CONCURRENCY_LIMIT_REACHED"
+          ? 429
+          : started.error.code === "THERMAL_REFUSED"
+            ? 503
+            : 500;
       return reply.code(status).send({ error: { code: started.error.code, message: started.error.message } });
     }
 

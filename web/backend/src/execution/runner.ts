@@ -16,6 +16,11 @@ import { classifyLine, splitLines } from "./output.js";
 import { gatewayEvent, normalizeCapsEvent } from "./normalizer.js";
 import { ExecutionRegistry, type ActiveSession } from "./registry.js";
 import { escalateTo, forgetIdentity, rememberIdentity, signalChild, terminateGracefully, type ProcessIdentity } from "./terminator.js";
+import {
+  evaluateThermalGuard,
+  logThermalDecision,
+  type ThermalDecisionRecord,
+} from "./thermalGuard.js";
 
 /** Displayed/recorded flag names for each redirection, matching open()/dup2(). */
 const REDIR_FLAGS: Record<keyof RedirectionSpec, string> = {
@@ -81,6 +86,39 @@ function key(channel: "stdout" | "stderr", sessionId: string): string {
   return `${channel}:${sessionId}`;
 }
 
+/**
+ * The serialisable form of one admission decision.
+ *
+ * Only fields a reader can check are carried.  The sensor path and the raw
+ * millidegree value are included precisely so the decision can be re-verified
+ * against sysfs by hand: a guard that publishes "the temperature was high"
+ * without saying where it read it is asking to be believed.
+ *
+ * When the guard could not read a sensor, `celsius` and `rawMilliCelsius` are
+ * null and `provenance` is UNAVAILABLE.  No field is ever defaulted to a number
+ * that was not measured.
+ */
+function thermalGuardPayload(record: ThermalDecisionRecord): Record<string, unknown> {
+  return {
+    decision: record.decision,
+    action: record.action,
+    enabled: record.decision !== "DISABLED",
+    threshold: record.threshold === null ? null : record.threshold.kind,
+    thresholdCelsius: record.threshold === null ? null : record.threshold.celsius,
+    sensor: record.sensor === null ? null : record.sensor.name,
+    sensorPath: record.sensor === null ? null : record.sensor.path,
+    sensorSourceClass: record.sensor === null ? null : record.sensor.sourceClass,
+    sensorIsPackage: record.sensor === null ? null : record.sensor.isPackage,
+    celsius: record.reading.celsius,
+    rawMilliCelsius: record.reading.rawMilliCelsius,
+    readingProvenance: record.reading.provenance,
+    readingSource: record.reading.source,
+    result: record.result,
+    reason: record.reason,
+    decidedAt: record.timestamp,
+  };
+}
+
 export interface OutputSnapshot {
   stdout: string;
   stderr: string;
@@ -119,6 +157,44 @@ export class ExecutionRunner {
       const sessionId = newId("exec");
       const startedAt = new Date().toISOString();
 
+      /*
+       * Thermal admission, before anything is persisted and long before
+       * anything is spawned.
+       *
+       * The guard module existed but nothing on the execution path called it, so
+       * `CAPS_THERMAL_GUARD_ENABLED=true` was documented behaviour that never
+       * happened: no sensor was read, no threshold evaluated, no workload
+       * refused, and the API reported the guard's configuration as if it were in
+       * force. Configuration that is displayed but not enforced is worse than
+       * configuration that is absent, because it is believed.
+       *
+       * Scope is unchanged and is enforced here rather than in the module:
+       *   - the decision is about a CAPS-owned workload, and nothing else. No
+       *     host process is inspected, signalled, or protected.
+       *   - the guard reads sysfs and never writes it: no trip point, no fan
+       *     curve, no MSR.
+       *   - a host with no sensor yields UNAVAILABLE_ALLOW. The workload runs
+       *     and the record says the admission carries NO thermal justification.
+       *     That is the opposite of inventing a temperature.
+       *   - WARN admits and records a warning. TERM and TERM_THEN_KILL refuse to
+       *     start, which at admission is the whole action available: there is no
+       *     process yet to escalate against.
+       *
+       * The decision is recorded whether it allowed or refused, so "why did this
+       * workload start?" and "why was this workload refused?" are both answerable
+       * from the event stream, replay, and the database.
+       */
+      const guard = evaluateThermalGuard({
+        config: this.config.thermalGuard,
+        target: { sessionId },
+      });
+      logThermalDecision(guard);
+      const guardPayload = thermalGuardPayload(guard);
+
+      if (guard.decision === "REFUSE_TERM" || guard.decision === "REFUSE_KILL") {
+        return this.refuseForThermal(sessionId, input, startedAt, guard, guardPayload);
+      }
+
       // Session row, redirection rows, and the first event are one unit of
       // work.  A failure part-way through would otherwise leave a session with
       // no events, which replay cannot represent.
@@ -153,6 +229,7 @@ export class ExecutionRunner {
               command: input.command,
               argumentCount: args.length,
               timeoutMs: input.timeoutMs,
+              thermalGuard: guardPayload,
               // Recorded so replay can reconstruct what the user typed, not
               // just the first stage's argv. The full argv per stage arrives
               // with each process.started event.
@@ -175,6 +252,67 @@ export class ExecutionRunner {
       error: {
         code: "CONCURRENCY_LIMIT_REACHED",
         message: `Maximum concurrent executions reached (${this.config.maxConcurrent}).`,
+      },
+    };
+  }
+
+  /**
+   * Persist and publish a workload the thermal guard refused to admit.
+   *
+   * A refusal that leaves no trace is indistinguishable from a request that was
+   * never made, so the refused execution is given the same durable shape a
+   * started one has: a session row, an `execution.created` event carrying the
+   * decision, and a terminal `execution.failed` event naming the threshold. It
+   * appears in history, in replay, and over SSE, and it never spawns a process.
+   */
+  private refuseForThermal(
+    sessionId: string,
+    input: StartExecutionInput,
+    startedAt: string,
+    record: ThermalDecisionRecord,
+    guardPayload: Record<string, unknown>,
+  ): StartResult {
+    const args = input.args ?? [];
+    try {
+      this.sessions.createWithFirstEvent({
+        id: sessionId,
+        command: input.command,
+        args,
+        redirections: {},
+        redirectionsDetail: [],
+        timeoutMs: input.timeoutMs,
+        startedAt,
+        firstEvent: {
+          id: newId("evt"),
+          sequence: 0,
+          type: "execution.created",
+          source: "gateway",
+          timestamp: startedAt,
+          payload: {
+            command: input.command,
+            argumentCount: args.length,
+            timeoutMs: input.timeoutMs,
+            thermalGuard: guardPayload,
+            ...(input.commandLine === undefined ? {} : { commandLine: input.commandLine }),
+          },
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error("EXECUTION", "could not record a thermally refused execution", { command: input.command, err: message });
+      return { error: { code: "PERSISTENCE_FAILED", message: "The refusal could not be recorded and no workload was started." } };
+    }
+
+    this.failBeforeStart(sessionId, record.reason, 1, {
+      outcome: "LAUNCH_FAILED",
+      refusedBy: "thermal-guard",
+      thermalGuard: guardPayload,
+    });
+
+    return {
+      error: {
+        code: "THERMAL_REFUSED",
+        message: `This workload was refused by the thermal guard and was not started. ${record.reason}`,
       },
     };
   }
@@ -260,6 +398,7 @@ export class ExecutionRunner {
       process: child,
       childPid: null,
       childIdentity: null,
+      ownedIdentities: [],
       processStartedAt: null,
       processReaped: false,
       startedAt,
@@ -315,12 +454,22 @@ export class ExecutionRunner {
     return null;
   }
 
-  /**
-   * Persist a terminal failure for an execution that never got a child, and
-   * publish it.  Going through the same path as a normal finalization is what
-   * keeps the event stream and the session row in agreement.
-   */
-  private failBeforeStart(sessionId: string, reason: string, nextSequence: number): void {
+/**
+ * Persist a terminal failure for an execution that never got a child, and
+ * publish it.  Going through the same path as a normal finalization is what
+ * keeps the event stream and the session row in agreement.
+ *
+ * `extra` carries whatever a caller needs a reader to be able to act on.  A
+ * thermal refusal, for instance, is only auditable if the terminal event names
+ * the sensor and the threshold: "it failed" with no sensor attached is not a
+ * fact anyone can check against the kernel.
+ */
+private failBeforeStart(
+    sessionId: string,
+    reason: string,
+    nextSequence: number,
+    extra: Record<string, unknown> = {},
+  ): void {
     this.sessions.finalize(sessionId, {
       status: "FAILED", exitCode: null, signal: null, isSuccess: false,
       durationMs: null, pid: null, error: reason,
@@ -328,6 +477,7 @@ export class ExecutionRunner {
     const ev = gatewayEvent({ sessionId, sequence: nextSequence, evId: newId }, "gateway", "execution.failed", {
       reason,
       outcome: "LAUNCH_FAILED",
+      ...extra,
     });
     this.events.insert(ev);
     this.bus.publish(ev);
@@ -472,6 +622,17 @@ export class ExecutionRunner {
            * show a single CAPS-owned row.
            */
           active.childIdentity = rememberIdentity(ev.pid);
+          /*
+           * Ownership is per PROCESS, not per session. A pipeline reports one
+           * `process.started` per stage, and `childIdentity` above is
+           * overwritten by each one, so without this list every stage except the
+           * last would be reported as host work by the Process Explorer while
+           * CAPS held a verified identity for it.
+           */
+          const identity = active.childIdentity;
+          if (identity !== null && !active.ownedIdentities.some((i) => i.pid === identity.pid)) {
+            active.ownedIdentities.push(identity);
+          }
           // One sampler loop for this execution, started with an immediate
           // first sample so even a very short process is observed once.
           this.telemetry.start({

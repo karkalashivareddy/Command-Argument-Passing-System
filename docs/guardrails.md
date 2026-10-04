@@ -168,9 +168,32 @@ allowed to start, and that decision belongs to the operator.
 
 | | |
 | --- | --- |
-| Configured | `CAPS_THERMAL_ENABLED`, `CAPS_THERMAL_WARN_C`, `CAPS_THERMAL_CRITICAL_C`, `CAPS_THERMAL_SENSOR` |
-| Enforced by | the gateway, **before** spawning |
+| Enabled by | `CAPS_THERMAL_GUARD_ENABLED` (default `false`) |
+| Sensor | `CAPS_THERMAL_GUARD_SENSOR` (`auto` \| `package`), or exactly one of `CAPS_THERMAL_GUARD_SENSOR_NAME` / `CAPS_THERMAL_GUARD_SENSOR_PATH` |
+| Thresholds | `CAPS_THERMAL_GUARD_WARNING_C`, `CAPS_THERMAL_GUARD_CRITICAL_C` |
+| Action | `CAPS_THERMAL_GUARD_ACTION` (`WARN` \| `TERM` \| `TERM_THEN_KILL`), `CAPS_THERMAL_GUARD_TERM_GRACE_MS` |
+| Enforced by | `ExecutionRunner.start()`, **before** anything is persisted or spawned |
 | Discovery | read-only over `/sys/class/thermal` and `/sys/class/hwmon` |
+
+### Where it sits in the execution path
+
+Every workload CAPS starts goes through the guard, on both entry points — the
+structured `/api/sessions` request and the `/api/terminal/execute` command line:
+
+1. the guard evaluates the configured thresholds against a **fresh** sysfs read,
+   so the decision reflects the temperature at the moment the workload would
+   start rather than at the moment the process was constructed;
+2. the decision is written into the session's `execution.created` event,
+   including the sensor path, the raw millidegree value, the threshold and a
+   one-sentence reason — whether it allowed or refused;
+3. a refusal creates and finalises the session with `FAILED` and answers
+   `503 THERMAL_REFUSED`. Nothing is forked, and the refusal is still visible in
+   history, in replay and over SSE, so "why did nothing run?" is answerable
+   without asking the process that returned the error.
+
+A refusal is a **pre-spawn** decision, so `TERM` and `TERM_THEN_KILL` both mean
+"do not start". There is no process yet to escalate against, and escalating
+against one would mean signalling something CAPS did not decide to run.
 
 ### What it does not do
 
@@ -178,8 +201,11 @@ allowed to start, and that decision belongs to the operator.
   throttling, no reset. It observes and then refuses or permits.
 - **It never protects host processes.** It governs admission of CAPS-owned
   children only. Nothing here can throttle the machine.
-- **It never fabricates a reading.** No sensor means `UNAVAILABLE` with a reason,
-  and the guard does not run. It does not fall back to a modelled temperature.
+- **It never fabricates a reading.** No sensor means the guard *runs*, evaluates,
+  and returns `UNAVAILABLE_ALLOW`: the workload starts, and the record states
+  that this admission carries **no** thermal justification. It does not fall
+  back to a modelled temperature, because an absent sensor is not evidence of a
+  cool machine.
 - **It does not call an arbitrary sensor "CPU temperature."** Whatever is found
   under a thermal zone or hwmon device is listed with its own `type` and `label`.
   A voltage input or a fan tachometer is reported as what it is.
@@ -188,16 +214,17 @@ allowed to start, and that decision belongs to the operator.
 
 | State | Action |
 | --- | --- |
-| Guard disabled | permit |
-| No sensor found | permit, and say the guard did not run |
-| Reading unavailable for the sensor | permit, and say why |
-| Below `WARN_C` | permit |
-| At or above `WARN_C` | **WARN** — the execution proceeds and the condition is recorded |
-| At or above `CRITICAL_C` | **TERM** or **TERM_THEN_KILL**, per configuration |
+| Guard disabled | `DISABLED` — permit, and say no sensor was read |
+| No sensor found | `UNAVAILABLE_ALLOW` — permit, and record that the guard could not operate |
+| Reading unavailable for the selected sensor | `UNAVAILABLE_ALLOW` — permit, and record why |
+| Below `WARNING_C` | `ALLOW` — permit |
+| At or above `WARNING_C` | `WARN_ONLY` with `WARN`, or `REFUSE_TERM` with `TERM` / `TERM_THEN_KILL` |
+| At or above `CRITICAL_C` | `WARN_ONLY` with `WARN`, or `REFUSE_KILL` with `TERM` / `TERM_THEN_KILL` |
 
 Every decision is recorded with the sensor, the reading, the threshold it crossed,
 and the action taken. The record is what makes the guard auditable after the
-fact, and it is what `GET /api/system/thermal` reports verbatim.
+fact, and it is what `GET /api/system/thermal` and `GET /api/capabilities` report
+verbatim.
 
 Configuration is validated on startup and invalid values are refused rather than
 clamped, because a silently clamped threshold is a threshold the operator did not
@@ -245,9 +272,10 @@ Stated plainly, because the alternative is a reader assuming coverage:
 
 | Claim | Suite |
 | --- | --- |
-| `RLIMIT_AS`/`CPU`/`FSIZE`/`CORE` reach the child; unset means unlimited | `tests/test_limits.sh` (15 assertions, reads the child's own `/proc/<pid>/limits`) |
+| `RLIMIT_AS`/`CPU`/`FSIZE`/`CORE` reach the child **of every pipeline stage as well as a single command**; unset means unlimited | `tests/test_limits.sh` (29 assertions, reads each stage's own `/proc/<pid>/limits`) |
 | pidfd binds, signals, and refuses a recycled PID | `tests/test_pidfd.sh` (21 assertions, with a real zombie from `tests/helpers/zombie_maker.c`) |
 | Thermal decision table, sensor discovery, refusal to fabricate | `web/backend/tests/unit/thermalGuard.test.ts`, `thermalGuardConfig.test.ts` |
+| Thermal guard is actually consulted when a workload starts | `web/backend/tests/unit/thermalAdmission.test.ts` |
 | Timeout escalates through a verified identity | `web/backend/tests/api/server.test.ts` |
 | Guardrails are published as configured vs enforced | `web/backend/tests/api/server.test.ts` |
 | Concurrent execution is refused, not queued | `web/backend/tests/api/server.test.ts` |

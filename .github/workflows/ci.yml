@@ -31,7 +31,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout (full history)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -55,11 +55,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -89,7 +89,7 @@ jobs:
         cc: [gcc, clang]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Verify toolchain
         run: |
@@ -126,9 +126,9 @@ jobs:
       run:
         working-directory: web/backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -146,8 +146,18 @@ jobs:
       # binary is absent, so this step is what makes them run for real here
       # rather than quietly reporting nothing.
       #
-      # `make && make test-helpers` is the same pair the integration job uses.
+      # `make && make test-helpers` is the same pair the integration job uses,
+      # and it runs from the REPOSITORY ROOT.  The job default working directory
+      # is web/backend, and there is deliberately no Makefile there: the engine,
+      # the controlled workloads, and the test helpers are all built by the one
+      # root Makefile.  Running the build from web/backend therefore failed with
+      # "No targets specified and no makefile found" while every other step in the
+      # job passed, which reads like a gateway defect and is a missing
+      # `working-directory`.  An explicit root on this one step is the fix; the
+      # alternative -- a second Makefile under web/backend -- would duplicate the
+      # build rules and let the two copies drift.
       - name: Build the C engine, the controlled workloads, and the test helpers
+        working-directory: .
         run: make && make test-helpers
 
       - name: Typecheck
@@ -168,9 +178,9 @@ jobs:
       run:
         working-directory: web/frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -189,17 +199,29 @@ jobs:
         run: node node_modules/vitest/vitest.mjs run
 
   # -------------------------------------------------------------- integration
-  # Runs the real C engine through the real gateway against the real
-  # controlled workloads. This is the only job that proves the three layers
-  # agree; everything else can pass while the system as a whole is broken.
+  # Runs the real C engine through the real gateway against the real controlled
+  # workloads. This is the only job that proves the three layers agree; every
+  # other job can be green while the system as a whole is broken.
+  #
+  # SCOPE, and why it is not the whole suite again
+  # ------------------------------------------------
+  # This runs the cross-layer API suites only: the files under tests/api, which
+  # fork real processes, read the real /proc entry of a real child, and assert on
+  # what a second, independent read of the API says about it.
+  #
+  # It previously ran the entire vitest suite, which is what the `backend` job
+  # already does, and the two jobs had become byte-for-byte the same pipeline.
+  # That is pure duplicated CI minutes and one more place for the same coverage
+  # to disagree with itself. The unit suites are the backend job's job; this job's
+  # identity is the boundary between the layers, so it is scoped to the boundary.
   integration:
     name: real gateway integration
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -212,9 +234,9 @@ jobs:
         working-directory: web/backend
         run: npm ci
 
-      - name: Gateway integration suite against the real engine
+      - name: Cross-layer API suites against the real engine
         working-directory: web/backend
-        run: node node_modules/vitest/vitest.mjs run
+        run: node node_modules/vitest/vitest.mjs run tests/api
 
   # ------------------------------------------------------------------ browser
   # A smoke suite against the production build of the real frontend, talking
@@ -226,9 +248,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -302,7 +324,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -322,9 +344,9 @@ jobs:
       # Required for `npm audit` to reach the advisory database in CI.
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -353,14 +375,14 @@ jobs:
       matrix:
         language: [javascript-typescript, c-cpp]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           # Both languages are extracted without a build. C is traced by the
@@ -370,6 +392,6 @@ jobs:
           build-mode: none
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
         with:
           category: /language:${{ matrix.language }}

@@ -496,7 +496,19 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
       timeoutMs,
     });
     if ("error" in result) {
-      const status = result.error.code === "CONCURRENCY_LIMIT_REACHED" ? 429 : 500;
+      /*
+       * Status mapping is not cosmetic here: a client retries a 500 as a bug
+       * and a 429 as a rate limit, and neither is what a thermal refusal is.
+       * 503 says "this gateway is refusing work for now, the condition is
+       * observable, try again when it changes", which is the accurate reading
+       * and the one the operator can act on.
+       */
+      const status =
+        result.error.code === "CONCURRENCY_LIMIT_REACHED"
+          ? 429
+          : result.error.code === "THERMAL_REFUSED"
+            ? 503
+            : 500;
       return sendError(reply, status, result.error.code, result.error.message, rid);
     }
     const session = sessions.findById(result.sessionId);

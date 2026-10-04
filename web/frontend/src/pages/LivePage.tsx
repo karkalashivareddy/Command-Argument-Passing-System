@@ -11,12 +11,31 @@ import type { ProcessInfo } from "../types/observability";
 export default function LivePage() {
   const { events, connected, connection } = useGlobalFeed(300);
   const [processes, setProcesses] = useState<{ processes: ProcessInfo[]; capacity: number } | null>(null);
+  /*
+   * A failed read is kept as a failure, not as an empty list.
+   *
+   * `.catch(() => {})` left `processes` at null forever when the gateway was
+   * down, and the `?? []` below turned that into `running.length === 0` -- a
+   * confident "0 running" badge on a page whose whole purpose is to say what is
+   * running. "Nothing is running" and "I could not ask" are different claims,
+   * and only one of them is true when the request fails.
+   */
+  const [processesError, setProcessesError] = useState<string | null>(null);
 
   useEffect(() => {
-    const t = window.setInterval(() => {
-      void api.processes().then(setProcesses).catch(() => {});
-    }, 1500);
-    void api.processes().then(setProcesses).catch(() => {});
+    const load = (): void => {
+      void api
+        .processes()
+        .then((res) => {
+          setProcesses(res);
+          setProcessesError(null);
+        })
+        .catch((err: unknown) => {
+          setProcessesError(err instanceof Error ? err.message : String(err));
+        });
+    };
+    load();
+    const t = window.setInterval(load, 1500);
     return () => window.clearInterval(t);
   }, []);
 
@@ -41,9 +60,17 @@ export default function LivePage() {
           <Card
             title={`Processes ${processes ? `· ${processes.capacity} capacity` : ""}`}
             subtitle="Polled from the gateway registry"
-            actions={<Badge tone={running.length > 0 ? "active" : "neutral"}>{running.length} running</Badge>}
+            actions={<Badge tone={processesError !== null ? "warn" : running.length > 0 ? "active" : "neutral"}>
+              {processesError !== null ? "unavailable" : `${running.length} running`}
+            </Badge>}
           >
-            {!processes ? (
+            {processesError !== null ? (
+              <EmptyState
+                icon={<Activity className="h-5 w-5" />}
+                title="The process table could not be read"
+                body={`The gateway did not answer, so nothing here is known about what is running. ${processesError}`}
+              />
+            ) : !processes ? (
               <div className="py-6"><Spinner label="Reading process table…" /></div>
             ) : running.length === 0 ? (
               <EmptyState icon={<Activity className="h-5 w-5" />} title="Nothing running right now" body="Running sessions appear here with their live PID and elapsed time." />

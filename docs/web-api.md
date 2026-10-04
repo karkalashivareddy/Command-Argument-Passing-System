@@ -34,7 +34,7 @@ Answers one question: is the process running?
 ```json
 {
   "status": "ok",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "platform": "linux/posix",
   "uptimeSeconds": 412
 }
@@ -48,7 +48,7 @@ Answers a different question: can the gateway actually do its job? Returns
 ```json
 {
   "ready": true,
-  "version": "1.1.0",
+  "version": "2.0.0",
   "checks": {
     "engine":     { "available": true, "detail": "caps engine is executable" },
     "database":   { "available": true, "detail": "event store is open" },
@@ -70,7 +70,7 @@ repository-relative.
 
 ```json
 {
-  "version": "1.1.0",
+  "version": "2.0.0",
   "platform": "linux/posix",
   "engineAvailable": true,
   "enginePath": "caps",

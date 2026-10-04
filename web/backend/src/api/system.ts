@@ -28,7 +28,7 @@ import { FREQUENCY_ABSENT_REASON } from "../telemetry/system/frequency.js";
 import { valueOf } from "../telemetry/system/types.js";
 import type { HostProcess } from "../telemetry/system/processes.js";
 import { buildSmapsRollup } from "../telemetry/system/smaps.js";
-import { readHostProcess, probeClockTicks } from "../telemetry/system/processes.js";
+import { readHostProcess, probeClockTicks, annotateRelationships } from "../telemetry/system/processes.js";
 import { readBootId } from "../telemetry/system/read.js";
 import { logger } from "../utils/logger.js";
 
@@ -114,7 +114,7 @@ export function registerSystemRoutes(app: FastifyInstance, deps: SystemRouteDeps
       { id: "frequency", label: "CPU frequency", source: "/sys/devices/system/cpu/cpufreq", available: true, note: "Policy/governor frequency only. No hardware frequency measurement is implemented." },
       { id: "disk", label: "Disk", source: "/proc/diskstats, statfs(2), /proc/self/mountinfo", available: true, note: "Block-device counters and filesystem capacity are reported separately and never summed." },
       { id: "network", label: "Network", source: "/proc/net/dev", available: true, note: "Host-wide interface counters. Per-process network accounting is not available on Linux and is reported UNAVAILABLE." },
-      { id: "processes", label: "Processes", source: "/proc/<pid>", available: true, note: "Identity is (pid, start_ticks, boot_id), not pid alone. Rows carry LIVE, EXITED, DISAPPEARED, or PERMISSION_DENIED." },
+      { id: "processes", label: "Processes", source: "/proc/<pid>", available: true, note: "Identity is (pid, start_ticks, boot_id), not pid alone. Rows carry LIVE, EXITED, DISAPPEARED, PERMISSION_DENIED, or UNAVAILABLE, each classified from the read failure that actually occurred." },
       { id: "pss", label: "PSS", source: "/proc/<pid>/smaps_rollup", available: true, note: "Sampled on a slow cadence for a bounded number of processes, never on the fast pass. Requires CONFIG_PROC_PAGE_MONITOR." },
       { id: "scheduler", label: "Scheduler", source: "/proc/<pid>/schedstat", available: true, note: "Optional kernel telemetry, gated by CONFIG_SCHEDSTATS." },
     ],
@@ -201,6 +201,27 @@ export function registerSystemRoutes(app: FastifyInstance, deps: SystemRouteDeps
     // now, and the cached row is only used when the fresh read failed, in which
     // case the fresh row's UNAVAILABLE fields already say why.
     const row = fresh !== null && fresh.row.identity.key === identityKey ? { ...fresh.row, pssBytes: rollup?.pss ?? fresh.row.pssBytes } : match;
+
+    /*
+     * Settle ownership and the parent link against the SAME context the list
+     * route uses.
+     *
+     * `readHostProcess` cannot answer either one: capsOwned asks "did *we*
+     * start this?", which only the execution registry knows, and a parent link
+     * can only be judged against the rest of the inventory. Both are normally
+     * settled by `annotateRelationships` during discovery.
+     *
+     * A fresh read produced here skips discovery entirely, so it returned
+     * capsOwned: false for a process the inventory beside it reported as
+     * CAPS-owned. That is the worst kind of disagreement in this product: the
+     * detail view is the one a user opens to decide whether a process is
+     * attributable and signalable, and it was answering "no" about a process
+     * CAPS had forked and still held a verified identity for. The same
+     * (pid, startTicks, bootId) must produce the same answer in every view, so
+     * the ownership set and the sampled-PID set are both taken from the service
+     * rather than from this single row.
+     */
+    annotateRelationships([row], system.ownedIdentityKeys(), timestamp, new Set(all.map((p) => p.identity.pid)));
 
     return {
       process: rollup === null ? row : { ...row, pssBytes: rollup.pss, anonymousBytes: rollup.anonymous, fileBackedBytes: rollup.fileBacked, sharedBytes: rollup.shared },
@@ -439,6 +460,32 @@ export function registerSystemRoutes(app: FastifyInstance, deps: SystemRouteDeps
     const cleanup = (): void => {
       clearInterval(keepalive);
       const dropped = system.droppedFor(subscription);
+      /*
+       * The advertised end frame is written before the socket closes, so a client
+       * can distinguish "the gateway finished the stream" from "the connection
+       * broke". It carries no `id:` on purpose: a terminal marker is not a resume
+       * position, and giving it one would move the client's cursor past the last
+       * real frame.
+       *
+       * `res.end` is the success path and `res.destroy` the client-vanished one.
+       * A write on a destroyed socket throws inside an event handler, so it is
+       * guarded rather than assumed.
+       */
+      const closed = req.raw.destroyed;
+      if (!closed) {
+        try {
+          reply.raw.write(`event: ${SYSTEM_SSE_END_FRAME}\ndata: ${JSON.stringify({
+            reason: "closed",
+            dropped,
+            sent: sent.size,
+            lastSequence: sent.size === 0 ? null : Math.max(...sent),
+          })}\n\n`);
+          reply.raw.end();
+        } catch {
+          // The peer went away between the check and the write. Nothing to
+          // report and nothing to recover: the subscription is closed below.
+        }
+      }
       subscription.close();
       logger.debug("SSE", "host stream closed", { client: subscription.id, sent: sent.size, dropped });
     };

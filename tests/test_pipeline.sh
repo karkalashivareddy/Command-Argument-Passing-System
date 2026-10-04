@@ -24,7 +24,8 @@
 # tests verify the same evidence the gateway persists and the UI replays.
 set -u
 
-bin=${1:?usage: test_pipeline.sh <binary>}
+bin=${1:?usage: test_pipeline.sh <binary> <sigpipe_writer>}
+producer=${2:?usage: test_pipeline.sh <binary> <sigpipe_writer>}
 fail=0
 
 failmsg() {
@@ -46,6 +47,19 @@ case "$bin" in
     *) bin="$(pwd)/$bin" ;;
 esac
 [ -x "$bin" ] || { echo "FAIL: engine $bin is not executable" >&2; exit 1; }
+
+# Same rule for the controlled producer binary: it is named by the harness as a
+# repository-relative path, and the tests below run in a scratch directory where
+# that path resolves to nothing.  Resolving it here, next to the engine, is what
+# keeps the SIGPIPE assertions from silently testing an empty command line.
+case "$producer" in
+    /*) ;;
+    *) producer="$(pwd)/$producer" ;;
+esac
+[ -x "$producer" ] || {
+    echo "FATAL: producer $producer is not executable; build it with \`make test-helpers\`" >&2
+    exit 1
+}
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -235,50 +249,125 @@ fi
 
 echo
 echo "Pipeline: SIGPIPE when the consumer exits early"
-# `yes` writes forever.  If the producer is not killed by SIGPIPE when `head`
-# exits, this hangs; the timeout is the assertion.
+#
+# The producer is this repository's own build/sigpipe_writer rather than a
+# coreutils `yes`. That is the whole point of the assertion: `yes` is a property
+# of whichever coreutils the runner installed, and GNU `yes`, uutils `yes`, and
+# BusyBox `yes` do not agree on what to do with EPIPE. The producer under test
+# must be a first-party program with no signal handler, so the only thing that
+# can kill it is the disposition the engine established in the child.
+#
+# There is no retry loop here. The producer writes 64 MiB in 64 KiB writes and
+# the default Linux pipe capacity is 64 KiB, so the producer is provably blocked
+# inside write(2) before the consumer can exit; the closed pipe then produces
+# SIGPIPE the first time. An earlier version of this test asserted the property
+# over five attempts and reported a runner's load as "the producer was not
+# killed by SIGPIPE", which is both non-deterministic and a wrong diagnosis: the
+# real defect was that the child inherited an ignored SIGPIPE and took EPIPE
+# instead, which no number of attempts would ever fix.
+
+# The command line under test, resolved once so no assertion can accidentally
+# run an empty stage.
+sigpipe_cmd="$producer | head -1"
+
+# 1. It terminates promptly. A producer that is not killed spins until the
+# byte budget runs out, so the timeout is a real assertion about the signal,
+# not a formality.
 started=$(date +%s)
-out=$(timeout 15 sh -c "printf 'yes | head -1\nexit\n' | $bin 2>/dev/null" || true)
+ev=$(printf '%s\nexit\n' "$sigpipe_cmd" \
+     | timeout 30 "$bin" --monitor --json 2>&1 1>/dev/null || true)
 elapsed=$(( $(date +%s) - started ))
 if [ "$elapsed" -lt 10 ]; then
-    passmsg "'yes | head -1' terminated in ${elapsed}s instead of spinning"
+    passmsg "'$sigpipe_cmd' terminated in ${elapsed}s instead of spinning"
 else
-    failmsg "'yes | head -1' did not terminate (${elapsed}s): the producer was not killed by SIGPIPE"
+    failmsg "'$sigpipe_cmd' did not terminate (${elapsed}s): the producer was not killed by SIGPIPE"
 fi
 
-# The producer must be recorded as signalled, not as completed: it was killed.
-#
-# This is retried, and the reason is worth stating rather than hiding. Whether a
-# single run records the signal depends on two independent races: the producer's
-# next write after the consumer's exit, and the monitor's own reporting of a
-# child that may be gone before it is reaped. On an idle machine the first run
-# essentially always records it; on a loaded CI runner it sometimes does not, and
-# a test that reports that as "the producer was not killed by SIGPIPE" is
-# describing the runner's load, not the engine.
-#
-# So the property asserted here is that the engine records SIGPIPE for a producer
-# whose consumer exits early -- which must hold on at least one of a few
-# attempts -- and the count of attempts it took is reported either way. The
-# property that is NOT retried is the one above: that the pipeline terminates at
-# all instead of spinning, which is a real hang and fails immediately.
-sigpipe_seen=0
-sigpipe_attempts=0
-for _ in 1 2 3 4 5; do
-    sigpipe_attempts=$((sigpipe_attempts + 1))
-    ev=$(events 'yes | head -1')
-    if printf '%s\n' "$ev" | grep -q '"event":"SIGNAL_RECEIVED"'; then
-        sigpipe_seen=1
-        break
-    fi
-done
-if [ "$sigpipe_seen" -eq 1 ]; then
-    if [ "$sigpipe_attempts" -eq 1 ]; then
-        passmsg "the producer is recorded as terminated by a signal (SIGPIPE)"
-    else
-        passmsg "the producer is recorded as terminated by a signal (SIGPIPE, on attempt ${sigpipe_attempts})"
-    fi
+# 2. The producer's terminal evidence names the signal, its number, and the
+#    outcome. Each is asserted separately because a system that reports only
+#    one of the three is still misleading to a reader: "signal = 13" without
+#    "outcome = SIGNALED" reads like a recoverable exit.
+sig_line=$(printf '%s\n' "$ev" | grep '"event":"SIGNAL_RECEIVED"' | head -1)
+if [ -n "$sig_line" ]; then
+    passmsg "the producer is recorded as terminated by a signal"
 else
-    failmsg "no SIGNAL_RECEIVED for a producer killed by SIGPIPE, over ${sigpipe_attempts} attempts"
+    failmsg "no SIGNAL_RECEIVED for a producer whose consumer closed the pipe (events: $(printf '%s\n' "$ev" | grep -c '"event"') lines)"
+fi
+
+case "$sig_line" in
+    *'"signal":13'*) passmsg "the recorded signal is 13 (SIGPIPE)" ;;
+    *)                failmsg "the recorded signal is not 13: ${sig_line:-<no SIGNAL_RECEIVED event>}" ;;
+esac
+
+case "$sig_line" in
+    *'"outcome":"SIGNALED"'*) passmsg "the producer's outcome is SIGNALED, not a non-zero exit" ;;
+    *)                         failmsg "the producer's outcome is not SIGNALED: ${sig_line:-<no SIGNAL_RECEIVED event>}" ;;
+esac
+
+# The producer must be attributed to stage 0 of 2, and must NOT be reported
+# as having exited on its own. A "Broken pipe" EPIPE exit would satisfy
+# assertions 2-4 and still mean the child's disposition was wrong.
+if printf '%s\n' "$ev" | grep '"event":"PROCESS_EXITED"' \
+    | grep -q '"stage":0,"stages":2,"exit_code":141,"duration_ms":[0-9]*,"outcome":"SIGNALED"'; then
+    passmsg "stage 0 exits 141 (128+13) with outcome SIGNALED, which is not an EPIPE exit"
+else
+    failmsg "stage 0 did not exit 141/SIGNALED: $(printf '%s\n' "$ev" | grep '"stage":0,"stages":2' | grep PROCESS_EXITED | head -1)"
+fi
+
+# 3. The consumer is unaffected: it exited 0 and completed, which is what
+#    makes this a normal `producer | head` and not a shared failure.
+if printf '%s\n' "$ev" | grep '"event":"PROCESS_EXITED"' \
+    | grep -q '"stage":1,"stages":2,"exit_code":0'; then
+    passmsg "the consumer still completed normally (stage 1 exit 0)"
+else
+    failmsg "the consumer did not complete: $(printf '%s\n' "$ev" | grep '"stage":1,"stages":2' | grep PROCESS_EXITED | head -1)"
+fi
+
+# 4. The pipeline's own status is the LAST stage's, so a producer killed by
+#    SIGPIPE does not turn `producer | head -1` into a failed command.
+out=$(visible "$sigpipe_cmd")
+if [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ]; then
+    passmsg "the pipeline delivered one line and reported success"
+else
+    failmsg "the pipeline produced $(printf '%s\n' "$out" | wc -l) lines (expected exactly 1)"
+fi
+
+echo
+echo "Pipeline: the child signal model does not depend on the ambient environment"
+#
+# An ignored SIGPIPE survives execvp(). A host shell, package manager, container
+# runtime, or CI step wrapper that sets SIGPIPE to SIG_IGN for its own reasons
+# would otherwise change what `producer | consumer` means inside the engine: the
+# producer would take EPIPE, print "Broken pipe", and exit non-zero, and the
+# whole pipeline signal model would change with the environment the engine
+# happened to be started in. This asserts the engine states the child's
+# dispositions itself.
+#
+# This is the exact condition that made the five-attempt SIGPIPE assertion fail
+# on CI: the producer took EPIPE every single time, so retrying could never have
+# helped.
+( trap '' PIPE; printf '%s\nexit\n' "$sigpipe_cmd" \
+    | timeout 30 "$bin" --monitor --json 2>&1 1>/dev/null ) \
+    > "$work/sigpipe-ambient.txt" 2>&1
+if grep -q '"event":"SIGNAL_RECEIVED"' "$work/sigpipe-ambient.txt" \
+   && grep -q '"signal":13' "$work/sigpipe-ambient.txt"; then
+    passmsg "SIGPIPE is still delivered when the invoking shell ignores it"
+else
+    failmsg "an inherited SIG_IGN changed the child's signal model: $(grep -a 'Broken pipe' "$work/sigpipe-ambient.txt" | head -1)"
+fi
+
+# The SIGINT half of the same model: the parent ignores SIGINT so the REPL
+# survives, and the child must get the default back. test_signals.sh asserts the
+# observable behaviour; this asserts it holds when the disposition is inherited
+# ignored from outside, so the two properties cannot be collapsed into one.
+( trap '' INT; printf '%s\nexit\n' "$sigpipe_cmd" \
+    | timeout 30 "$bin" --monitor --json 2>&1 1>/dev/null ) \
+    > "$work/sigint-ambient.txt" 2>&1
+if grep -q '"event":"PIPELINE_COMPLETED"' "$work/sigint-ambient.txt" \
+   && grep -q '"signal":13' "$work/sigint-ambient.txt"; then
+    passmsg "an inherited SIG_IGN for SIGINT changes nothing: the pipeline completes and SIGPIPE still fires"
+else
+    failmsg "an inherited SIG_IGN for SIGINT broke the pipeline: $(head -3 "$work/sigint-ambient.txt")"
 fi
 
 echo

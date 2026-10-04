@@ -29,20 +29,39 @@ export default function OverviewPage() {
   const [analytics, setAnalytics] = useState<AnalyticsOverview | null>(null);
   const [processes, setProcesses] = useState<{ processes: ProcessInfo[]; capacity: number } | null>(null);
   const [booted, setBooted] = useState(false);
+  /*
+   * Which of the three reads failed, kept apart from "there is nothing to show".
+   *
+   * Each `.catch(() => ({ sessions: [], total: 0 })` / `.catch(() => null)` made a
+   * failed request indistinguishable from an empty installation, and this page
+   * renders those empties as statements: "none yet", "No executions recorded yet",
+   * a running count of 0. An unreachable gateway therefore produced a dashboard
+   * confidently describing a machine that had never run anything.
+   *
+   * The honest rendering is "unavailable", so each failure is recorded and shown.
+   */
+  const [loadError, setLoadError] = useState<{ sessions?: string; analytics?: string; processes?: string }>({});
   const { events, connected, connection } = useGlobalFeed(40);
 
   useEffect(() => {
     let stop = false;
     (async () => {
-      const [s, a, p] = await Promise.all([
-        api.listSessions({ limit: 6 }).catch(() => ({ sessions: [], total: 0 })),
-        api.analytics().catch(() => null),
-        api.processes().catch(() => null),
+      const [s, a, p] = await Promise.allSettled([
+        api.listSessions({ limit: 6 }),
+        api.analytics(),
+        api.processes(),
       ]);
       if (stop) return;
-      setSessions(s.sessions);
-      setAnalytics(a);
-      setProcesses(p?.capacity ? p : null);
+      const why = (r: PromiseRejectedResult): string =>
+        r.reason instanceof Error ? r.reason.message : String(r.reason);
+      const failed: { sessions?: string; analytics?: string; processes?: string } = {};
+      if (s.status === "fulfilled") setSessions(s.value.sessions);
+      else failed.sessions = why(s);
+      if (a.status === "fulfilled") setAnalytics(a.value);
+      else failed.analytics = why(a);
+      if (p.status === "fulfilled") setProcesses(p.value);
+      else failed.processes = why(p);
+      setLoadError(failed);
       setBooted(true);
     })();
     return () => {
@@ -50,7 +69,9 @@ export default function OverviewPage() {
     };
   }, []);
 
-  const running = processes?.processes.filter((p) => p.state === "RUNNING" || p.state === "STARTING").length ?? analytics?.running ?? 0;
+  const running =
+    processes?.processes.filter((p) => p.state === "RUNNING" || p.state === "STARTING").length ??
+    (loadError.analytics !== undefined && loadError.processes !== undefined ? null : (analytics?.running ?? 0));
 
   const quickRun = () => {
     const parts = command.trim().split(/\s+/);
@@ -115,10 +136,10 @@ export default function OverviewPage() {
 
       {/* Where is the engine right now */}
       <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatOrPlaceholder label="Executions" value={analytics ? String(analytics.totalExecutions) : booted ? "none yet" : "…"} />
-        <StatOrPlaceholder label="Running now" value={String(running)} />
-        <StatOrPlaceholder label="Median duration" value={analytics?.p50Ms != null ? fmtDuration(analytics.p50Ms) : "…"} />
-        <StatOrPlaceholder label="Avg duration" value={analytics?.avgDurationMs != null ? fmtDuration(analytics.avgDurationMs) : "…"} />
+        <StatOrPlaceholder label="Executions" value={analytics ? String(analytics.totalExecutions) : loadError.analytics !== undefined ? "unavailable" : booted ? "none yet" : "…"} />
+        <StatOrPlaceholder label="Running now" value={running === null ? "unavailable" : String(running)} />
+        <StatOrPlaceholder label="Median duration" value={analytics?.p50Ms != null ? fmtDuration(analytics.p50Ms) : loadError.analytics !== undefined ? "unavailable" : "…"} />
+        <StatOrPlaceholder label="Avg duration" value={analytics?.avgDurationMs != null ? fmtDuration(analytics.avgDurationMs) : loadError.analytics !== undefined ? "unavailable" : "…"} />
       </section>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -133,7 +154,13 @@ export default function OverviewPage() {
               </Link>
             }
           >
-            {sessions.length === 0 ? (
+            {loadError.sessions !== undefined ? (
+              <EmptyState
+                icon={<History className="h-5 w-5" />}
+                title="Recent executions could not be read"
+                body={`The gateway did not answer, so this list is unknown rather than empty. ${loadError.sessions}`}
+              />
+            ) : sessions.length === 0 ? (
               <EmptyState
                 icon={<History className="h-5 w-5" />}
                 title="No executions recorded yet"

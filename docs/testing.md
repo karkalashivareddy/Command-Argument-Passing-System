@@ -146,6 +146,8 @@ npm test
 | Process identity, ownership, parent-link confidence | `web/backend/tests/unit/processAttribution.test.ts` |
 | pidfd capability and signalling | `web/backend/tests/unit/pidfd.test.ts` |
 | Thermal guard decisions and configuration | `web/backend/tests/unit/thermalGuard.test.ts`, `thermalGuardConfig.test.ts` |
+| Thermal guard on the real execution path (refuses, records, admits) | `web/backend/tests/unit/thermalAdmission.test.ts` |
+| Ownership agreement across Process Explorer and Process Detail | `web/backend/tests/api/ownership.test.ts` |
 | Failure injection | `web/backend/tests/unit/failureInjection.test.ts` |
 | Host telemetry against raw `/proc` | `web/backend/src/telemetry/system/groundtruth.test.ts` |
 | Catalog and argument validation | `web/backend/src/catalog/commands.test.ts` |
@@ -291,6 +293,10 @@ CI is the authoritative Clang check. A green local run does not substitute for i
 | Resource limits reach the child | `test_limits.sh` | yes |
 | pidfd identity safety | `test_pidfd.sh` | yes |
 | Thermal guard decisions | `thermalGuard*.test.ts` | yes |
+| Thermal guard is on the execution path | `thermalAdmission.test.ts` | yes |
+| Pipeline stages get the configured limits | `test_limits.sh` | yes |
+| Child signal dispositions are stated, not inherited | `test_pipeline.sh`, `test_signals.sh` | yes |
+| One execution, every view, one answer | `scripts/cross-view-proof.sh` | needs a running gateway |
 | Pipeline stage accounting | `test_pipeline.sh`, `pipeline.test.ts` | yes |
 | argv fidelity | `argvBoundary.test.ts` | yes |
 | Ownership attribution | `ownership.test.ts`, `processAttribution.test.ts` | yes |

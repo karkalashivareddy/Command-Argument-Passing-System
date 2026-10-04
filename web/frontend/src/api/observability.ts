@@ -319,11 +319,32 @@ export interface HostProcessesResponse {
   processes: HostProcessRow[];
   total: number;
   returned: number;
-  pssSupported: boolean;
+  /**
+   * Whether this kernel can produce PSS at all, as a full metric.
+   *
+   * NOT a plain boolean. The gateway reports it through the same metric wrapper
+   * as every other host reading, so it arrives as `null` before the probe has
+   * run and as `{ value: false, ... }` on a kernel without smaps_rollup. Typing
+   * it as `boolean` made `pssSupported === false` unreachable -- the notice that
+   * PSS was never observed could never be rendered -- while looking perfectly
+   * correct to the type checker.
+   */
+  pssSupported: SystemMetric<boolean> | null;
   pssNote: string;
+  cadence: { fastMs: number; discoveryMs: number; pssMs: number; pssMaxProcesses: number };
 }
 
-export interface CapabilitiesResponseFull extends CatalogResponse {
+/**
+ * The `/api/capabilities` document, as far as this client uses it.
+ *
+ * Deliberately NOT `extends CatalogResponse`. `/api/capabilities` and
+ * `/api/catalog` are different documents: the catalog carries the probed command
+ * list and its summary, and the capabilities document carries the guardrails,
+ * the process-identity claim, and the bind/security policy. Extending one with
+ * the other produced a type that claimed four fields the endpoint never sends,
+ * and would have broken the first line of code that actually read them.
+ */
+export interface CapabilitiesResponseFull {
   guardrails: GuardrailsView;
   processIdentity: ProcessIdentityView;
   version: string;
@@ -392,6 +413,30 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 /**
+ * The process detail response, exactly as the gateway sends it.
+ *
+ * `timestamp` used to be declared here and was never present in the response. A
+ * declared-but-absent field is worse than an undeclared one: it type-checks, it
+ * looks authoritative, and it renders as `undefined` in the one place a reader
+ * would take a measurement time from.
+ */
+export interface ProcessDetailResponse {
+  process: HostProcessRow;
+  /** null when smaps_rollup could not be read for this process. */
+  pss: { pss: number; anonymous: number; fileBacked: number; shared: number } | null;
+  pssNote: string;
+  hostContext: {
+    cpuBusyPercent: number | null;
+    memoryUsedPercent: number | null;
+    pressure: unknown[];
+    thermalHighestCelsius: number | null;
+    load1: number | null;
+  };
+  /** Persisted snapshots for this identity. `process` is null on a corrupt row. */
+  history: Array<{ timestamp: string; process: unknown }>;
+}
+
+/**
  * The catalog, grammar, terminal, and host-observer surface.
  *
  * Every response is returned as the gateway sent it. No field is defaulted,
@@ -432,7 +477,12 @@ export const catalogApi = {
     return json<HostProcessesResponse>(`/api/system/processes${qs === "" ? "" : `?${qs}`}`);
   },
 
-  process: (identity: string): Promise<{ timestamp: string; process: HostProcessRow | null }> =>
+  /**
+   * The process detail response.
+   *
+   * Field-for-field as the gateway sends it. See `ProcessDetailResponse`.
+   */
+  process: (identity: string): Promise<ProcessDetailResponse> =>
     json(`/api/system/processes/${encodeURIComponent(identity)}`),
 
   hostCapabilities: (): Promise<{ version: string; subsystems: unknown[]; notImplemented: unknown[] }> =>

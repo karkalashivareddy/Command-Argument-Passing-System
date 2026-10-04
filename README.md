@@ -615,21 +615,21 @@ Each is bounded and self-cleaning. `caps_io_burn` creates and removes its own
 private workspace on every exit path, including signal delivery.
 ## Verification
 
-Every number above is from the final run of this work, on WSL2 Ubuntu with
-gcc 15.2.0 and Node 22.14. The complete run, including what was **not** run and
-why, is in
-[docs/audit/FINAL_RELEASE_VERIFICATION.md](docs/audit/FINAL_RELEASE_VERIFICATION.md).
+Every number above is from an actual run on WSL2 Ubuntu with gcc and Node 22.14.
+The complete run, including the release blockers that were found and fixed and
+what was **not** run and why, is in
+[docs/audit/RELEASE_VERIFICATION_2_0_0.md](docs/audit/RELEASE_VERIFICATION_2_0_0.md).
 
 | Verification | Result | How |
 | --- | --- | --- |
 | GCC strict build (`-Werror`) | PASS | `make CC=gcc CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -g"` |
 | Clang strict build (`-Werror`) | NOT RUN here | configured in the CI matrix; clang is not installed on this machine |
-| C unit + integration suite | PASS | `make test` — **16 suites, 239 assertions** |
-| C ASan + UBSan (leak detection) | PASS | `make test-asan` — the same 16 suites, 239 assertions |
+| C unit + integration suite | PASS | `make test` — **16 suites, 260 assertions** |
+| C ASan + UBSan (leak detection) | PASS | `make test-asan` — the same 16 suites, 260 assertions |
 | Controlled workload suite | PASS | `make test-workloads` |
 | Workload sanitizers | PASS | `make test-workloads-asan` |
 | Backend typecheck + build | PASS | `npm run typecheck && npm run build` |
-| Backend tests | PASS | **433 tests**, 26 files — `node node_modules/vitest/vitest.mjs run` |
+| Backend tests | PASS | **450 tests**, 27 files — `node node_modules/vitest/vitest.mjs run` |
 | Frontend typecheck + production build | PASS | `npm run typecheck && npm run build` |
 | Frontend tests | PASS | **247 tests**, 13 files |
 | Real gateway integration (real engine, real workloads) | PASS | `web/backend/tests/api/server.test.ts` — 32 tests |
@@ -639,11 +639,14 @@ why, is in
 | CAPS-owned attribution, end to end | PASS | `web/backend/tests/api/ownership.test.ts` |
 | pidfd identity (incl. a real zombie) | PASS | `tests/test_pidfd.sh` |
 | Resource limits reach the child | PASS | `tests/test_limits.sh` |
-| Thermal guard decisions | PASS | `tests/unit/thermalGuard.test.ts`, `thermalGuardConfig.test.ts` |
+| Thermal guard decisions | PASS | `web/backend/tests/unit/thermalGuard.test.ts`, `thermalGuardConfig.test.ts` |
+| Thermal guard on the real execution path (refuses, records, admits) | PASS | `web/backend/tests/unit/thermalAdmission.test.ts` |
+| Pipeline stages receive the configured resource limits | PASS | `tests/test_limits.sh` - per-stage `/proc/<pid>/limits` |
+| Child signal model is stated, not inherited (SIGINT + SIGPIPE) | PASS | `tests/test_pipeline.sh`, `tests/test_signals.sh` |
 | Failure injection | PASS | `tests/unit/failureInjection.test.ts` |
 | Ground truth vs raw `/proc` | PASS | [docs/ground-truth-verification.md](docs/ground-truth-verification.md) — **59 checks** |
 | Catalog examples through the engine lexer | PASS | 40 of 40 |
-| Cross-view consistency (one real execution) | PASS | [docs/cross-view-trace.md](docs/cross-view-trace.md) |
+| Cross-view consistency (one real execution, 17 assertions) | PASS | `scripts/cross-view-proof.sh`; trace in [docs/cross-view-trace.md](docs/cross-view-trace.md) |
 | Cross-view correlation (2D ≡ 3D) | PASS | `web/frontend/src/lib/hardening.test.ts` |
 | SSE resume, race-free delivery, no synthetic sequence | PASS | `scripts/browser-smoke.sh` — 15 assertions |
 | WebGL / 2D / table fallbacks | PASS | `web/frontend/src/components/space/SpaceErrorBoundary.tsx` |
@@ -752,7 +755,10 @@ Full detail, with the reason for each, in
   case, always in the unsafe direction.
 * **Not every Linux command.** Only an explicit allowlist with per-command
   argument schemas. Unknown commands are refused with a reason.
-* **Pipelines are `|`-only.** No `&&`, no `||`, no stderr redirection.
+* **Pipelines are `|`-only.** No `&&`, no `||`, no `;` chaining, no heredocs.
+  Stderr redirection *is* supported, on either side of a stage: `2> file`
+  truncates and `2>> file` appends, and each applies to the stage it is written
+  on. See [docs/redirection.md](docs/redirection.md).
 * **`du` takes files, not directories.** The workspace policy admits regular
   files only, so `du .` is refused even though `du` normally defaults to the
   current directory. Permitting it would open directory traversal on the host
@@ -835,7 +841,8 @@ Nothing on the planned list is claimed anywhere else in this repository.
 | [docs/runtime-verification.md](docs/runtime-verification.md) | How to verify a running instance by hand |
 | [docs/faculty-demo.md](docs/faculty-demo.md) | A guided demonstration script |
 | [docs/development-phases.md](docs/development-phases.md) | Historical: how the project was built up |
-| [docs/audit/](docs/audit/) | Verification and audit reports |
+| [docs/audit/RELEASE_VERIFICATION_2_0_0.md](docs/audit/RELEASE_VERIFICATION_2_0_0.md) | **The authoritative verification record for 2.0.0**, including what was NOT run and why |
+| [docs/audit/](docs/audit/) | Historical 1.1.0 audit and verification reports (labelled as historical) |
 
 ## Contributing
 

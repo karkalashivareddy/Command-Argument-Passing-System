@@ -48,6 +48,11 @@ PIDFD   := $(BUILD)/caps_pidfd
 # holds an unreaped child so the zombie assertions actually execute instead of
 # being skipped.
 ZOMBIE  := $(BUILD)/zombie_maker
+# The producer half of the pipeline SIGPIPE test. Separate from status_probe
+# because its whole value is that it does ONE thing and has no signal handler:
+# a helper that also raised signals elsewhere could not prove that the engine's
+# child disposition is what killed it.
+SIGPIPE_WRITER := $(BUILD)/sigpipe_writer
 PIDFD_TESTS := tests/test_pidfd.sh
 # Asserts on the CHILD's own /proc/<pid>/limits, so it needs the engine but no
 # helper binary.
@@ -77,7 +82,12 @@ GATES := scripts/check-attribution.sh \
 
 
 # Tests that need the status_probe helper binary
-HELPER_TESTS := *execution*|*exit_status*|*signals*|*monitor*|*pipeline*
+HELPER_TESTS := *execution*|*exit_status*|*signals*|*monitor*
+
+# The pipeline suite drives a controlled producer binary to prove the child's
+# SIGPIPE disposition. It gets that binary instead of status_probe because a
+# producer with no signal handler is the thing under test.
+PIPELINE_TESTS := *pipeline*
 
 # waitpid() failure-policy probes (link the non-main objects directly)
 WAIT_HELPER := $(BUILD)/wait_probe
@@ -139,6 +149,9 @@ $(PIDFD): src/pidfd.c | $(BUILD)
 $(ZOMBIE): tests/helpers/zombie_maker.c | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
 
+$(SIGPIPE_WRITER): tests/helpers/sigpipe_writer.c | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
+
 tests/test_pidfd.sh: $(PIDFD)
 
 # Links the execution objects (minus main) so the probe can call
@@ -152,7 +165,7 @@ $(WAIT_HELPER): tests/helpers/wait_probe.c $(WAIT_OBJS) | $(BUILD)
 # needs the helper binaries that only the test targets used to build. Exposed
 # as its own target so a job that runs the suite without `make test` still
 # gets a runnable fixture instead of a session that can never start.
-test-helpers: $(HELPER) $(WAIT_HELPER) $(PIDFD) $(ZOMBIE)
+test-helpers: $(HELPER) $(WAIT_HELPER) $(PIDFD) $(ZOMBIE) $(SIGPIPE_WRITER)
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -161,13 +174,14 @@ run: $(TARGET)
 	./$(TARGET)
 
 # The limits suite exercises caps_memory_burn, so it depends on `workloads`.
-test: $(TARGET) $(HELPER) $(WAIT_HELPER) $(PIDFD) $(ZOMBIE) $(WORKLOAD_BINS)
+test: $(TARGET) $(HELPER) $(WAIT_HELPER) $(PIDFD) $(ZOMBIE) $(SIGPIPE_WRITER) $(WORKLOAD_BINS)
 	@set -e; for t in $(TESTS) $(PIDFD_TESTS) $(LIMIT_TESTS); do \
 		echo "== $$t =="; \
 		case "$$t" in \
 			$(WAIT_TESTS)) ./$$t ./$(WAIT_HELPER);; \
-			$(HELPER_TESTS)) ./$$t ./$(TARGET) ./$(HELPER);; \
+			$(PIPELINE_TESTS)) ./$$t ./$(TARGET) ./$(SIGPIPE_WRITER);; \
 			tests/test_pidfd.sh) ./$$t ./$(PIDFD) ./$(ZOMBIE);; \
+			$(HELPER_TESTS)) ./$$t ./$(TARGET) ./$(HELPER);; \
 			*) ./$$t ./$(TARGET);; \
 		esac; \
 	done; \
@@ -205,12 +219,13 @@ $(SAN_TARGET): $(SRCS) include/*.h $(VERSION_HEADER)
 # The pidfd and limits suites run against the sanitized engine too. Both drive
 # real child processes, so they exercise the fork/exec path that ASan is
 # instrumented to watch -- which is the point of running them at all.
-test-asan: $(SAN_TARGET) $(HELPER) $(WAIT_HELPER) $(PIDFD) $(ZOMBIE) $(WORKLOAD_BINS)
+test-asan: $(SAN_TARGET) $(HELPER) $(WAIT_HELPER) $(PIDFD) $(ZOMBIE) $(SIGPIPE_WRITER) $(WORKLOAD_BINS)
 	@set -e; for t in $(TESTS) $(PIDFD_TESTS) $(LIMIT_TESTS); do \
 		echo "== $$t (asan) =="; \
 		case "$$t" in \
 			$(WAIT_TESTS)) ASAN_OPTIONS="$(WL_ASAN_OPTIONS)" ./$$t ./$(WAIT_HELPER);; \
 			tests/test_pidfd.sh) ASAN_OPTIONS="$(WL_ASAN_OPTIONS)" ./$$t ./$(PIDFD) ./$(ZOMBIE);; \
+			$(PIPELINE_TESTS)) ASAN_OPTIONS="$(WL_ASAN_OPTIONS)" ./$$t ./$(SAN_TARGET) ./$(SIGPIPE_WRITER);; \
 			$(HELPER_TESTS)) ASAN_OPTIONS="$(WL_ASAN_OPTIONS)" ./$$t ./$(SAN_TARGET) ./$(HELPER);; \
 			*) ASAN_OPTIONS="$(WL_ASAN_OPTIONS)" ./$$t ./$(SAN_TARGET);; \
 		esac; \

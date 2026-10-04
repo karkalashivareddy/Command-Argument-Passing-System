@@ -28,6 +28,26 @@ export interface ActiveSession {
    * recycled PID is never killed.
    */
   childIdentity: ProcessIdentity | null;
+  /**
+   * Every process this session has forked, with its verified kernel identity.
+   *
+   * One field per session is not enough. A pipeline emits one `process.started`
+   * per stage, so `childPid`/`childIdentity` hold only the LAST stage that was
+   * reported -- which made every stage but the last read as `capsOwned: false`
+   * in the host inventory while CAPS held a verified identity for all of them.
+   * The consequence was not cosmetic: the Process Explorer drew CAPS's own
+   * workloads as host work, and the stage that actually did the work was the one
+   * most likely to be missed.
+   *
+   * This list is the ownership record. It is append-only for the life of the
+   * session, because every entry was verified at the moment the engine reported
+   * the fork and a process that has exited cannot become un-owned.
+   *
+   * `childPid`/`childIdentity` remain the TERMINATION handle and are deliberately
+   * singular: a signal is delivered to one process, and the escalation path
+   * validates it against that one identity.
+   */
+  ownedIdentities: ProcessIdentity[];
   processStartedAt: string | null;
   processReaped: boolean;
   startedAt: string;
@@ -122,6 +142,10 @@ export class ExecutionRegistry {
    * finished session's would otherwise be advertised as ours and as signalable.
    * A row is only ours when all three still match.
    *
+   * Every stage of a pipeline is included. A session owns all the processes it
+   * forked, not just the last one the engine happened to report, and the Process
+   * Explorer has to agree with the event stream about that.
+   *
    * Terminal sessions are excluded: once a session is final the process is gone,
    * and claiming ownership of whatever inherits its PID would be wrong.
    */
@@ -129,9 +153,15 @@ export class ExecutionRegistry {
     const keys = new Set<string>();
     for (const s of this.sessions.values()) {
       if (isTerminalState(s.state)) continue;
-      const pid = s.childPid;
-      if (pid === null) continue;
-      keys.add(identityKey(pid, s.childIdentity?.startTicks ?? null, bootId));
+      for (const identity of s.ownedIdentities) {
+        keys.add(identityKey(identity.pid, identity.startTicks ?? null, bootId));
+      }
+      // Fallback for a session whose identity list was never populated -- a
+      // record built by a caller that predates the list. Dropping it silently
+      // would make ownership unreachable for that path.
+      if (s.ownedIdentities.length === 0 && s.childPid !== null) {
+        keys.add(identityKey(s.childPid, s.childIdentity?.startTicks ?? null, bootId));
+      }
     }
     return keys;
   }

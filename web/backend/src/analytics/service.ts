@@ -50,6 +50,7 @@ export function computeAnalytics(repo: SessionRepository, eventRepo: EventReposi
       cpuPercentSamples: 0,
       averageMinorFaults: null,
       averageMajorFaults: null,
+      minorFaultSamples: 0,
       majorFaultSamples: 0,
       maxMajorFaults: null,
       averageRcharBytesPerSec: null,
@@ -124,6 +125,21 @@ export function computeAnalytics(repo: SessionRepository, eventRepo: EventReposi
   result.processTelemetry.cpuTimeExecutions = agg.cpuTimeExecutions;
   result.processTelemetry.averageCpuTimeMs = agg.averageCpuTimeMs;
   result.processTelemetry.averageMinorFaults = agg.averageMinorFaults;
+  /*
+   * The minor-fault sample count belongs here for the same reason the major one
+   * does: an average without its denominator is not a measurement, it is a
+   * number. The repository has always computed it -- `minorFaultSamples` comes
+   * out of the same SQL aggregation as `majorFaultSamples` -- but this assignment
+   * was missing, so the field stayed at its initial 0 while the average was
+   * filled in.
+   *
+   * That combination is the worst of both: a real average presented with a
+   * fabricated denominator of zero samples, which reads as "no samples" rather
+   * than "the count was never copied across". The frontend renders this pair
+   * together as "minor from N sample(s), major from M", so it was displaying
+   * "minor from 0 sample(s)" beside a non-zero average.
+   */
+  result.processTelemetry.minorFaultSamples = agg.minorFaultSamples;
   result.processTelemetry.majorFaultSamples = agg.majorFaultSamples;
   result.processTelemetry.averageMajorFaults = agg.averageMajorFaults;
   result.processTelemetry.maxMajorFaults = agg.maxMajorFaults;
@@ -364,6 +380,23 @@ function comparisonSide(session: SessionRecord, peaks: RuntimePeaks, eventCount:
     peakMajorFaults: peaks.peakMajorFaults?.value ?? null,
     totalRcharBytes: peaks.totalRcharBytes,
     totalWcharBytes: peaks.totalWcharBytes,
+    /*
+     * Block-layer bytes, carried for the same reason as rchar/wchar and computed
+     * from the same persisted snapshots.
+     *
+     * The comparison view already has "Block read" and "Block write" rows, and
+     * the totals it needs exist here in RuntimePeaks. They were simply not
+     * projected onto the comparison side, so the rows rendered
+     * `fmtBytes(undefined)`, which passes the helper's `null` guard and prints
+     * "NaN MiB", and a delta computed as `undefined - undefined`, printed as
+     * "−NaN MiB". A NaN in a comparison table is not a cosmetic defect: it is the
+     * one value in the table that cannot have been measured.
+     *
+     * `null` still means "no block I/O was observed", which is different from
+     * zero and is rendered as UNAVAILABLE rather than as 0 B.
+     */
+    totalReadBytes: peaks.totalReadBytes,
+    totalWriteBytes: peaks.totalWriteBytes,
   };
 }
 
@@ -401,6 +434,8 @@ export function compareSessions(
       majorFaultsDelta: delta(left.peakMajorFaults, right.peakMajorFaults),
       rcharDeltaBytes: delta(left.totalRcharBytes, right.totalRcharBytes),
       wcharDeltaBytes: delta(left.totalWcharBytes, right.totalWcharBytes),
+      readBytesDelta: delta(left.totalReadBytes, right.totalReadBytes),
+      writeBytesDelta: delta(left.totalWriteBytes, right.totalWriteBytes),
     },
   };
 }

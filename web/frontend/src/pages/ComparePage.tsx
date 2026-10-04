@@ -24,11 +24,6 @@ function deltaLabel(delta: number | null, kind: "duration" | "count" | "percent"
   return `${sign}${fmtBytes(abs)}`;
 }
 
-/** A delta is only defined when both sides observed the counter. */
-function pairedDelta(left: number | null, right: number | null): number | null {
-  return left === null || right === null ? null : right - left;
-}
-
 export default function ComparePage() {
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [leftId, setLeftId] = useState<string>("");
@@ -137,8 +132,8 @@ export default function ComparePage() {
       { label: "Peak major faults", left: cmp.left.peakMajorFaults === null ? "UNAVAILABLE" : formatCount(cmp.left.peakMajorFaults), right: cmp.right.peakMajorFaults === null ? "UNAVAILABLE" : formatCount(cmp.right.peakMajorFaults), delta: deltaLabel(cmp.deltas.majorFaultsDelta, "count") },
       { label: "rchar characters", left: fmtBytes(cmp.left.totalRcharBytes), right: fmtBytes(cmp.right.totalRcharBytes), delta: deltaLabel(cmp.deltas.rcharDeltaBytes, "bytes") },
       { label: "wchar characters", left: fmtBytes(cmp.left.totalWcharBytes), right: fmtBytes(cmp.right.totalWcharBytes), delta: deltaLabel(cmp.deltas.wcharDeltaBytes, "bytes") },
-      { label: "Block read", left: fmtBytes(cmp.left.totalReadBytes), right: fmtBytes(cmp.right.totalReadBytes), delta: deltaLabel(pairedDelta(cmp.left.totalReadBytes, cmp.right.totalReadBytes), "bytes") },
-      { label: "Block write", left: fmtBytes(cmp.left.totalWriteBytes), right: fmtBytes(cmp.right.totalWriteBytes), delta: deltaLabel(pairedDelta(cmp.left.totalWriteBytes, cmp.right.totalWriteBytes), "bytes") },
+      { label: "Block read", left: fmtBytes(cmp.left.totalReadBytes), right: fmtBytes(cmp.right.totalReadBytes), delta: deltaLabel(cmp.deltas.readBytesDelta, "bytes") },
+      { label: "Block write", left: fmtBytes(cmp.left.totalWriteBytes), right: fmtBytes(cmp.right.totalWriteBytes), delta: deltaLabel(cmp.deltas.writeBytesDelta, "bytes") },
       { label: "Events", left: String(cmp.left.eventCount), right: String(cmp.right.eventCount), delta: deltaLabel(cmp.deltas.eventDelta, "count") },
       { label: "Snapshots", left: String(cmp.left.snapshotCount), right: String(cmp.right.snapshotCount), delta: deltaLabel(cmp.deltas.snapshotDelta, "count") },
     ];

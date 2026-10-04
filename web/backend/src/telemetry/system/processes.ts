@@ -166,7 +166,8 @@ export interface ProcessPrevious {
 
 export interface ProcessCounters {
   cpuTicks: number;
-  minorFaults: number;
+  /** null when the kernel's stat line carried no usable minor_faults value. */
+  minorFaults: number | null;
   readBytes: number;
   writeBytes: number;
   startTicks: number;
@@ -209,9 +210,9 @@ export function parseStatLine(text: string): {
   session: number;
   utime: number;
   stime: number;
-  minflt: number;
-  majflt: number;
-  threads: number;
+  minflt: number | null;
+  majflt: number | null;
+  threads: number | null;
   startTicks: number;
 } | null {
   const open = text.indexOf(" (");
@@ -250,9 +251,28 @@ export function parseStatLine(text: string): {
     session,
     utime,
     stime,
-    minflt: minflt ?? 0,
-    majflt: majflt ?? 0,
-    threads: threads ?? 1,
+    /*
+     * minor_faults, major_faults and num_threads are carried through as null
+     * when the kernel's own line does not contain a usable number for them.
+     *
+     * They used to be defaulted here, as `minflt ?? 0`, `majflt ?? 0` and
+     * `threads ?? 1`. That is three fabricated measurements, and each one is
+     * wrong in a direction that matters:
+     *
+     *   - 0 minor faults says the process has never taken a page fault, which
+     *     no process on a Linux host can be true of after startup;
+     *   - 0 major faults says the process has never paged in from disk, which
+     *     reads as "no disk pressure" on a page-fault chart;
+     *   - 1 thread says the process is single-threaded, which is the basis of
+     *     every "threads per process" figure in the UI.
+     *
+     * A kernel that publishes zero is a real zero and is preserved. A field the
+     * kernel did not publish is UNAVAILABLE, and the caller turns null into an
+     * explicit UNAVAILABLE metric with a reason rather than a number.
+     */
+    minflt,
+    majflt,
+    threads,
     startTicks,
   };
 }
@@ -365,6 +385,44 @@ export function readHostProcess(
   const status = statusRead.ok ? statusMap(statusRead.text) : new Map<string, string>();
   const statusReason = statusRead.ok ? null : statusRead.failure.reason;
 
+  /*
+   * Classify a failed /proc/<pid>/status read by what actually happened.
+   *
+   * This used to be `statusRead.ok ? "LIVE" : "PERMISSION_DENIED"`, which
+   * reported a process that simply exited as one whose memory CAPS was forbidden
+   * to read. Those are opposite claims with opposite consequences: a permission
+   * problem is an operator-actionable host configuration fact, while a vanished
+   * /proc entry is the single most ordinary event on a busy host. Reporting
+   * routine churn as a permissions failure trains an operator to ignore the
+   * badge that matters.
+   *
+   * The distinction is entirely in the failure kind the read already reported:
+   *
+   *   missing     the kernel removed the entry between the stat read and this
+   *               one. EXITED is the truth: this process really did stop
+   *               existing partway through being sampled.
+   *   permission  hidepid=2, another user, or no CAP_SYS_PTRACE.
+   *               PERMISSION_DENIED is the truth.
+   *   malformed   the file exists and is not what a status file is. That is a
+   *               kernel or container artefact, not a permission decision.
+   *   io          anything else, including a symlink loop. UNAVAILABLE.
+   *
+   * The stat read succeeded, so the fields it produced are real and stay
+   * populated. Only the row's state changes.
+   */
+  const statusState: ProcessState = statusRead.ok
+    ? "LIVE"
+    : statusRead.failure.kind === "missing"
+      ? "EXITED"
+      : statusRead.failure.kind === "permission"
+        ? "PERMISSION_DENIED"
+        : "UNAVAILABLE";
+  const statusStateReason: string | null = statusRead.ok
+    ? null
+    : statusRead.failure.kind === "missing"
+      ? `/proc/${pid}/stat was readable, then /proc/${pid}/status no longer existed: the process exited between the two reads. ${statusRead.failure.reason}. The fields read from stat are the ones this process actually published; nothing has been substituted for the missing ones.`
+      : statusRead.failure.reason;
+
   // The PID in /proc/<pid>/status is the kernel's own cross-check that the
   // directory still refers to the process we think it does.
   const statusPid = statusPidOf(status);
@@ -426,7 +484,14 @@ export function readHostProcess(
       const v = statusUint(status, "Gid");
       return v === null ? unavailable<number>("1", `${root}/status Gid`, options.timestamp, statusReason ?? "Gid is absent from this process's status") : observed(v, "1", `${root}/status Gid`, options.timestamp, "Real group ID");
     })(),
-    threads: observed(stat.threads, "1", statPath, options.timestamp, "Thread count from /proc/<pid>/stat field 20"),
+    threads: metricOrUnavailable(
+      stat.threads,
+      "1",
+      `${statPath} field 20 (num_threads)`,
+      options.timestamp,
+      "The kernel's stat line for this process did not contain a readable num_threads value",
+      "Thread count from /proc/<pid>/stat field 20. Linux publishes a real 0 only for a process that has not yet created its first thread; an unreadable field is UNAVAILABLE, not zero.",
+    ),
     cpuTimeMs,
     cpuPercent,
     rssBytes: metricOrUnavailable(kibToBytes(status, "VmRSS"), "bytes", `${root}/status VmRSS`, options.timestamp, statusReason ?? "VmRSS is absent from this process's status"),
@@ -444,8 +509,22 @@ export function readHostProcess(
     virtualMemoryBytes: metricOrUnavailable(kibToBytes(status, "VmSize"), "bytes", `${root}/status VmSize`, options.timestamp, statusReason ?? "VmSize is absent from this process's status"),
     voluntaryContextSwitches: metricOrUnavailable(statusUint(status, "voluntary_ctxt_switches"), "1", `${root}/status voluntary_ctxt_switches`, options.timestamp, statusReason ?? "voluntary_ctxt_switches is absent from this process's status"),
     nonVoluntaryContextSwitches: metricOrUnavailable(statusUint(status, "nonvoluntary_ctxt_switches"), "1", `${root}/status nonvoluntary_ctxt_switches`, options.timestamp, statusReason ?? "nonvoluntary_ctxt_switches is absent from this process's status"),
-    minorFaults: observed(stat.minflt, "1", statPath, options.timestamp, "minor_faults field: faults that did not require disk I/O, usually first-touch or copy-on-write"),
-    majorFaults: observed(stat.majflt, "1", statPath, options.timestamp, "major_faults field: faults that required disk I/O, the ones that indicate real paging"),
+    minorFaults: metricOrUnavailable(
+      stat.minflt,
+      "1",
+      `${statPath} field 10 (minflt)`,
+      options.timestamp,
+      "The kernel's stat line for this process did not contain a readable minor_faults value",
+      "minor_faults field: faults that did not require disk I/O, usually first-touch or copy-on-write",
+    ),
+    majorFaults: metricOrUnavailable(
+      stat.majflt,
+      "1",
+      `${statPath} field 12 (majflt)`,
+      options.timestamp,
+      "The kernel's stat line for this process did not contain a readable major_faults value",
+      "major_faults field: faults that required disk I/O, the ones that indicate real paging",
+    ),
     readBytes: ioMetric(io, "read_bytes", `${root}/io read_bytes`, options.timestamp, ioReason),
     writeBytes: ioMetric(io, "write_bytes", `${root}/io write_bytes`, options.timestamp, ioReason),
     processGroupId: observed(stat.pgrp, "1", statPath, options.timestamp, "Process group ID. Group membership is a kernel fact; a process may be in a group led by a process that has already exited."),
@@ -454,8 +533,8 @@ export function readHostProcess(
     schedulerRuntimeNs: sched !== null ? sched.runtime : unavailable<number>("ns", `${root}/schedstat`, options.timestamp, schedReason ?? "schedstat unavailable"),
     schedulerWaitNs: sched !== null ? sched.wait : unavailable<number>("ns", `${root}/schedstat`, options.timestamp, schedReason ?? "schedstat unavailable"),
     schedulerTimeslices: sched !== null ? sched.timeslices : unavailable<number>("1", `${root}/schedstat`, options.timestamp, schedReason ?? "schedstat unavailable"),
-    rowState: statusRead.ok ? "LIVE" : "PERMISSION_DENIED",
-    stateReason: statusRead.ok ? null : statusReason,
+    rowState: statusState,
+    stateReason: statusStateReason,
     sampled: true,
   };
 
@@ -487,8 +566,10 @@ function statusPidOf(status: Map<string, string>): number | null {
   return Number.isSafeInteger(n) ? n : null;
 }
 
-function metricOrUnavailable(value: number | null, unit: string, source: string, timestamp: string, reason: string): SystemMetric<number> {
-  return value === null ? unavailable<number>(unit, source, timestamp, reason) : observed(value, unit, source, timestamp, "As published by the kernel in this process's /proc entry");
+function metricOrUnavailable(value: number | null, unit: string, source: string, timestamp: string, reason: string, note?: string): SystemMetric<number> {
+  return value === null
+    ? unavailable<number>(unit, source, timestamp, reason)
+    : observed(value, unit, source, timestamp, note ?? "As published by the kernel in this process's /proc entry");
 }
 
 function ioMetric(io: Map<string, number>, key: string, source: string, timestamp: string, reason: string | null): SystemMetric<number> {
@@ -685,13 +766,21 @@ export function discoverProcesses(paths: KernelPaths, options: DiscoverOptions):
  * session but whose start ticks do not is a different process that inherited the
  * number, and calling it ours would be the most damaging kind of wrong here: it
  * would advertise a process as signalable when CAPS has no handle on it.
+ *
+ * `sampleContext` exists so a single row read outside the discovery pass -- the
+ * Process Detail route -- can be annotated against the SAME inventory the list
+ * route serves. Without it the detail view could only see itself, and would
+ * report every parent link as UNVERIFIED while the inventory beside it reported
+ * VERIFIED: two views of one process disagreeing because one of them was handed
+ * less context.
  */
 export function annotateRelationships(
   processes: HostProcess[],
   capsOwnedIdentities: ReadonlySet<string>,
   timestamp: string,
+  sampleContext?: ReadonlySet<number>,
 ): void {
-  const sampledPids = new Set<number>();
+  const sampledPids = new Set<number>(sampleContext ?? []);
   for (const p of processes) sampledPids.add(p.identity.pid);
 
   for (const row of processes) {
@@ -793,6 +882,7 @@ export function processSummaryFrom(
   let uninterruptible = 0;
   let threadsTotal = 0;
   let classified = 0;
+  let threadsUnknown = 0;
 
   for (const p of processes) {
     total += 1;
@@ -800,8 +890,23 @@ export function processSummaryFrom(
     const letter = p.state.value;
     if (letter === null) continue;
     classified += 1;
-    const threads = p.threads.value ?? 1;
-    threadsTotal += threads;
+    /*
+     * A thread count the kernel did not publish is counted as unknown rather
+     * than as one thread. `p.threads.value ?? 1` put every unreadable process
+     * into threadsTotal as a single-threaded process, which is exactly the
+     * fabrication this product exists to avoid: the total was then reported as
+     * OBSERVED while N of its contributions were invented.
+     *
+     * The total is still a sum of real counts -- it just covers fewer processes
+     * -- and the reason says how many were excluded, so the figure is readable
+     * as "sum over N of M classified processes" instead of as a silent estimate.
+     */
+    const threads = p.threads.value;
+    if (threads === null) {
+      threadsUnknown += 1;
+    } else {
+      threadsTotal += threads;
+    }
     switch (letter) {
       case "R": running += 1; break;
       case "S": sleeping += 1; break;
@@ -815,6 +920,10 @@ export function processSummaryFrom(
 
   const unclassified = total - classified;
   const note = unclassified > 0 ? ` ${unclassified} process(es) could not be classified because the kernel did not permit a status read; they are counted in the total but in no state bucket, rather than being assigned a state they may not be in.` : "";
+  const threadsNote =
+    threadsUnknown > 0
+      ? ` Sum of the thread counts of the ${classified - threadsUnknown} classified process(es) that published one; ${threadsUnknown} did not and are excluded rather than counted as single-threaded.`
+      : " Sum of the thread count over classified processes";
 
   return {
     total: observed(total, "1", where, timestamp, `Numeric /proc/<pid> entries discovered on this pass.${note}`),
@@ -823,7 +932,7 @@ export function processSummaryFrom(
     stopped: observed(stopped, "1", where, timestamp, "State letters T and t: stopped by a job-control or tracing signal"),
     zombie: observed(zombie, "1", where, timestamp, "State letter Z: exited but not yet reaped. A non-trivial zombie count means something is not calling wait()."),
     uninterruptible: observed(uninterruptible, "1", where, timestamp, "State letter D: uninterruptible sleep, usually waiting on block I/O. A sustained D count is a storage problem, not a CPU one."),
-    threadsTotal: observed(threadsTotal, "1", where, timestamp, "Sum of the thread count over classified processes"),
+    threadsTotal: observed(threadsTotal, "1", where, timestamp, threadsNote),
     processesCreated:
       extras.processesCreated === null
         ? unavailable<number>("1", "/proc/stat processes field", timestamp, "The `processes` field is absent from /proc/stat on this kernel")

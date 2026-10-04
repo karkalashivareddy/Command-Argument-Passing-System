@@ -32,7 +32,7 @@ This record describes the Linux runtime and browser checks run on 2026-09-24. Li
 | Stdout redirection | PASS — browser wrote `captured by CAPS\n` to the workspace file; CAPS emitted `REDIRECTION_OPENED`. |
 | Append redirection | PASS — second browser run appended `captured by CAPS (append)\n`; file contents were read back from WSL. API integration also checks `first\nsecond\n`. |
 | Stdin redirection | PASS — browser ran `cat` with `observatory.txt` on stdin and displayed both stored lines. API integration checks the same flow. |
-| Stderr redirection | NOT SUPPORTED — the current gateway contract has no stderr redirection mode; strict request validation now rejects an unsupported `err` field with 400. |
+| Stderr redirection | PASS — `2> file` and `2>> file` are supported and were verified on the C engine and through the gateway terminal. A stage that writes both streams keeps them separate: with `sh -c "echo OUT; echo ERR 1>\&2" 2> e.txt > o.txt`, `o.txt` held `OUT` and `e.txt` held `ERR`, and a second `2>> e.txt` run appended rather than truncating. `tests/test_redirection.sh` and `web/backend/tests/api/stderrRedirection.test.ts` cover both forms. |
 | Invalid command / empty command | PASS — empty command gets 400; unknown web executable gets 403 before process creation; shell/command bypass is rejected. |
 | Long arguments/output | PASS — C monitor tests a long command label without truncating execution; gateway integration sends 80,004 argv bytes and confirms captured stdout is capped at 64 KiB. |
 | Restricted executable and shell bypass | PASS — API integration verifies off-allowlist `rm`, `sh -c`, and a nonexistent name are rejected. |

@@ -14,6 +14,7 @@ A small, deliberate model — **not** job control:
 | -------- | --------- |
 | SIGINT (Ctrl+C) while a foreground child runs | the child keeps the default disposition, so it dies; `waitpid()` reports `WIFSIGNALED`, `WTERMSIG == SIGINT`, and caps maps it to exit 130 (`128 + 2`) |
 | The parent survives Ctrl+C | the parent ignores SIGINT for its entire lifetime |
+| A producer in `producer \| consumer` whose consumer exits first | the child has SIGPIPE at its default disposition, so the kernel kills it; the engine records `SIGNAL_RECEIVED` with `signal = 13` and exit 141 (`128 + 13`) |
 | SIGTERM, SIGQUIT, SIGSEGV, ... | default dispositions (a SIGTERM still terminates caps) |
 | SIGCHLD | default; caps reaps synchronously with `waitpid()`, so no SIGCHLD handler is needed |
 
@@ -39,7 +40,7 @@ handling succeeded.
 
 ---
 
-## 2. Why the child must reset SIGINT itself
+## 2. Why the child states its own dispositions
 
 The key POSIX rule (`exec(3p)`, `execve(2)`):
 
@@ -51,13 +52,36 @@ Sequence in caps:
 1. Parent starts, sets SIGINT to `SIG_IGN`
    (`signals_parent_init()`).
 2. Parent `fork()`s — the child inherits `SIG_IGN`.
-3. Child calls `signals_child_reset()`: SIGINT back to `SIG_DFL`.
+3. Child calls `signals_child_reset()`: **both** SIGINT and SIGPIPE are set to
+   `SIG_DFL`, explicitly, rather than left as inherited.
 4. Child calls `execvp()` — because the child is using the *default*
-   disposition (not ignored), the new program starts with `SIG_DFL`.
+   dispositions (not ignored), the new program starts with `SIG_DFL` for both.
 
 If step 3 were omitted, SIG_IGN would survive `exec`, and Ctrl+C would
 be silently discarded by the running program too — exactly the bug
 minimal shells get wrong.
+
+### SIGPIPE is the second half of the same rule
+
+The engine ignores SIGINT in the parent, so it must restore it in the child.
+It also **inherits** whatever SIGPIPE disposition the process that launched it
+had. POSIX keeps an ignored signal ignored across `exec`, so a host shell, a
+package manager, a container runtime, or a CI step wrapper that sets SIGPIPE to
+`SIG_IGN` for its own reasons changes what `producer | consumer` means inside the
+engine:
+
+- the producer takes `EPIPE` instead of dying,
+- it prints `Broken pipe` and exits with its own non-zero status,
+- and there is no signal anywhere in the event stream.
+
+That is not a slower version of the correct behaviour; it is a different one.
+The same command line has to mean the same thing in every environment, so the
+child disposition is **stated**, not inherited. `tests/test_pipeline.sh` asserts
+the property under `trap '' PIPE`, and `tests/helpers/sigpipe_writer.c` is the
+first-party producer that proves it without depending on any `yes` implementation.
+
+Resource limits are stated for the same reason; see
+[guardrails.md](guardrails.md).
 
 ---
 

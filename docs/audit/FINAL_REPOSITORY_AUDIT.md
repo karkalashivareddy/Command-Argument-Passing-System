@@ -1,3 +1,13 @@
+> **HISTORICAL REPORT — superseded.**
+> This document is the repository audit of the **1.1.0** milestone. Every finding
+> it lists was found and fixed in that release, and several of its statements
+> (including its `1.1.0` version claims) describe that commit rather than the
+> current product.
+>
+> The current product is **2.0.0**. The authoritative audit and verification for
+> it are in **[RELEASE_VERIFICATION_2_0_0.md](RELEASE_VERIFICATION_2_0_0.md)**.
+> This file is kept, unedited: it is the record of what was wrong and what fixed
+> it, which is worth more than a tidy deletion.
 # Final repository audit
 
 Scope: the whole `Command-Argument-Passing-System` repository at the close of

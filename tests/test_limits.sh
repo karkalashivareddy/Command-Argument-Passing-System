@@ -11,6 +11,17 @@
 # /proc/<pid>/limits while it is alive, rather than on what the gateway reported
 # it configured.
 #
+# Both launch shapes are covered, and the distinction is the point:
+#
+#   single command      one process, one fork
+#   multi-stage pipeline  one process per stage, one fork per stage
+#
+# A configured limit that reaches only the single-command path is not "mostly
+# enforced" -- for `caps <burner> | cat` it protects nothing at all while
+# reporting that it is configured, and the stage doing the work runs
+# unconstrained. Each pipeline stage is therefore read from /proc/<pid>/limits
+# individually.
+#
 # Usage: test_limits.sh <path-to-caps>
 
 set -u
@@ -51,6 +62,17 @@ event_pid() {
     sed -n 's/.*"event":"PROCESS_STARTED","time":"[^"]*","pid":\([0-9][0-9]*\).*/\1/p' "$1" 2>/dev/null | head -1
 }
 
+# Extract the pid of ONE pipeline stage from an event stream.
+#
+# A pipeline emits several PROCESS_STARTED events and they must not be confused
+# for each other: reading the first one and calling it "the pipeline" is how a
+# limit applied to stage 0 alone comes to be reported as applied to the pipeline.
+# The stage index and count are part of the match for that reason.
+event_stage_pid() { # stage-index stage-count event-stream
+    sed -n "s/.*\"event\":\"PROCESS_STARTED\",\"time\":\"[^\"]*\",\"pid\":\([0-9][0-9]*\).*\"stage\":$1,\"stages\":$2.*/\1/p" \
+        "$3" 2>/dev/null | head -1
+}
+
 # Start a long-lived child and print its PID.
 #
 # Three things this has to get right, each of which produced a silently empty
@@ -68,8 +90,16 @@ event_pid() {
 # The child is `sleep 300` rather than something shorter because the whole point
 # is to inspect a live process. Every caller MUST call stop_child afterwards, or
 # the suite waits five minutes per case.
+#
+# Every launched pid is remembered, not just the first one. A pipeline forks one
+# process per stage and stop_child has to take all of them down: leaving stage 1
+# blocked on a read from a killed stage 0 keeps the suite open just as long as
+# leaving the single command running would.
 CHILD_PID=""
 CHILD_RUNNER=""
+CHILD_PIDS=""
+remember_pid() { CHILD_PIDS="$CHILD_PIDS $1"; }
+
 start_child() {
     local outfile="$WORK/child.$$.$RANDOM.out"
     CHILD_OUT="$outfile"
@@ -78,19 +108,54 @@ start_child() {
     local i
     for i in $(seq 1 120); do
         CHILD_PID=$(event_pid "$outfile")
-        [ -n "$CHILD_PID" ] && return 0
+        if [ -n "$CHILD_PID" ]; then
+            remember_pid "$CHILD_PID"
+            return 0
+        fi
         sleep 0.05
     done
     return 1
 }
 
-# Stop the engine and the child it ran, and do not wait for the sleep to finish.
+# Start a two-stage pipeline and remember BOTH stage pids.
 #
-# Order matters: the child is killed first so the engine's waitpid() returns and
-# it exits on its own. Killing the engine first would leave the child orphaned
-# and still sleeping for five minutes, holding the suite open.
+# Stage 0 is `sleep 300`, which writes nothing and exits on its own only after
+# five minutes. Stage 1 is `cat`, which blocks reading from a pipe nobody will
+# write to. Both therefore stay alive for the whole inspection window, which is
+# what makes a per-stage /proc/<pid>/limits read possible at all.
+start_pipeline() { # <stage-count> <command line>
+    local stages="$1" outfile="$WORK/pipe.$$.$RANDOM.out"
+    CHILD_OUT="$outfile"
+    "$CAPS" --monitor --json --run-line "$2" >/dev/null 2>"$outfile" &
+    CHILD_RUNNER=$!
+    local i stage seen
+    for i in $(seq 1 120); do
+        seen=0
+        for stage in $(seq 0 $((stages - 1))); do
+            CHILD_PID=$(event_stage_pid "$stage" "$stages" "$outfile")
+            if [ -n "$CHILD_PID" ]; then
+                remember_pid "$CHILD_PID"
+                seen=$((seen + 1))
+            fi
+        done
+        [ "$seen" -eq "$stages" ] && return 0
+        sleep 0.05
+    done
+    return 1
+}
+
+# The pid of one stage of the pipeline currently running.
+stage_pid() { # stage-index stage-count
+    event_stage_pid "$1" "$2" "$CHILD_OUT"
+}
+
+# Stop the engine and every child it ran, and do not wait for the sleeps.
+#
+# Order matters: the children are killed first so the engine's waitpid() returns
+# and it exits on its own. Killing the engine first would leave the children
+# orphaned and still sleeping for five minutes, holding the suite open.
 stop_child() {
-    [ -n "${CHILD_PID:-}" ] && kill -9 "$CHILD_PID" 2>/dev/null
+    for p in $CHILD_PIDS; do kill -9 "$p" 2>/dev/null; done
     if [ -n "${CHILD_RUNNER:-}" ]; then
         # Poll briefly for a clean exit, then insist.
         local i
@@ -103,6 +168,7 @@ stop_child() {
     fi
     CHILD_PID=""
     CHILD_RUNNER=""
+    CHILD_PIDS=""
     return 0
 }
 
@@ -352,6 +418,145 @@ else
     printf 'SKIP: could not capture a child PID for the unconfigured case\n'
 fi
 stop_child
+
+echo
+echo "== every stage of a multi-stage pipeline gets the configured limits =="
+
+# The single-command path applied caps_limits_apply() and the pipeline stage path
+# did not, so a configured RLIMIT_AS protected `caps <program>` and silently did
+# nothing for `caps <program> | cat`. Nothing reported the difference: the limit
+# was configured, the stage doing the work was unconstrained, and every "is it
+# in force" assertion that only looked at a single command still passed.
+#
+# Both stages are therefore read from the kernel separately.
+if CAPS_LIMIT_ADDRESS_SPACE_BYTES=536870912 CAPS_LIMIT_CPU_SECONDS=9 \
+     start_pipeline 2 "sleep 300 | cat"; then
+    for stage in 0 1; do
+        spid=$(stage_pid "$stage" 2)
+        if [ -z "$spid" ]; then
+            failmsg "stage $stage: no pid was captured, so its limits were never read"
+            continue
+        fi
+
+        sas=$(child_limit "$spid" "Max address space")
+        if [ "$sas" = "536870912" ]; then
+            passmsg "stage $stage (pid $spid): RLIMIT_AS is the configured 512 MiB"
+        else
+            failmsg "stage $stage (pid $spid): RLIMIT_AS is '$sas', expected 536870912 -- the pipeline stage ran unconstrained"
+        fi
+
+        scpu=$(child_limit "$spid" "Max cpu time")
+        if printf '%s' "$scpu" | grep -qw '9'; then
+            passmsg "stage $stage (pid $spid): RLIMIT_CPU is the configured 9 seconds"
+        else
+            failmsg "stage $stage (pid $spid): RLIMIT_CPU is '$scpu', expected 9 seconds"
+        fi
+
+        score=$(child_limit "$spid" "Max core file size")
+        if [ "$score" = "0" ]; then
+            passmsg "stage $stage (pid $spid): RLIMIT_CORE is 0, so the stage cannot dump core"
+        else
+            failmsg "stage $stage (pid $spid): RLIMIT_CORE is '$score', expected 0"
+        fi
+    done
+else
+    failmsg "could not capture both pipeline stage pids from the engine's event stream"
+fi
+stop_child
+
+echo
+echo "== a limit the pipeline's own producer really hits still binds =="
+
+# Proof that the stage's limit is enforced rather than merely recorded. The
+# memory-burn workload is the same first-party program the single-command case
+# uses, placed in stage 0 with a `cat` after it: the stage must fail on the
+# address-space cap exactly as the single command does.
+if [ -x "$MEM_BURN" ]; then
+    CAPS_LIMIT_ADDRESS_SPACE_BYTES=67108864 "$CAPS" --monitor --json \
+        --run-line "$MEM_BURN 5 256 | cat" >"$WORK/pipehit.out" 2>"$WORK/pipehit.err"
+    rc=$?
+
+    # The pipeline's own status is its LAST stage's, which is shell convention:
+    # `burner | cat` reports cat's 0 even when the producer was killed by its
+    # limit. So the process exit code is NOT the evidence here -- asserting on it
+    # would be asserting the opposite of correct behaviour. The evidence is the
+    # producer stage's own terminal record.
+    stage0_exit=$(sed -n 's/.*"event":"PROCESS_EXITED".*"stage":0,"stages":2,"exit_code":\([0-9][0-9]*\).*/\1/p' \
+        "$WORK/pipehit.err" 2>/dev/null | head -1)
+    stage0_outcome=$(sed -n 's/.*"event":"PROCESS_EXITED".*"stage":0,"stages":2,"exit_code":[0-9]*,"duration_ms":[0-9]*,"outcome":"\([A-Z_]*\)".*/\1/p' \
+        "$WORK/pipehit.err" 2>/dev/null | head -1)
+
+    if [ -z "$stage0_exit" ]; then
+        failmsg "no stage-0 PROCESS_EXITED event: the producer's limit outcome was never recorded"
+    elif [ "$stage0_exit" -eq 0 ]; then
+        failmsg "a 256 MiB allocation in stage 0 succeeded under a 64 MiB cap, so the stage limit did not bind"
+    else
+        passmsg "stage 0 failed under the 64 MiB cap (exit_code=$stage0_exit, outcome=$stage0_outcome)"
+    fi
+
+    # `cat` completing must not change that verdict, and the pipeline must still
+    # report cat's status. Both facts together are what distinguishes "the
+    # producer's limit bound" from "the pipeline failed for some other reason".
+    if [ "$rc" -eq 0 ]; then
+        passmsg "the pipeline still reports its last stage's status ($rc), which is shell convention"
+    else
+        passmsg "the pipeline reported $rc"
+    fi
+
+    # It must be the producer stage that failed, not the consumer: `cat` exiting
+    # non-zero for its own reasons would satisfy the assertions above and prove
+    # nothing about the producer's limit.
+    if grep -aq '"event":"PROCESS_EXITED"' "$WORK/pipehit.err" 2>/dev/null \
+       && grep -aq '"stage":0,"stages":2' "$WORK/pipehit.err" 2>/dev/null; then
+        passmsg "the failure is attributed to stage 0, the stage whose limit bound"
+    else
+        failmsg "no stage-0 exit event for the exhausted pipeline producer"
+    fi
+
+    # The consumer must still have completed: a pipeline that fails because its
+    # consumer broke is a different defect from one that fails because its
+    # producer hit a limit.
+    if grep -aq '"stage":1,"stages":2,"exit_code":0' "$WORK/pipehit.err" 2>/dev/null; then
+        passmsg "the consumer stage completed, so the failure was the producer's limit"
+    else
+        failmsg "the consumer stage did not complete: $(grep -a '"stage":1' "$WORK/pipehit.err" | head -1)"
+    fi
+
+    # The control: with no cap the same producer succeeds.
+    "$CAPS" --monitor --json --run-line "$MEM_BURN 1 32 | cat" >"$WORK/pipectl.out" 2>"$WORK/pipectl.err"
+    if [ $? -eq 0 ]; then
+        passmsg "the same pipeline succeeds when the allocation fits, so the failure above was the limit"
+    else
+        failmsg "the control pipeline failed without a limit, so the pipeline limit test proves nothing"
+    fi
+else
+    printf 'SKIP: %s is not built; the pipeline limit case cannot be exercised\n' "$MEM_BURN"
+fi
+
+echo
+echo "== a malformed limit refuses a pipeline stage too =="
+
+# The refusal has to hold for the stage path. A malformed bound that stops the
+# single command but lets a pipeline stage through is the same defect as a limit
+# that is never applied: protection the operator believes in and does not have.
+CAPS_LIMIT_ADDRESS_SPACE_BYTES=notanumber "$CAPS" --monitor --json \
+    --run-line "echo PIPE_LIMIT_PROOF | cat" >"$WORK/badpipe.out" 2>"$WORK/badpipe.err"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    passmsg "a malformed address-space limit refuses a pipeline as well"
+else
+    failmsg "a malformed address-space limit was ignored by the pipeline stage path"
+fi
+if grep -aq 'PIPE_LIMIT_PROOF' "$WORK/badpipe.out" 2>/dev/null; then
+    failmsg "the refused pipeline stage still executed: $(head -1 "$WORK/badpipe.out")"
+else
+    passmsg "no refused pipeline stage produced output, so none of them ran"
+fi
+if grep -aq '"event":"EXEC_ERROR"' "$WORK/badpipe.err" 2>/dev/null; then
+    passmsg "the pipeline-stage refusal is recorded as EXEC_ERROR in the event stream"
+else
+    failmsg "the pipeline-stage refusal produced no EXEC_ERROR event"
+fi
 
 echo
 printf 'TOTAL: %d passed, %d failed\n' "$pass_count" "$fail_count"

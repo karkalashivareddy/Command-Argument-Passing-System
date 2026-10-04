@@ -26,7 +26,7 @@ import { buildDiskSnapshot } from "../../src/telemetry/system/disk.js";
 import { buildNetworkSnapshot, parseNetDev } from "../../src/telemetry/system/network.js";
 import { buildPressure, parsePressure } from "../../src/telemetry/system/pressure.js";
 import { buildCpuSnapshot, parseProcStat, sumTicks as sumTimes, busyTicks, idleTicks } from "../../src/telemetry/system/cpu.js";
-import { parseStatLine, probeClockTicks, resetClockTicksCache } from "../../src/telemetry/system/processes.js";
+import { parseStatLine, probeClockTicks, resetClockTicksCache, readHostProcess, processSummaryFrom } from "../../src/telemetry/system/processes.js";
 
 const roots: string[] = [];
 
@@ -365,6 +365,222 @@ describe("a malformed /proc/<pid>/stat is discarded rather than guessed at", () 
   it("refuses an unsafe integer rather than wrapping", () => {
     const line = `9999 (big) S 1 9999 9999 0 -1 0 0 0 0 0 0 0 0 20 0 1 0 18446744073709551615 ${999999999999999999999} 1 2 3\n`;
     expect(parseStatLine(line)).toBeNull();
+  });
+});
+
+/*
+ * A kernel that publishes a real zero is a fact. A field the kernel did not
+ * publish is UNAVAILABLE. Conflating them is the single most common way a
+ * telemetry product starts lying, because the fabrication is invisible in the
+ * response: a null with the wrong provenance still serialises to a number on a
+ * chart.
+ *
+ * `parseStatLine` used to end with `minflt ?? 0`, `majflt ?? 0` and
+ * `threads ?? 1`. Each of those is a plausible measurement and none of them was
+ * measured. "0 minor faults" says a process has never taken a page fault; "0
+ * major faults" says it has never paged from disk, which reads as the absence of
+ * disk pressure; "1 thread" says a process is single-threaded, which is the basis
+ * of every threads-per-process figure downstream.
+ */
+describe("an unreadable stat field is UNAVAILABLE, never zero", () => {
+  /** A well-formed stat line whose minor/major fault fields are replaced. */
+  function statWithFaults(minflt: string, majflt: string): string {
+    // fields after ')' : state ppid pgrp session tty tpgid flags minflt cminflt
+    //                    majflt cmajflt utime stime cutime cstime priority nice
+    //                    num_threads itrealvalue starttime ...
+    return `4242 (p) S 1 4242 4242 0 -1 4194304 ${minflt} 0 ${majflt} 0 12345 678 0 0 20 0 5 0 98765 1 2 3\n`;
+  }
+
+  it("preserves a kernel-reported zero as zero", () => {
+    const parsed = parseStatLine(statWithFaults("0", "0"));
+    expect(parsed).not.toBeNull();
+    expect(parsed!.minflt).toBe(0);
+    expect(parsed!.majflt).toBe(0);
+    expect(parsed!.threads).toBe(5);
+  });
+
+  it("does not invent 0 minor faults when the field is not a number", () => {
+    const parsed = parseStatLine(statWithFaults("??", "3"));
+    expect(parsed).not.toBeNull();
+    expect(parsed!.minflt, "a non-numeric minflt must be null, not 0").toBeNull();
+    expect(parsed!.majflt).toBe(3);
+  });
+
+  it("does not invent 0 major faults when the field is not a number", () => {
+    const parsed = parseStatLine(statWithFaults("7", "-"));
+    expect(parsed).not.toBeNull();
+    expect(parsed!.minflt).toBe(7);
+    expect(parsed!.majflt, "a non-numeric majflt must be null, not 0").toBeNull();
+  });
+
+  it("does not invent 1 thread when the thread count is not a number", () => {
+    const parsed = parseStatLine(
+      `4242 (p) S 1 4242 4242 0 -1 4194304 12 0 3 0 12345 678 0 0 20 0 x 0 98765 1 2 3\n`,
+    );
+    expect(parsed).not.toBeNull();
+    expect(parsed!.threads, "a non-numeric num_threads must be null, not 1").toBeNull();
+  });
+
+  it("turns the null into an UNAVAILABLE metric with an explicit reason on the row", () => {
+    const paths = fakeHost({});
+    const dir = join(paths.proc, "4242");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "stat"), statWithFaults("??", "3"));
+    writeFileSync(join(dir, "status"), "Name:\tp\nPid:\t4242\nPPid:\t1\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nVmRSS:\t1024 kB\n");
+    writeFileSync(join(dir, "cmdline"), "p\0");
+
+    const { row } = readHostProcess(paths, 4242, 100, "boot-aaaa", null, 1_000, null, {
+      includePss: false,
+      smaps: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(row.rowState).toBe("LIVE");
+    expect(row.minorFaults.provenance).toBe("UNAVAILABLE");
+    expect(row.minorFaults.value).toBeNull();
+    expect(row.minorFaults.reason).toMatch(/minor_faults/);
+    // The field that WAS readable is still reported, so the row is not blanked.
+    expect(row.majorFaults).toMatchObject({ value: 3, provenance: "OBSERVED" });
+  });
+
+  it("counts an unknown thread count as unknown, not as one thread", () => {
+    const paths = fakeHost({});
+    const dir = join(paths.proc, "4242");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "stat"), statWithFaults("12", "3"));
+    writeFileSync(join(dir, "status"), "Name:\tp\nPid:\t4242\nPPid:\t1\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nVmRSS:\t1024 kB\n");
+    writeFileSync(join(dir, "cmdline"), "p\0");
+    // num_threads is the field before itrealvalue; blank it out.
+    writeFileSync(join(dir, "stat"), `4242 (p) S 1 4242 4242 0 -1 4194304 12 0 3 0 12345 678 0 0 20 0 - 0 98765 1 2 3\n`);
+
+    const { row } = readHostProcess(paths, 4242, 100, "boot-aaaa", null, 1_000, null, {
+      includePss: false,
+      smaps: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    expect(row.threads.provenance).toBe("UNAVAILABLE");
+    expect(row.threads.value).toBeNull();
+
+    const summary = processSummaryFrom([row], "2026-01-01T00:00:00.000Z", { processesCreated: null });
+    expect(summary.total.value).toBe(1);
+    // The thread total covers no processes, and SAYS so. Reporting 1 here would
+    // publish an OBSERVED sum whose only contribution was invented.
+    expect(summary.threadsTotal.value).toBe(0);
+    expect(summary.threadsTotal.reason).toMatch(/excluded rather than counted as single-threaded/);
+  });
+});
+
+/*
+ * A process can exit between the read of /proc/<pid>/stat and the read of
+ * /proc/<pid>/status. That is not an error and not a permission problem: it is
+ * the ordinary churn of a live host.
+ *
+ * The row used to answer `statusRead.ok ? "LIVE" : "PERMISSION_DENIED"`, so every
+ * one of those exits was published as a permissions failure. The two claims have
+ * opposite consequences -- one is routine and expected, the other tells an
+ * operator their host is configured wrongly -- and reporting routine churn as a
+ * configuration fault is how a badge that matters stops being read.
+ *
+ * Injection is deterministic: a fixture tree where `stat` exists and `status`
+ * does not reproduces exactly what the kernel does when it reaps a process
+ * between two syscalls.
+ */
+describe("a process that exits mid-sample is classified by what actually happened", () => {
+  function hostWhereStatusIsMissing(): KernelPaths {
+    const paths = fakeHost({});
+    const dir = join(paths.proc, "4242");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "stat"),
+      `4242 (p) S 1 4242 4242 0 -1 4194304 12 0 3 0 12345 678 0 0 20 0 5 0 98765 1 2 3\n`,
+    );
+    writeFileSync(join(dir, "cmdline"), "p\0");
+    // No `status`: the read fails with ENOENT, exactly as it does when the
+    // kernel removes the entry between the two reads.
+    return paths;
+  }
+
+  it("reports EXITED, not PERMISSION_DENIED, when status vanished", () => {
+    const paths = hostWhereStatusIsMissing();
+    const { row } = readHostProcess(paths, 4242, 100, "boot-aaaa", null, 1_000, null, {
+      includePss: false,
+      smaps: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    expect(row.rowState).toBe("EXITED");
+    expect(row.rowState).not.toBe("PERMISSION_DENIED");
+    expect(row.stateReason).toMatch(/exited between the two reads/);
+    // What the kernel did publish is kept. Only the state changed.
+    expect(row.name.value).toBe("p");
+    expect(row.threads.value).toBe(5);
+  });
+
+  it("keeps PERMISSION_DENIED for a status file the kernel refused to open", () => {
+    const paths = fakeHost({});
+    const dir = join(paths.proc, "4243");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "stat"),
+      `4243 (p) S 1 4243 4243 0 -1 4194304 12 0 3 0 12345 678 0 0 20 0 5 0 98766 1 2 3\n`,
+    );
+    writeFileSync(join(dir, "cmdline"), "p\0");
+    // A directory in place of the file: readFileSync fails with EISDIR, which
+    // classifies as an I/O failure and not as a permission decision. That is
+    // what UNAVAILABLE is for, and it must not be reported as PERMISSION_DENIED.
+    mkdirSync(join(dir, "status"), { recursive: true });
+
+    const { row } = readHostProcess(paths, 4243, 100, "boot-aaaa", null, 1_000, null, {
+      includePss: false,
+      smaps: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    expect(row.rowState).toBe("UNAVAILABLE");
+    expect(row.rowState).not.toBe("PERMISSION_DENIED");
+  });
+
+  it("reports a stat line that vanished before it could be read as EXITED", () => {
+    const paths = fakeHost({});
+    // The directory exists (so discovery found it) but stat does not.
+    mkdirSync(join(paths.proc, "4244"), { recursive: true });
+    const { row } = readHostProcess(paths, 4244, 100, "boot-aaaa", null, 1_000, null, {
+      includePss: false,
+      smaps: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    expect(row.rowState).toBe("EXITED");
+  });
+
+  it("reports a stat line that exists but does not parse as UNAVAILABLE", () => {
+    const paths = fakeHost({});
+    const dir = join(paths.proc, "4245");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "stat"), "this is not a stat line\n");
+    const { row } = readHostProcess(paths, 4245, 100, "boot-aaaa", null, 1_000, null, {
+      includePss: false,
+      smaps: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    expect(row.rowState).toBe("UNAVAILABLE");
+    expect(row.stateReason).toMatch(/did not parse/);
+  });
+
+  it("reports DISAPPEARED when status names a different process", () => {
+    const paths = fakeHost({});
+    const dir = join(paths.proc, "4246");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "stat"),
+      `4246 (p) S 1 4246 4246 0 -1 4194304 12 0 3 0 12345 678 0 0 20 0 5 0 98767 1 2 3\n`,
+    );
+    // The kernel's own cross-check disagrees with the directory: PID reuse.
+    writeFileSync(join(dir, "status"), "Name:\tq\nPid:\t9999\nPPid:\t1\n");
+    const { row } = readHostProcess(paths, 4246, 100, "boot-aaaa", null, 1_000, null, {
+      includePss: false,
+      smaps: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    expect(row.rowState).toBe("DISAPPEARED");
+    expect(row.stateReason).toMatch(/9999/);
   });
 });
 

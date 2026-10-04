@@ -167,6 +167,15 @@ export interface AnalyticsOverview {
     /** Page faults, averaged per observed sample */
     averageMinorFaults: number | null;
     averageMajorFaults: number | null;
+    /**
+     * How many samples carried each value.
+     *
+     * Reported alongside every average on purpose: an average whose denominator
+     * is unknown is a number without a meaning, and a missing-count field that
+     * silently reads 0 says "nothing was observed" when it actually says
+     * "nobody counted".
+     */
+    minorFaultSamples: number;
     majorFaultSamples: number;
     maxMajorFaults: number | null;
     /** Syscall-layer character I/O rates (not disk throughput) */
@@ -252,6 +261,11 @@ export interface ComparisonSide {
   peakMajorFaults: number | null;
   totalRcharBytes: number | null;
   totalWcharBytes: number | null;
+  /** Block-layer read bytes, summed over the session's persisted snapshots. */
+  totalReadBytes: number | null;
+  /** Block-layer written bytes. Distinct from `totalWcharBytes`, which is the
+   *  syscall layer and includes bytes that never reached a device. */
+  totalWriteBytes: number | null;
 }
 
 export interface SessionComparison {
@@ -274,6 +288,9 @@ export interface SessionComparison {
     majorFaultsDelta: number | null;
     rcharDeltaBytes: number | null;
     wcharDeltaBytes: number | null;
+    /** Right minus left, or null when either side has no observed value. */
+    readBytesDelta: number | null;
+    writeBytesDelta: number | null;
   };
 }
 
