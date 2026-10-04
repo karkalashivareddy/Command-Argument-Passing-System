@@ -325,12 +325,55 @@ describe.skipIf(!isLinux)("host collectors agree with an independent raw read of
     }
 
     for (const sensor of snap.thermal.sensors) {
-      const rawText = readOr(sensor.path);
-      if (rawText === null) continue;
-      expect(valueOf(sensor.rawMilliCelsius)).toBe(Number(rawText.trim()));
-      if (sensor.rawMilliCelsius.value !== null && sensor.celsius.value !== null) {
+      expect(sensor.name).not.toBe("CPU Temperature");
+      expect(sensor.name).not.toBe("CPU temperature");
+    }
+
+    /*
+     * The per-sensor values are compared with a bracket, for the same reason as
+     * /proc/meminfo. This used to demand that the snapshot's millidegree reading
+     * equalled a second read of the same file, which is a race with a resolution
+     * of one millidegree: an idle machine does not move a thermal sensor inside a
+     * millisecond, but a runner executing this suite does, and the assertion then
+     * reports a sensor fault that is really the suite's own heat.
+     *
+     * So every sensor file is read on both sides of one collector run, and each
+     * value must lie inside the envelope those two reads span. A wrong divisor
+     * or a mis-scaled unit is off by orders of magnitude and cannot hide in it.
+     */
+    const readAllSensors = (): Map<string, number | null> =>
+      new Map(
+        snap.thermal.sensors.map((s) => {
+          const text = readOr(s.path);
+          return [s.path, text === null ? null : Number(text.trim())] as const;
+        }),
+      );
+    const tempBefore = readAllSensors();
+    const fresh = new HostCollector().collect();
+    const tempAfter = readAllSensors();
+
+    for (const sensor of fresh.thermal.sensors) {
+      const observed = valueOf(sensor.rawMilliCelsius);
+      if (observed === null) continue;
+
+      // A plausible reading from this file: whole millidegrees, above absolute
+      // zero, below a CPU that has caught fire.
+      expect(Number.isInteger(observed)).toBe(true);
+      expect(observed).toBeGreaterThan(-273_150);
+      expect(observed).toBeLessThan(200_000);
+
+      const lo = tempBefore.get(sensor.path);
+      const hi = tempAfter.get(sensor.path);
+      if (lo !== null && lo !== undefined && hi !== null && hi !== undefined) {
+        const low = Math.min(lo, hi);
+        const high = Math.max(lo, hi);
+        expect(observed, `${sensor.path} must lie in the bracketed envelope ${low}..${high}`).toBeGreaterThanOrEqual(low);
+        expect(observed, `${sensor.path} must lie in the bracketed envelope ${low}..${high}`).toBeLessThanOrEqual(high);
+      }
+
+      if (sensor.celsius.value !== null) {
         // The single, only millidegree-to-Celsius conversion.
-        expect(sensor.celsius.value).toBeCloseTo(sensor.rawMilliCelsius.value / 1000, 9);
+        expect(sensor.celsius.value).toBeCloseTo(observed / 1000, 9);
       }
       // A sensor is never given a synthesized "CPU Temperature" label.
       expect(sensor.name).not.toBe("CPU Temperature");
@@ -471,33 +514,101 @@ describe.skipIf(!isLinux)("host collectors agree with an independent raw read of
       expect(snap.network.interfaces).toEqual([]);
       return;
     }
-    const parsed = parseNetDev(rawText);
-    const byName = new Map(parsed.map((i) => [i.name, i]));
-    expect(snap.network.interfaces.length).toBe(parsed.length);
-    for (const iface of snap.network.interfaces) {
-      const hand = byName.get(iface.name);
-      if (hand === undefined) continue;
-      expect(valueOf(iface.rxBytes)).toBe(hand.rxBytes);
-      expect(valueOf(iface.rxPackets)).toBe(hand.rxPackets);
-      expect(valueOf(iface.rxErrors)).toBe(hand.rxErrors);
-      expect(valueOf(iface.rxDropped)).toBe(hand.rxDropped);
-      expect(valueOf(iface.txBytes)).toBe(hand.txBytes);
-      expect(valueOf(iface.txDropped)).toBe(hand.txDropped);
+
+    /*
+     * Bracketed, for the same reason as /proc/meminfo.
+     *
+     * Every counter in /proc/net/dev is cumulative and moves on any host doing
+     * anything, and the interface list itself changes -- a container runtime
+     * adds and removes veth pairs while this suite runs. Demanding the same
+     * interface count and the same byte and packet totals as a single later
+     * read was a race that passed only because the machine it was written on
+     * was idle.
+     *
+     * The envelope check below is still strong: a mis-indexed field would pair
+     * rxBytes with rxPackets, which differ by two orders of magnitude on any
+     * interface carrying real traffic, and that cannot fall inside a window
+     * two reads apart.
+     */
+    const netBefore = readOr("/proc/net/dev");
+    const fresh = new HostCollector().collect();
+    const netAfter = readOr("/proc/net/dev");
+    if (netBefore === null || netAfter === null) return;
+
+    const byName = new Map(parseNetDev(netAfter).map((i) => [i.name, i]));
+    const beforeByName = new Map(parseNetDev(netBefore).map((i) => [i.name, i]));
+
+    // Every interface CAPS reported must be one the kernel lists. The reverse
+    // need not hold: a veth pair may appear between the collect and the read.
+    for (const iface of fresh.network.interfaces) {
+      expect(byName.has(iface.name), `CAPS reported an interface the kernel does not list: ${iface.name}`).toBe(true);
+
+      const after = byName.get(iface.name)!;
+      const prior = beforeByName.get(iface.name);
+      for (const [label, mine, lo, hi] of [
+        ["rxBytes", valueOf(iface.rxBytes), prior?.rxBytes, after.rxBytes],
+        ["rxPackets", valueOf(iface.rxPackets), prior?.rxPackets, after.rxPackets],
+        ["rxErrors", valueOf(iface.rxErrors), prior?.rxErrors, after.rxErrors],
+        ["rxDropped", valueOf(iface.rxDropped), prior?.rxDropped, after.rxDropped],
+        ["txBytes", valueOf(iface.txBytes), prior?.txBytes, after.txBytes],
+        ["txDropped", valueOf(iface.txDropped), prior?.txDropped, after.txDropped],
+      ] as const) {
+        if (mine === null || lo === undefined || hi === undefined) continue;
+        const low = Math.min(lo, hi);
+        const high = Math.max(lo, hi);
+        expect(mine, `${iface.name} ${label} must lie in ${low}..${high}`).toBeGreaterThanOrEqual(low);
+        expect(mine, `${iface.name} ${label} must lie in ${low}..${high}`).toBeLessThanOrEqual(high);
+      }
     }
     // Loopback is present, not filtered out: it is where host-local traffic is.
     if (byName.has("lo")) expect(snap.network.interfaces.some((i) => i.name === "lo")).toBe(true);
   });
 
   it("statfs: CAPS capacity equals an independent statfs call", async () => {
-    const snap = await warmed();
+    // Bracketed, for the same reason as /proc/meminfo: free space moves while
+    // this suite writes, so comparing one hand read against the collector's
+    // read is a race. It failed on CI by exactly one 4096-byte block.
+    const before = statfsSync("/");
+    const collector = new HostCollector();
+    const snap = collector.collect();
+    const after = statfsSync("/");
     const fs = snap.disk.filesystems.find((f) => f.mountPoint === "/");
     if (fs === undefined) return;
-    const stats = statfsSync("/");
-    const bsize = Number(stats.bsize);
-    expect(valueOf(fs.totalBytes)).toBe(Number(stats.blocks) * bsize);
-    expect(valueOf(fs.freeBytes)).toBe(Number(stats.bfree) * bsize);
-    // f_bavail, which is legitimately lower than f_bfree by the root reserve.
-    expect(valueOf(fs.availableToUserBytes)).toBe(Number(stats.bavail) * bsize);
+    const bsize = Number(after.bsize);
+
+    // Total capacity cannot change without reformatting the filesystem, so this
+    // comparison is exact -- and exactness here is what would catch a wrong
+    // block size or a wrong divisor.
+    expect(valueOf(fs.totalBytes)).toBe(Number(after.blocks) * bsize);
+
+    /*
+     * Free space is volatile: the collector's statfs happened strictly between
+     // the two hand calls. The envelope is what those two span, widened by one
+     * block per side for the boundary being inclusive. A wrong unit or divisor
+     * is off by a factor of 1024 and cannot hide inside that.
+     */
+    const envelope = (pick: (s: typeof after) => bigint | number): [number, number] => [
+      Math.min(Number(pick(before)), Number(pick(after))) * bsize - bsize,
+      Math.max(Number(pick(before)), Number(pick(after))) * bsize + bsize,
+    ];
+    const [freeLo, freeHi] = envelope((s) => s.bfree);
+    const free = valueOf(fs.freeBytes);
+    // f_bavail is what an unprivileged user may have, which the root reserve
+    // holds below f_bfree. That ordering is the kernel's guarantee and does not
+    // depend on when either side read.
+    const [availLo, availHi] = envelope((s) => s.bavail);
+    const avail = valueOf(fs.availableToUserBytes);
+
+    // A field the collector could not read is UNAVAILABLE with a reason, which
+    // is checked elsewhere. Here there is nothing to compare, and inventing a
+    // zero to compare against is the exact defect this suite exists to catch.
+    if (free !== null && avail !== null) {
+      expect(free, `freeBytes must lie in the bracketed envelope ${freeLo}..${freeHi}`).toBeGreaterThanOrEqual(freeLo);
+      expect(free, `freeBytes must lie in the bracketed envelope ${freeLo}..${freeHi}`).toBeLessThanOrEqual(freeHi);
+      expect(avail, `availableToUserBytes must lie in ${availLo}..${availHi}`).toBeGreaterThanOrEqual(availLo);
+      expect(avail, `availableToUserBytes must lie in ${availLo}..${availHi}`).toBeLessThanOrEqual(availHi);
+      expect(avail).toBeLessThanOrEqual(free);
+    }
   });
 });
 

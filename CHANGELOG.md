@@ -144,6 +144,22 @@ Windows working tree cannot show.
   skip themselves when the binary is absent — "the engine was not built" and "the
   gateway parsed this wrongly" are different facts — and the job now builds the
   engine, workloads, and helpers so they run for real.
+- **Four ground-truth tests asserted that a live value does not move.** The
+  `/proc/meminfo` and `/proc/loadavg` tests already bracketed the collector's read
+  between two hand reads for exactly this reason; the same reasoning had not been
+  applied to `statfs` free space (failed on CI by one 4096-byte block), thermal
+  millidegrees (compared at a resolution of 0.001 °C), `scaling_cur_freq` (what
+  the governor has requested *right now*), and `/proc/net/dev` counters. Each now
+  uses the same bracket, or asserts an invariant that genuinely holds: capacity
+  and `MemTotal` are still compared exactly, and the frequency check now tests
+  that the governor's request is positive and inside the hardware's advertised
+  range instead of re-reading a value that moves.
+- **The SIGPIPE pipeline test was a coin flip on a loaded runner.** Whether one
+  run records `SIGNAL_RECEIVED` depends on two races: the producer's next write
+  after the consumer exits, and the monitor reporting a child that may already be
+  reaped. The assertion that the pipeline terminates instead of spinning is still
+  immediate and unretried — that one is a real hang — while the event check now
+  allows a few attempts and reports how many it needed.
 
 ### Documentation
 
