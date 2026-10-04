@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -31,11 +31,24 @@ import {
   TRUSTED_DIRECTORIES,
 } from "./commands.js";
 import { ArgumentError, commandHelp, validateArguments } from "./validation.js";
-import { loadConfig } from "../config/env.js";
+import { loadConfig, repoRoot } from "../config/env.js";
 import { inspectCommandLine } from "../terminal/grammar.js";
 import { REFUSED_COMMANDS } from "../api/catalog.js";
 
 const config = loadConfig();
+
+/*
+ * The suites below that lex a command line ask the C engine's own lexer, because
+ * the claim under test is that the catalog's examples survive the gateway's real
+ * parsing. With no engine binary there is nothing to compare against, so those
+ * suites skip rather than fail: "the engine was not built" and "this example is
+ * wrong" are different facts and a suite must not report the second for the
+ * first.
+ *
+ * CI builds the engine in the gateway job, so on CI these run for real.
+ */
+const enginePresent = existsSync(join(repoRoot, "caps"));
+const describeFx = enginePresent ? describe : describe.skip;
 
 beforeEach(() => {
   resetCatalogProbes();
@@ -642,7 +655,7 @@ describe("short options compose the way getopt reads them", () => {
  * accepted only -n, -c, -q and -v. The documented example was refused with
  * "not an accepted flag". This test asserts the whole class is empty.
  */
-describe("every published example is one the validator accepts", () => {
+describeFx("every published example is one the validator accepts", () => {
   /*
    * These use the engine's own lexer via `caps --inspect`, not a whitespace
    * split. A naive split mangles quoting and pipelines -- it turns

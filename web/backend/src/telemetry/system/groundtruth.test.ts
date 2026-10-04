@@ -371,8 +371,35 @@ describe.skipIf(!isLinux)("host collectors agree with an independent raw read of
       expect(valueOf(snap.frequency.availability)).toBe("AVAILABLE");
       for (const policy of snap.frequency.policies) {
         if (policy.requestedKhz.value === null) continue;
-        const text = readOr(`/sys/devices/system/cpu/cpufreq/${policy.policy}/scaling_cur_freq`);
-        if (text !== null) expect(policy.requestedKhz.value).toBe(Number(text.trim()));
+        /*
+         * The stable invariant, not equality with a second read.
+         *
+         * This used to re-read `scaling_cur_freq` and assert it equalled the
+         * snapshot's value. That cannot hold: the field is what the scaling
+         * *governor has requested right now*, so it moves continuously under
+         * any load, and the module's own header says it can lag by a scheduling
+         * interval. The assertion passed only on a host with no cpufreq
+         * policies, where the branch never ran, and failed on a real runner.
+         *
+         * What genuinely holds is that the governor's current request is a
+         * positive frequency inside the range the hardware advertises. Those two
+         * bounds are static, so this is a real check against the raw files
+         * rather than a check against itself.
+         */
+        const base = `/sys/devices/system/cpu/cpufreq/${policy.policy}`;
+        const requested = policy.requestedKhz.value;
+        expect(requested).toBeGreaterThan(0);
+
+        const min = readOr(`${base}/scaling_min_freq`);
+        const max = readOr(`${base}/scaling_max_freq`);
+        if (min !== null) expect(requested).toBeGreaterThanOrEqual(Number(min.trim()));
+        if (max !== null) expect(requested).toBeLessThanOrEqual(Number(max.trim()));
+
+        // The snapshot's own bounds must be consistent with each other, which
+        // is a property of one snapshot and so cannot drift between reads.
+        const snapMin = policy.scalingMinKhz.value;
+        const snapMax = policy.scalingMaxKhz.value;
+        if (snapMin !== null && snapMax !== null) expect(snapMin).toBeLessThanOrEqual(snapMax);
       }
     }
     // Never a measured silicon clock: that is a product decision, not an

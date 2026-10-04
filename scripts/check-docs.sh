@@ -57,6 +57,21 @@ while IFS= read -r md; do
     # Skip the project-tree diagram in the README, where paths are drawn with
     # box characters and are illustrative of the layout, not quoted as files.
     [ "$md" = "./README.md" ] && case "$p" in */*/*) continue ;; esac
+    # Skip declared build outputs.
+    #
+    # `web/frontend/dist/` is where the production bundle lands, so
+    # docs/DEPLOYMENT.md names it -- and requiring it to be present meant this
+    # gate passed only on a machine where someone had just run a build, and
+    # failed on a fresh CI checkout. An absent gitignored path is not a broken
+    # reference; it is a documented destination, and its absence is the normal
+    # state of a clean tree.
+    #
+    # Both spellings are probed because a .gitignore rule written `dist/` matches
+    # the directory only when the path is given with its trailing slash.
+    probe=${p%/}
+    if git check-ignore -q -- "$probe" 2>/dev/null || git check-ignore -q -- "$probe/" 2>/dev/null; then
+      continue
+    fi
     if [ ! -e "$p" ] && [ ! -e "${p%.md}" ] && [ ! -e "${p%.*}" ]; then
       printf 'MISSING  %s -> %s\n' "$md" "$p"
       missing=$((missing + 1))

@@ -115,6 +115,36 @@ by reading the code. Each had a passing test suite behind it.
   but it is now written `"\0"`, so the file is ASCII and grep can see it. Nothing
   had failed, which is why it survived: no gate inspects file encoding.
 
+### Defects found by CI
+
+These four were found only on a Linux runner, because each depends on something a
+Windows working tree cannot show.
+
+- **Three test scripts were committed without an executable bit.** Windows has no
+  exec bit, so `tests/test_pipeline.sh`, `test_pidfd.sh` and `test_limits.sh` were
+  recorded `100644` and CI refused to run them (`Error 126`). They now carry
+  `100755` like every pre-existing suite. `.gitattributes` pins text files to LF
+  for the same class of reason: `core.autocrlf` is true in the Windows git config
+  and unset in the WSL one, so staging one tree from the two machines disagreed.
+- **A telemetry test asserted that a live counter does not move.**
+  `groundtruth.test.ts` compared the snapshot's `scaling_cur_freq` against a
+  second read of the same file. That field is what the scaling governor has
+  requested *right now*, so it moves under any load; the assertion passed only on
+  a host with no cpufreq policies, where the branch never ran. It now asserts the
+  invariant that does hold: the requested frequency is positive and lies within
+  the hardware's advertised `scaling_min_freq`..`scaling_max_freq`.
+- **The documentation gate required a build output to exist.**
+  `docs/DEPLOYMENT.md` names `web/frontend/dist/`, and the gate treated that as a
+  repository path, so it passed only on a machine where someone had just run a
+  build. Gitignored paths are now skipped: an absent build output is a documented
+  destination, not a broken reference.
+- **The gateway CI job never built the C engine.** New suites assert that the
+  gateway and the engine's lexer cannot disagree, which means running the engine;
+  without it they failed with a spawn error that read like a gateway defect. They
+  skip themselves when the binary is absent — "the engine was not built" and "the
+  gateway parsed this wrongly" are different facts — and the job now builds the
+  engine, workloads, and helpers so they run for real.
+
 ### Documentation
 
 - [`docs/host-telemetry.md`](docs/host-telemetry.md) — every host metric, its

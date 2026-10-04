@@ -17,7 +17,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { inspectCommandLine, validateCommandLine, buildResolvedLine, TerminalSyntaxError, TerminalPolicyError } from "./grammar.js";
@@ -26,6 +26,17 @@ import { loadConfig, repoRoot } from "../config/env.js";
 const execFileAsync = promisify(execFile);
 const config = loadConfig();
 const engine = join(repoRoot, "caps");
+
+/*
+ * Every suite below asks the C engine's own lexer what a line means, because the
+ * claim under test is precisely that the gateway and the engine cannot disagree.
+ * With no binary there is nothing to compare against, so the suites skip rather
+ * than fail: "the engine was not built" and "the gateway parsed this wrongly" are
+ * different facts, and a suite must not report the second one for the first.
+ *
+ * CI builds the engine in this job, so on CI these run for real.
+ */
+const describeFx = existsSync(engine) ? describe : describe.skip;
 
 async function rawInspect(line: string): Promise<string> {
   const { stdout } = await execFileAsync(engine, ["--inspect", line], {
@@ -40,7 +51,7 @@ beforeAll(() => {
   mkdirSync(config.workspace, { recursive: true });
 });
 
-describe("--inspect emits a document the gateway can actually read", () => {
+describeFx("--inspect emits a document the gateway can actually read", () => {
   it("produces parseable JSON for a simple pipeline", async () => {
     const parsed = JSON.parse(await rawInspect("seq 1 5 | wc -l")) as { stages: number };
     expect(parsed.stages).toBe(2);
@@ -93,7 +104,7 @@ describe("--inspect emits a document the gateway can actually read", () => {
   });
 });
 
-describe("the gateway reads the same argv the engine will execute", () => {
+describeFx("the gateway reads the same argv the engine will execute", () => {
   it("resolves a two-stage pipeline into per-stage argv", async () => {
     const stages = await inspectCommandLine(config, "seq 1 5 | wc -l");
     expect(stages).toHaveLength(2);
@@ -114,7 +125,7 @@ describe("the gateway reads the same argv the engine will execute", () => {
   });
 });
 
-describe("policy is enforced before anything executes", () => {
+describeFx("policy is enforced before anything executes", () => {
   it("refuses a shell, naming why", async () => {
     await expect(validateCommandLine(config, 'bash -c "rm -rf /"')).rejects.toBeInstanceOf(TerminalPolicyError);
     await expect(validateCommandLine(config, 'bash -c "rm -rf /"')).rejects.toThrow(/not on the allowlist/);
@@ -192,7 +203,7 @@ describe("policy is enforced before anything executes", () => {
   });
 });
 
-describe("the resolved line execs verified absolute paths", () => {
+describeFx("the resolved line execs verified absolute paths", () => {
   it("substitutes the verified path for each command name", async () => {
     const pipeline = await validateCommandLine(config, "seq 1 5 | wc -l");
     const resolved = buildResolvedLine(pipeline);

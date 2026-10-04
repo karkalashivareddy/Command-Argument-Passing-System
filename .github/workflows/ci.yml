@@ -137,6 +137,19 @@ jobs:
       - name: Install from the lockfile
         run: npm ci
 
+      # The gateway's central claim is that it validates a command line by asking
+      # the C engine's own lexer, and the tests that check that claim shell out to
+      # `caps --inspect`. The suites also drive the first-party helpers
+      # (status_probe, caps_pidfd, zombie_maker) and the controlled workloads.
+      # Without them those suites fail with a spawn error that reads like a
+      # gateway defect but is a missing build; they skip themselves when the
+      # binary is absent, so this step is what makes them run for real here
+      # rather than quietly reporting nothing.
+      #
+      # `make && make test-helpers` is the same pair the integration job uses.
+      - name: Build the C engine, the controlled workloads, and the test helpers
+        run: make && make test-helpers
+
       - name: Typecheck
         run: npm run typecheck
 
