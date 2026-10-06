@@ -144,7 +144,7 @@ the UI.
 
 ## 4. Event-stream invariants
 
-`web/backend/src/events/invariants.ts` states thirteen rules and returns
+`web/backend/src/events/invariants.ts` states fourteen rules and returns
 structured diagnostics, not a boolean:
 
 | Id | invariant |
@@ -162,6 +162,7 @@ structured diagnostics, not a boolean:
 | I11 | no process lifecycle event without a preceding `process.started` |
 | I12 | `execution.completed` has a `process.exited` with code 0 |
 | I13 | a corrupt stored payload is reported, never read as valid |
+| I14 | a pipeline that reported completion accounted for every stage it declared |
 
 `GET /api/sessions/:id/replay` returns the report with the events, and the
 Markdown report and the JSON export include it.

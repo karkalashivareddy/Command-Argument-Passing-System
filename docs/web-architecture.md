@@ -2,7 +2,7 @@
 
 > **Scope.** This document covers the gateway: module layout, the event model,
 > storage, and transport. For the whole system — including the C engine, the
-> trust boundaries, and the thirteen event-stream invariants — see
+> trust boundaries, and the fourteen event-stream invariants — see
 > [architecture.md](architecture.md), which is the reference. For what is and is
 > not observed, see [observability-model.md](observability-model.md).
 
@@ -75,7 +75,7 @@ db/database.ts         open, pragmas, versioned migrations, transactions
 db/repositories/       sessions.ts, events.ts
 events/bus.ts          in-process pub/sub with a buffered subscription
 events/sse.ts          SSE frames, keep-alive, Last-Event-ID parsing
-events/invariants.ts   validateEventStream() — the thirteen rules
+events/invariants.ts   validateEventStream() — the fourteen rules
 execution/runner.ts    spawn, stderr classification, lifecycle, finalization
 execution/registry.ts  active-session map, concurrency, stale sweep
 execution/terminator.ts signal delivery with PID-reuse identity checks

@@ -130,8 +130,8 @@ documentation:
 | --- | --- | --- |
 | Secret scanning | enabled | Detects committed credentials. |
 | Push protection | enabled | Blocks a secret before it reaches history. |
-| Dependency graph | enabled | 503 packages resolved from the two lockfiles. |
-| Dependabot alerts | enabled | Six open advisories, all triaged below. |
+| Dependency graph | enabled | Both npm lockfiles are committed and checked in CI. |
+| Dependabot alerts | enabled | Alert counts change as lockfiles and advisories change; the lockfile audit below is the reproducible status. |
 | CodeQL (C/C++, JavaScript/TypeScript) | enabled, buildless | Runs on every push to `main`. |
 | Ruleset `main-destructive-update-guard` | active on the default branch | Blocks **branch deletion** and **force pushes**. It deliberately does *not* require reviews or status checks: this is a single-owner project, and a required-review rule would lock the owner out of their own repository. |
 
@@ -142,30 +142,47 @@ documentation:
   on automatic security-update PRs requires the `admin:repo_hook` OAuth scope,
   which has not been granted to the automation used here.
 
-### Open advisories, triaged
+### npm lockfile audit (2026-10-06)
 
-Six open Dependabot alerts, all **medium**, all the same advisory
-(`GHSA-82fw-gwwq-j7x9` / `CVE-2026-84373`) against `vitest` /
-`@vitest/mocker` in both packages.
+The Vitest advisory affecting the previous 3.x lockfiles is addressed by
+upgrading both packages to Vitest 5.0.3. A fresh `npm audit --json` reported no
+backend vulnerabilities. The frontend audit reported two **moderate** React
+Router advisories through `react-router-dom` 6.x; npm identifies the fix in
+`react-router-dom` 7.18.x, which is a major-version migration. No high or
+critical frontend advisory remained after the compatible dependency update.
 
-* **It is a development-dependency issue.** `vitest` is a `devDependency`; it is
-  never bundled, never installed by `npm ci --omit=dev` in a deployment, and never
-  loaded by the gateway or the frontend at runtime.
-* **It is a dev-server issue.** The advisory requires an attacker who can reach a
-  running Vitest/Vite dev server's unauthenticated HMR WebSocket. CAPS's CI runs
-  the test suite on an ephemeral runner with no exposed port, and the product
-  ships a static production bundle.
-* **There is no fix in the line this repository is on.** The advisory is fixed in
-  Vitest 4.1.11 and 5.0.0, and states that the 3.x line is not maintained and will
-  not receive the fix. Moving to the fix therefore means a semver-major migration
-  of the test runner, which `.github/dependabot.yml` deliberately routes through
-  human review rather than through config.
-* **CI fails the build on anything worse.** The `dependency audit` job runs
-  `npm audit --audit-level=high` for both packages, so a high or critical
-  advisory — in a dev dependency or a runtime one — breaks the build.
+The remaining React Router findings are reported rather than suppressed.
+CAPS uses React Router in a client-side SPA, but upgrading its major version
+still needs a compatibility review. CI runs `npm audit --audit-level=high`
+for both packages, so high and critical findings fail the build; the local
+audit above also records moderate findings that this CI threshold does not fail
+on.
 
-This is an accepted, documented risk rather than an unexamined one. It is
-revisited whenever the test runner is next upgraded for other reasons.
+Reproduce with `npm audit --audit-level=high` and `npm audit` in
+`web/backend` and `web/frontend`. Counts are a point-in-time snapshot of the
+lockfiles, not a permanent property of the repository.
+
+### The Vitest upgrade changed the test runner's engine, not just its version
+
+Moving from Vitest 3.x to 5.0.3 was required to clear the advisories above, and
+it is a semver-major change: **Vitest 5 builds on Rolldown, not Rollup.** The
+migration is invisible in the test sources and was verified by running the whole
+suite, not by reading a changelog. Two consequences are worth recording because
+they cost real debugging time.
+
+* **Platform-specific native dependencies now matter.** Vitest 5 pulls
+  `rolldown`, whose prebuilt binary is an optional, platform-matched dependency.
+  Installing from a lockfile generated on one platform and running on another
+  produces `Cannot find native binding`, which reads like a broken test suite but
+  is an install artifact. Run `npm ci` on the machine that will run the tests.
+* **The suite is meaningfully faster off a Windows network share.** On this
+  machine the frontend suite drops from roughly 250 s to about 5 s when
+  `web/frontend` is on a local Linux filesystem instead of a `/mnt/c` mount, and
+  the worker-startup timeout is not hit. If `vitest` reports
+  `Timeout waiting for worker to respond`, suspect filesystem latency before
+  suspecting the tests.
+
+Neither is a CAPS defect, and neither is worked around in the test code.
 
 ## Verifying the boundary yourself
 

@@ -11,6 +11,28 @@ evidence and are labelled as such:
 - [FINAL_RELEASE_VERIFICATION.md](FINAL_RELEASE_VERIFICATION.md) — the 1.1.0 milestone
 - [FINAL_REPOSITORY_AUDIT.md](FINAL_REPOSITORY_AUDIT.md) — the 1.1.0 repository audit
 
+> **Re-verified 2026-10-06 against the current tree.** Every measurement in this
+> document was reproduced after the Vitest 3.x → 5.0.3 upgrade described in
+> [SECURITY.md](../../SECURITY.md). The counts held: 450 backend tests in 27
+> files, 247 frontend tests in 13 files, 260 C assertions across 16 suites, and
+> the same repository-gate results. Two facts were added at that point, because
+> the upgrade changed what a reader needs to know:
+>
+> * The C engine's event stream is guarded by **fourteen** invariants, not
+>   thirteen. `I14-pipeline-stages-accounted` exists in
+>   `web/backend/src/events/invariants.ts` and is asserted by
+>   `web/backend/tests/api/pipeline.test.ts`; the 1.1.0-era documents count
+>   only the first thirteen.
+> * Vitest 5 builds on **Rolldown**, so a platform-mismatched install, or a test
+>   run on a high-latency network filesystem, can fail in ways that read as a
+>   broken suite but are install and I/O artifacts. See
+>   [SECURITY.md](../../SECURITY.md#the-vitest-upgrade-changed-the-test-runners-engine-not-just-its-version).
+
+The 1.1.0 figures quoted inside
+[FINAL_RELEASE_VERIFICATION.md](FINAL_RELEASE_VERIFICATION.md) and
+[FINAL_REPOSITORY_AUDIT.md](FINAL_REPOSITORY_AUDIT.md) describe that milestone
+and are intentionally left unedited.
+
 ---
 
 ## 1. Environment
@@ -297,9 +319,14 @@ git ls-files | wc -l     # tracked files, source and documentation only
 ```
 
 No database, build output, `.env`, credential, or user-owned presentation or
-output artifact is tracked. The intentionally preserved local files
-(`Command_Argument_Passing_System_End_Semester_Presentation.pptx`, `output.txt`,
-`output.txtx`) are not part of the release.
+output artifact is tracked.
+
+The presentation file
+`Command_Argument_Passing_System_End_Semester_Presentation.pptx` is present in
+the working tree but **not tracked**: `.gitignore` excludes `*.pptx`, because a
+presentation is a local submission artifact rather than a source or a build
+product. `output.txt`, `output.txtx`, and `shape.cjs` are likewise ignored local
+scratch files, and `git status` is expected to be clean without them.
 
 ---
 

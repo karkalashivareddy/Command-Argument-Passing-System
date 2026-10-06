@@ -110,7 +110,7 @@ flowchart TD
 
     subgraph P["PERSISTENCE — canonical event store"]
         DB[("SQLite<br/>versioned migrations")]
-        IDX["validateEventStream<br/>13 invariants"]
+        IDX["validateEventStream<br/>14 invariants"]
         DB --> IDX
     end
 
@@ -147,7 +147,7 @@ Read the diagram as five separately-owned concerns:
 * **RENDERING** — the browser is a view. It executes no processes and it
   re-derives nothing the event store already says.
 
-Full detail, including the trust boundaries and the thirteen event-stream
+Full detail, including the trust boundaries and the fourteen event-stream
 invariants, is in [docs/architecture.md](docs/architecture.md).
 
 ## End-to-end execution flow
@@ -203,7 +203,7 @@ return a byte-identical event fingerprint, and the smoke suite asserts it.
 6. **Replay is read-only.** Proven, not asserted: the smoke suite fingerprints
    the event stream before and after and compares.
 
-7. **A canonical event history with checked invariants.** Thirteen invariants,
+7. **A canonical event history with checked invariants.** Fourteen invariants,
    structured diagnostics rather than a boolean, enforced on replay, on export,
    and in the Markdown report.
 
