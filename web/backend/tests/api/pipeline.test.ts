@@ -65,13 +65,22 @@ async function runPipeline(commandLine: string): Promise<PipelineRun> {
   const stages = posted.json().stageCount as number;
 
   // Poll until terminal, exactly as a client would.
-  let status = "RUNNING";
-  for (let i = 0; i < 100 && status === "RUNNING"; i += 1) {
+  //
+  // The loop must continue while the status is *not* terminal, rather than while
+  // it is specifically "RUNNING". A session is observable as CREATED and
+  // STARTING before the runner reaches RUNNING, so a loop keyed on "RUNNING"
+  // returns on its very first poll with a non-terminal status and then fails the
+  // terminal-status assertion. That is a race against runner startup, not
+  // anything about the pipeline: on a loaded CI runner the first poll landed
+  // before the run began and reported CREATED.
+  const isTerminal = (s: string): boolean => (TERMINAL_STATUSES as readonly string[]).includes(s);
+  let status = "PENDING";
+  for (let i = 0; i < 100 && !isTerminal(status); i += 1) {
     await new Promise((r) => setTimeout(r, 100));
     const got = await app.inject({ method: "GET", url: `/api/sessions/${sessionId}` });
     status = got.json().status as string;
   }
-  expect(TERMINAL_STATUSES as readonly string[]).toContain(status);
+  expect(isTerminal(status), `session ${sessionId} never reached a terminal status (last: ${status})`).toBe(true);
 
   const record = await app.inject({ method: "GET", url: `/api/sessions/${sessionId}` });
   const replay = await app.inject({ method: "GET", url: `/api/sessions/${sessionId}/replay` });
