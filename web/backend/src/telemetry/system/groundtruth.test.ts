@@ -433,10 +433,31 @@ describe.skipIf(!isLinux)("host collectors agree with an independent raw read of
         const requested = policy.requestedKhz.value;
         expect(requested).toBeGreaterThan(0);
 
-        const min = readOr(`${base}/scaling_min_freq`);
-        const max = readOr(`${base}/scaling_max_freq`);
-        if (min !== null) expect(requested).toBeGreaterThanOrEqual(Number(min.trim()));
-        if (max !== null) expect(requested).toBeLessThanOrEqual(Number(max.trim()));
+        /*
+         * The two advertised bounds are static, so they can be compared against
+         * the raw files exactly.
+         *
+         * The *requested* frequency is deliberately NOT range-checked against
+         * them. This module's own header states the reason, and CI proved it:
+         * `scaling_cur_freq` is a software-maintained governor request, and on a
+         * virtualized host it can transiently exceed `scaling_max_freq` while the
+         * guest's advertised hardware limit and the host's real turbo range
+         * disagree. A GitHub runner reported 3 768 995 kHz against a
+         * `scaling_max_freq` of 2 600 000 kHz. Asserting
+         * `requested <= scaling_max_freq` therefore asserts something about the
+         * host's virtualization, not about CAPS, and it failed there while
+         * passing on every physical machine this was developed on. Clamping the
+         * reported value would be worse: it would invent a frequency the kernel
+         * did not publish.
+         *
+         * So the check is that the static bounds are reported faithfully and are
+         * internally consistent, and that the request is a real positive value.
+         * That is what the code claims to do.
+         */
+        const rawMin = readOr(`${base}/scaling_min_freq`);
+        const rawMax = readOr(`${base}/scaling_max_freq`);
+        if (rawMin !== null) expect(policy.scalingMinKhz.value).toBe(Number(rawMin.trim()));
+        if (rawMax !== null) expect(policy.scalingMaxKhz.value).toBe(Number(rawMax.trim()));
 
         // The snapshot's own bounds must be consistent with each other, which
         // is a property of one snapshot and so cannot drift between reads.
