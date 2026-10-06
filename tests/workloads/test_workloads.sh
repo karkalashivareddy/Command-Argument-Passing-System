@@ -176,15 +176,26 @@ echo "== caps_mixed_burn =="
 mixed_pid=$!
 sleep 1
 mixed_rss=$(awk '/^VmRSS:/ {print $2}' "/proc/$mixed_pid/status" 2>/dev/null || echo 0)
-mixed_cpu=$(cpuprobe "$mixed_pid")
+# CPU time is read as a DELTA over a second, not as one sample after a fixed
+# sleep. The workload sleeps 25 ms per iteration, so on a loaded runner a single
+# sample can land before the process has been charged a whole CLK_TCK tick and
+# read 0 ms even though it is genuinely CPU-bound. That made this assertion
+# depend on host load rather than on the workload: it failed in CI on a busy
+# 2-core runner while passing on an idle machine. Measuring growth across an
+# interval tests the claim actually being made -- that the kernel charges this
+# PID for CPU while it runs -- and cannot be satisfied by a lucky sample.
+mixed_cpu_before=$(cpuprobe "$mixed_pid")
+sleep 1
+mixed_cpu_after=$(cpuprobe "$mixed_pid")
+mixed_cpu=$((mixed_cpu_after - mixed_cpu_before))
 wait "$mixed_pid"
 mixed_status=$?
 [ "$mixed_status" -eq 0 ] ||
     failmsg "caps_mixed_burn exited $mixed_status ($(cat "$tmp/mixed.err"))"
 if [ "${mixed_rss:-0}" -ge 20000 ] && [ "${mixed_cpu:-0}" -gt 0 ]; then
-    echo "PASS: caps_mixed_burn showed rss=${mixed_rss}kB and cpu=${mixed_cpu}ms for one PID"
+    echo "PASS: caps_mixed_burn showed rss=${mixed_rss}kB and cpu=+${mixed_cpu}ms for one PID"
 else
-    failmsg "caps_mixed_burn missing a signal (rss=${mixed_rss}kB cpu=${mixed_cpu}ms)"
+    failmsg "caps_mixed_burn missing a signal (rss=${mixed_rss}kB cpu=+${mixed_cpu}ms)"
 fi
 
 # ---------------------------------------------------------------------------
