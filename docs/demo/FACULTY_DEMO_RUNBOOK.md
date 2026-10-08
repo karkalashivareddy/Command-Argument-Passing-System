@@ -13,14 +13,14 @@ See what a command becomes. One real Linux process, made inspectable, made repla
 
 ### Terminal 1 — Backend (gateway)
 ```bash
-cd /mnt/c/Users/karka/Command-Argument-Passing-System/web/backend
+cd $(git rev-parse --show-toplevel 2>/dev/null || pwd)/web/backend
 CAPS_DATABASE_PATH=/tmp/caps-demo.db CAPS_WORKSPACE=/tmp/caps-demo-work CAPS_LOG_LEVEL=info node --disable-warning=ExperimentalWarning --import tsx src/server.ts
 ```
 Expect: `listening on http://127.0.0.1:3000` or `... :3100` depending on `CAPS_PORT`.
 
 ### Terminal 2 — Production frontend (recommended for demo)
 ```bash
-cd /mnt/c/Users/karka/Command-Argument-Passing-System/web/frontend
+cd $(git rev-parse --show-toplevel 2>/dev/null || pwd)/web/frontend
 CAPS_PROXY_TARGET=http://127.0.0.1:3100 npm run preview -- --host 127.0.0.1 --port 4173
 ```
 Or run `build-preview.sh`. Gateway should be `3100`.
