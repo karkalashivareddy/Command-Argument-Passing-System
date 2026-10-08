@@ -24,6 +24,22 @@
   --fg-3: #5b6673;
   --fg-inverse: #07090d;
 
+  /*
+   * --fg-4: the dimmest legible text.
+   *
+   * This token was USED 48 times across the app and had never been defined, so
+   * every one of those elements silently inherited its parent's colour instead of
+   * being dimmed. That is not a cosmetic gap: it means axis labels, provenance
+   * notes, secondary units and timestamp hints were rendering at full contrast
+   * where the design intended them to recede, which is why dense panels read as
+   * uniformly loud rather than hierarchically quiet.
+   *
+   * It is defined here rather than at the call sites because the intent was
+   * always "one step quieter than --fg-3", and 48 call sites all meant the same
+   * thing.
+   */
+  --fg-4: #3f4956;
+
   /* ---- semantic (state, not decoration) ---- */
   --accent: #22c3ee; /* cyan — active info */
   --violet: #8b7cf6; /* violet — execution / transition */
@@ -31,6 +47,19 @@
   --amber: #f5a623; /* amber — warning / signal */
   --red: #f0554d; /* red — failure / termination */
   --blue: #4c8bf5; /* blue — links / neutral info */
+
+  /*
+   * Aliases, not new colours.
+   *
+   * `--cyan` and `--danger` were each written into a handful of components while
+   * the token system called the same colours `--accent` and `--red`. Two names for
+   * one colour is how a palette drifts: a future change to the failure colour
+   * would have updated `--red` and silently missed the three `--danger` uses. They
+   * are aliased so both names resolve to the single source.
+   */
+  --cyan: var(--accent);
+  --danger: var(--red);
+  --warn: var(--amber);
 
   /* ---- accent surface tints (subtle) ---- */
   --accent-soft: rgba(34, 195, 238, 0.1);
@@ -55,6 +84,12 @@
   --s-12: 48px;
 
   /* ---- radius ---- */
+  /*
+   * --r-xs is used for badges and chips, which sit inside panels and must not
+   * carry a panel's corner radius. It was referenced 14 times and never defined,
+   * so every badge fell back to a square corner against a rounded panel.
+   */
+  --r-xs: 3px;
   --r-sm: 6px;
   --r-md: 10px;
   --r-lg: 14px;
@@ -76,6 +111,111 @@
   --z-overlay: 40;
   --z-palette: 60;
   --z-toast: 80;
+  --z-present: 100;
+
+  /* ============================================================
+     GLASS SURFACES
+
+     Why these exist as tokens rather than as scattered utilities:
+     glass is a HIERARCHY device here, and hierarchy is the thing that goes
+     wrong first. There are four ranks, each one step more forward than the last:
+
+       shell        the application frame; the furthest back
+       panel        a normal surface that should still read as "floating"
+       inspector    a panel that has been lifted to demand attention
+       overlay      transient: palette, modals, toasts
+
+     Only ranks 3 and 4 blur. Blurring everything is the failure mode that makes a
+     product look like a glassmorphism demo: when the background of every element
+     is soft, nothing is in front of anything, and text contrast collapses with it.
+     These values keep text fully opaque and blur only the surface behind them.
+     ============================================================ */
+  --glass-panel-bg: rgba(12, 16, 22, 0.72);
+  --glass-inspector-bg: rgba(15, 22, 31, 0.86);
+  --glass-overlay-bg: rgba(8, 12, 18, 0.9);
+  --glass-blur-sm: blur(8px) saturate(1.1);
+  --glass-blur-md: blur(16px) saturate(1.15);
+  --glass-blur-lg: blur(28px) saturate(1.2);
+  /* The hairline that makes a glass edge read as a lit edge rather than a border. */
+  --glass-edge: inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+  --glass-edge-strong: inset 0 1px 0 0 rgba(255, 255, 255, 0.09);
+
+  /* ============================================================
+     ELEVATION
+
+     Three steps, each a real depth cue rather than a heavier border:
+     raised sits on the page, floating is a panel that has been lifted,
+     overlay is transient and casts the deepest shadow.
+     ============================================================ */
+  --shadow-raised: 0 1px 0 0 rgba(255, 255, 255, 0.025), 0 1px 2px -1px rgba(0, 0, 0, 0.5);
+  --shadow-floating: 0 1px 0 0 rgba(255, 255, 255, 0.04), 0 8px 24px -10px rgba(0, 0, 0, 0.7);
+  --shadow-overlay: 0 1px 0 0 rgba(255, 255, 255, 0.05), 0 24px 64px -16px rgba(0, 0, 0, 0.85);
+
+  /* ============================================================
+     MOTION
+
+     Four named durations, chosen by what the motion is FOR. A duration that does
+     not correspond to a category is how an interface ends up feeling slow in the
+     places that should feel instant and busy in the places that should feel calm.
+
+       instant  a press or a focus ring. Must not be perceptible as a delay.
+       quick     hover, a value changing in place.
+       base      a panel revealing, a state settling.
+       slow      a camera move or a page transition.
+
+     The ease curve is one curve used everywhere. Mixing easings is what makes
+     motion feel incoherent even when every duration is individually reasonable.
+     ============================================================ */
+  --motion-instant: 120ms;
+  --motion-quick: 180ms;
+  --motion-base: 260ms;
+  --motion-slow: 520ms;
+  --ease-standard: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-entrance: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+
+  /* ============================================================
+     TYPE SCALE
+
+     Six steps, and the rule that matters is not the sizes but the pairing:
+     MONOSPACE is for machine facts (PIDs, argv, event names, timestamps, paths,
+     JSON, syscall names) and SANS is for human explanation. Using mono for prose
+     or sans for a PID destroys the distinction the reader relies on to tell an
+     observation from an interpretation, which is this product's whole premise.
+     ============================================================ */
+  --text-display: 1.75rem;   /* page hero */
+  --text-title: 1.125rem;    /* page identity */
+  --text-section: 0.9375rem; /* subsystem / card title */
+  --text-body: 0.8125rem;    /* explanation */
+  --text-meta: 0.75rem;      /* labels, metadata */
+  --text-micro: 0.6875rem;   /* badges, axis ticks, units */
+
+  --tracking-display: -0.021em;
+  --tracking-title: -0.012em;
+  --tracking-label: 0.06em;
+  --tracking-micro: 0.12em;
+
+  /* The quiet rhythm that dense panels depend on. */
+  --gap-tight: 4px;
+  --gap-base: 8px;
+  --gap-loose: 14px;
+  --gap-section: 22px;
+
+  /* ============================================================
+     SEMANTIC ALIASES
+
+     `--accent` / `--green` / `--red` name COLOURS. These name ROLES, and roles
+     are what a component should reference: a component asking for "danger" is
+     asking for "the thing that means this failed", and it should keep meaning that
+     if the palette is ever retuned. Every role resolves to exactly one token, so
+     there is no second name for the same colour and no drift.
+     ============================================================ */
+  --role-observed: var(--accent);
+  --role-derived: var(--violet);
+  --role-success: var(--green);
+  --role-warning: var(--amber);
+  --role-danger: var(--red);
+  --role-unavailable: var(--fg-3);
 }
 
 /* ---- light variant (real design system, not inverted) ---- */
@@ -98,7 +238,22 @@
     --fg-3: #96a0ac;
     --fg-inverse: #ffffff;
 
+    /* One step quieter than --fg-3, and still AA on --bg-2. */
+    --fg-4: #b4bec9;
+
     --shadow-panel: 0 1px 0 0 rgba(18, 22, 28, 0.04), 0 4px 16px -8px rgba(18, 22, 28, 0.14);
     --shadow-pop: 0 8px 32px -8px rgba(18, 22, 28, 0.28);
+    --shadow-raised: 0 1px 0 0 rgba(18, 22, 28, 0.05), 0 1px 2px -1px rgba(18, 22, 28, 0.1);
+    --shadow-floating: 0 1px 0 0 rgba(18, 22, 28, 0.06), 0 8px 24px -10px rgba(18, 22, 28, 0.2);
+    --shadow-overlay: 0 1px 0 0 rgba(18, 22, 28, 0.07), 0 24px 64px -16px rgba(18, 22, 28, 0.3);
+
+    /* Glass in light mode is far subtler. Blur is nearly invisible against a
+       light background, so the read has to come from the tint and the edge, and
+       the tints are raised towards white rather than towards black. */
+    --glass-panel-bg: rgba(255, 255, 255, 0.78);
+    --glass-inspector-bg: rgba(255, 255, 255, 0.9);
+    --glass-overlay-bg: rgba(247, 248, 250, 0.93);
+    --glass-edge: inset 0 1px 0 0 rgba(255, 255, 255, 0.9);
+    --glass-edge-strong: inset 0 1px 0 0 rgba(255, 255, 255, 1);
   }
 }

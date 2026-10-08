@@ -67,10 +67,12 @@ int signals_parent_init(void)
 {
     if (set_sigint(SIG_IGN) != 0) {
         /*
-         * Explicit failure policy: report the failure and let the caller
-         * react.  The shell keeps running in a degraded state: Ctrl+C will
-         * then also terminate the parent while a child runs.  Failing to
-         * ignore SIGINT is never "success".
+         * Fail-closed policy: report the failure and let the caller refuse.
+         * main() turns this -1 into "refusing to start", because a caps that
+         * cannot ignore SIGINT will be killed by Ctrl+C while a child runs and
+         * the guarantee "the REPL survives Ctrl+C" would then be false.  This
+         * function only reports the syscall failure; refusing is the caller's
+         * decision, so the two never disagree about what happened.
          */
         caps_error("sigaction(SIGINT, SIG_IGN): %s", strerror(errno));
         return -1;

@@ -13,10 +13,10 @@ item. Things that are merely "not built yet" live in
 
 | Limitation | Why | What happens instead |
 | --- | --- | --- |
-| **No shell.** There is no `sh -c`, no glob expansion, no `$VAR`, no command substitution, no `&&`/`\|\|`/`;` chaining, no heredocs, no brace expansion, no tilde expansion. | A shell is a second language with its own quoting rules, and two lexers eventually disagree about one quoting case — always in the unsafe direction. | CAPS has **one** lexer, in the C engine. The browser and the gateway both call it (`--inspect`, `--run-line`) rather than re-implementing it. |
+| **No shell.** There is no `sh -c`, no glob expansion, no `$VAR`, no command substitution, no `&&`/`\|\|`/`;` chaining, no heredocs, no brace expansion, no tilde expansion. | A shell is a second language with its own quoting rules, and two lexers eventually disagree about one quoting case — always in the unsafe direction. | The **execution path** uses exactly **one** lexer, `parser_tokenize()` in the C engine, which honours quoting and backslash escapes. The browser and the gateway both call it (`--inspect`, `--run-line`) rather than re-implementing it. The legacy whitespace-only `parser_parse()` survives only behind `caps --parse`, which is a debug view and is never what runs. |
 | **Not every Linux command.** Only an explicit allowlist, and per-command argument schemas. | An allowlist that grows without review is not an allowlist. | `GET /api/catalog` lists every command with its live argument schema. Unknown commands are **refused with a reason**, not attempted. |
 | **Pipelines are `|`-only.** No `&&`, no `\|\|`, no redirection chaining across a pipeline. | Each of those needs its own execution semantics. | Pipes, redirections, and per-stage timeouts are supported; the connectives are not. |
-| **`stderr` redirection not supported.** `2>` and `2>>` are rejected. | The monitor protocol shares the child's stderr descriptor family. | `stdout` and `stdin` redirection are supported. The monitor travels on a separate descriptor so it can never contaminate a program's output. |
+| **`stderr` redirection is a terminal-route feature only.** `POST /api/sessions` accepts only `in`, `out`, and `append`, and rejects a `stderr` slot with 400. | The monitor protocol shares the child's `stderr` descriptor, so a redirected `stderr` is a redirection of the same stream CAPS diagnostics travel on. | `2>` and `2>>` are implemented and exercised on `POST /api/terminal/execute`. Both routes validate the target against the workspace policy, and the engine opens it `O_WRONLY|O_CREAT` with `O_NOFOLLOW`. |
 | **One command per execution request**, or one pipeline. | — | A pipeline is a single execution with N stages, not N executions. |
 
 ### `du` takes files, not directories
@@ -77,7 +77,16 @@ Stated so the guarantee is not over-read. Full model in
   request-time check.
 - **`kill`, `pkill`, and `killall` are refused.** They can reach processes CAPS
   does not own, and `killall` performs no identity verification at all. CAPS
-  signals only what it started, and verifies identity first.
+  signals only what it started, and the identity model is precise about when the
+  check happens: the kernel identity — PID plus the start-time field of
+  `/proc/<pid>/stat` — is captured at spawn and re-verified before **every
+  delayed** escalation and for **every** signal delivered through `pidfd`. The
+  *first* signal of a terminate or a timeout is a plain `kill(2)` to the PID the
+  gateway itself just forked and has not yet reaped, and an unreaped child keeps
+  its PID reserved, so it cannot have been recycled at that instant. That
+  distinction is published rather than blurred, because
+  [`../SECURITY.md`](../SECURITY.md) documents it and a reviewer will compare
+  the two.
 - **No container, namespace, or cgroup isolation.** A confined workspace is not a
   privilege boundary.
 - **`RLIM_INFINITY` when a limit is unset.** Limits are opt-in. The UI publishes

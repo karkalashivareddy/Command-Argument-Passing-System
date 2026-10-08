@@ -76,9 +76,20 @@ WL_TESTS := tests/workloads/test_workloads.sh
 GATE_TESTS := tests/scripts/test_attribution.sh \
               scripts/check-version.test.sh
 
+# Every repository gate, in the order CI runs them.  These are the gates that
+# need no engine binary and no fixture: they inspect git metadata, version
+# strings, documentation links, committed hygiene, lockfiles, and file endings.
+#
+# The last three used to be CI-only steps invoked by hand from the workflow, so
+# `make test-scripts` did not actually run every gate the documentation claims
+# it runs. A documented gate that `make test-scripts` skips is a claim, not a
+# check, so they are listed here and CI keeps invoking `make test-scripts`.
 GATES := scripts/check-attribution.sh \
          scripts/check-version.sh \
-         scripts/check-docs.sh
+         scripts/check-docs.sh \
+         scripts/check-lockfiles.sh \
+         scripts/check-repository-hygiene.sh \
+         scripts/check-trailing-newline.sh
 
 
 # Tests that need the status_probe helper binary
@@ -110,16 +121,34 @@ LIFECYCLE_TESTS := *lifecycle*
 # caps --version and the running gateway cannot describe different products.
 VERSION_SRC := web/backend/src/config/env.ts
 
-all: $(TARGET) workloads
+all: caps workloads
+
+# `caps` is a documented entry point in README.md, docs/DEPLOYMENT.md,
+# docs/testing.md, and the CI workflow, but the binary was only ever the
+# byproduct of a FILE rule: because `caps` exists in the working tree (it is
+# built, and gitignored), `make caps` on a tree where someone had already run
+# `make` reported "up to date" and built nothing. It worked by accident, and on
+# a fresh clone the name meant something different from what it means on a warm
+# tree. A phony target makes the documented command mean what it says.
+#
+# The phony target therefore OWNS the link, rather than sitting beside a file
+# rule for the same name: two rules with recipes for one target is an override
+# warning, and a phony target depending on the file it also builds is a
+# circular-dependency warning. Neither is acceptable in a Makefile whose whole
+# job is to make the documented commands trustworthy.
+#
+# The cost is that the link runs on every `make` invocation. It is one cc call
+# with no compilation, and in exchange `make`, `make caps`, and `make all` all
+# mean the same thing on every tree.
+.PHONY: caps
+caps: $(OBJS) workloads
+	$(CC) $(LDFLAGS) -o $(TARGET) $(OBJS) $(LDLIBS)
 
 version:
 	@sh scripts/generate-version.sh
 
 $(VERSION_HEADER): $(VERSION_SRC) scripts/generate-version.sh
 	@sh scripts/generate-version.sh
-
-$(TARGET): $(OBJS)
-	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 
 $(BUILD)/%.o: src/%.c $(VERSION_HEADER) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c -o $@ $<
@@ -170,11 +199,12 @@ test-helpers: $(HELPER) $(WAIT_HELPER) $(PIDFD) $(ZOMBIE) $(SIGPIPE_WRITER)
 $(BUILD):
 	mkdir -p $(BUILD)
 
-run: $(TARGET)
+run: caps
 	./$(TARGET)
 
 # The limits suite exercises caps_memory_burn, so it depends on `workloads`.
-test: $(TARGET) $(HELPER) $(WAIT_HELPER) $(PIDFD) $(ZOMBIE) $(SIGPIPE_WRITER) $(WORKLOAD_BINS)
+# `caps` rather than $(TARGET): the phony target is what builds the binary now.
+test: caps $(HELPER) $(WAIT_HELPER) $(PIDFD) $(ZOMBIE) $(SIGPIPE_WRITER) $(WORKLOAD_BINS)
 	@set -e; for t in $(TESTS) $(PIDFD_TESTS) $(LIMIT_TESTS); do \
 		echo "== $$t =="; \
 		case "$$t" in \
@@ -262,7 +292,7 @@ clean:
 
 -include $(DEPS)
 
-.PHONY: all version workloads run test test-scripts test-workloads test-asan \
+.PHONY: all caps version workloads run test test-scripts test-workloads test-asan \
         test-workloads-asan clean web web-backend web-frontend web-install
 
 $(WL_SAN_DIR):

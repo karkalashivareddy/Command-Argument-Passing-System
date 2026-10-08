@@ -1,0 +1,566 @@
+/* ============================================================
+   The CAPS terminal surface.
+
+   WHY THIS FILE EXISTS AS PLAIN CSS
+   --------------------------------
+   `pages/TerminalPage.tsx` is the only route in the app written in BEM class
+   names rather than Tailwind utilities, and every one of those 13 classes was
+   referenced with no stylesheet defining them. The consequence was not subtle:
+   `/terminal` rendered as unstyled semantic HTML inside an otherwise designed
+   shell. No card, no border, no grid, no monospace, browser-default buttons and
+   inputs, and the "catalog" and "pipeline" sections as unindented text runs.
+
+   That is the worst-looking route in the product being the one that is most
+   likely to be demonstrated, because it is the only real command-line surface.
+
+   So the rules are here, in the order the component reads top to bottom, and
+   every value is a token. No literal colour or size appears below.
+   ============================================================ */
+
+.caps-terminal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+
+/* ---------------------------------------------------------------- top bar */
+
+.caps-terminal__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--line-0);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+}
+
+.caps-terminal__modes {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--line-0);
+  border-radius: var(--r-sm);
+  background: var(--bg-1);
+}
+
+/*
+   The mode control is a pair of buttons that must read as ONE segmented control,
+   not two buttons: the shared container does the rounding and the inner buttons
+   carry only the selected state. `aria-selected` drives the fill rather than a
+   separate class, so the visual state cannot drift from the announced one.
+*/
+.caps-terminal__modes button {
+  appearance: none;
+  border: 0;
+  cursor: pointer;
+  padding: var(--s-1) var(--s-3);
+  border-radius: calc(var(--r-sm) - 2px);
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.caps-terminal__modes button:hover {
+  color: var(--fg-1);
+}
+
+.caps-terminal__modes button[aria-selected="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.caps-terminal__status {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--fg-3);
+}
+
+/* ------------------------------------------------------------- the command */
+
+/*
+   `display: flex` on a <label> rather than a grid: the caption must sit above
+   the field so the label's click target is the input, and the field must be able
+   to hold a long line without wrapping it into a second row mid-edit.
+*/
+.caps-terminal__input {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.caps-terminal__input:focus-within {
+  border-color: var(--accent);
+}
+
+.caps-terminal__input > span {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.caps-terminal__input input {
+  appearance: none;
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--line-0);
+  border-radius: var(--r-sm);
+  background: var(--bg-1);
+  color: var(--fg-0);
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.caps-terminal__input input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ------------------------------------------------- validity, hints, errors */
+
+/*
+   All three are visually distinct AND carry a role in the markup
+   (`role="alert"` for the two failures, `role="status"` for the advisory), so the
+   colours are redundant reinforcement rather than the only signal.
+*/
+.caps-terminal__hint,
+.caps-terminal__warning,
+.caps-terminal__error {
+  display: block;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--line-0);
+  border-left-width: 2px;
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--fg-2);
+}
+
+.caps-terminal__hint {
+  border-left-color: var(--line-2);
+}
+
+.caps-terminal__warning {
+  border-left-color: var(--amber);
+  color: var(--fg-1);
+}
+
+.caps-terminal__error {
+  border-left-color: var(--red);
+  color: var(--fg-1);
+}
+
+.caps-terminal__error code,
+.caps-terminal__warning code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-0);
+}
+
+/* ------------------------------------------------------- resolved grammar */
+
+/*
+   A `<details>` whose default is open, containing prose, an h4, and a
+   two-column `<dl>` of operator syntax against meaning.
+
+   The grid is on the INNER `<dl>`, not on the `<details>`: a details element is
+   a block box, so putting the two-column template on it does nothing, and the
+   operator rows collapse into a single run of text. This is the same mistake the
+   catalog section made, and it is worth writing down because the visual symptom
+   -- "the text is there but laid out like a paragraph" -- looks like missing
+   content rather than a mis-targeted selector.
+*/
+.caps-terminal__grammar {
+  padding: var(--s-3);
+  border: 1px solid var(--line-0);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+}
+
+.caps-terminal__grammar > summary {
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--fg-2);
+}
+
+.caps-terminal__grammar > p {
+  margin: var(--s-2) 0 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--fg-2);
+}
+
+.caps-terminal__grammar > h4 {
+  margin: var(--s-3) 0 var(--s-1);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.caps-terminal__grammar > dl {
+  display: grid;
+  grid-template-columns: minmax(4rem, auto) 1fr;
+  gap: var(--s-1) var(--s-4);
+  margin: 0;
+}
+
+.caps-terminal__grammar > dl > div {
+  display: contents;
+}
+
+.caps-terminal__grammar dt {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.caps-terminal__grammar dd {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--fg-2);
+}
+
+.caps-terminal__grammar code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-0);
+}
+
+/* -------------------------------------------------------------- the stages */
+
+.caps-terminal__pipeline {
+  display: grid;
+  gap: var(--s-2);
+}
+
+/* An ordered list of stages, so the numbering must come from the counter. */
+.caps-terminal__pipeline > ol {
+  display: grid;
+  gap: var(--s-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: caps-stage;
+}
+
+.caps-terminal__pipeline > ol > li {
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--line-0);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+}
+
+.caps-terminal__pipeline > ol > li > strong {
+  display: block;
+  margin-bottom: var(--s-1);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--fg-0);
+}
+
+.caps-terminal__pipeline > ol > li > dl {
+  display: grid;
+  grid-template-columns: minmax(4rem, auto) 1fr;
+  gap: var(--s-1) var(--s-4);
+  margin: 0;
+}
+
+.caps-terminal__pipeline > ol > li > dl > div {
+  display: contents;
+}
+
+.caps-terminal__pipeline dt {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.caps-terminal__pipeline dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-1);
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------- the selected-command aside */
+
+/*
+   The panel that explains one catalog entry in full: rationale, restrictions,
+   examples. It is an `<aside>`, so it is given the same raised-panel treatment as
+   the catalog it belongs to rather than being left as bare prose.
+*/
+.caps-terminal__detail {
+  display: grid;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-md);
+  background: var(--bg-1);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--fg-2);
+}
+
+.caps-terminal__detail > h3,
+.caps-terminal__detail > strong {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--fg-0);
+}
+
+.caps-terminal__detail p {
+  margin: 0;
+}
+
+.caps-terminal__detail code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-1);
+}
+
+.caps-terminal__detail dl {
+  display: grid;
+  gap: var(--s-1);
+  margin: 0;
+}
+
+.caps-terminal__detail dt {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+/* --------------------------------------------------------------- the catalog */
+
+/*
+   The catalog is a grouped LIST of buttons, not a disclosure widget.
+
+   It was styled as `<details>` when this file was first written, which matched
+   nothing: the markup is `section > h3, h4(category) > ul > li > button + span`,
+   and every rule landed on nothing. The result on screen was the command names
+   and their resolution notes running together as unstyled inline text, which is
+   how it looked before any of this file existed.
+
+   So the rules below follow the real structure, and the headings are styled too:
+   `<h3>`/`<h4>` inherit the UA stylesheet otherwise, which is why the category
+   labels rendered as unindented body-size text.
+*/
+.caps-terminal__catalog {
+  display: grid;
+  gap: var(--s-3);
+  padding: var(--s-3);
+  border: 1px solid var(--line-0);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+}
+
+.caps-terminal__catalog > h3 {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+}
+
+.caps-terminal__catalog h4 {
+  margin: 0 0 var(--s-1);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.caps-terminal__catalog ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  gap: var(--s-1);
+  margin: 0 0 var(--s-3);
+  padding: 0;
+  list-style: none;
+}
+
+.caps-terminal__catalog li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  min-width: 0;
+  padding: var(--s-1) var(--s-2);
+  border-radius: var(--r-xs);
+  background: var(--bg-1);
+}
+
+/*
+   The command name is a BUTTON because clicking it replaces argv[0] in the line,
+   which is the whole point of the catalog. It must therefore look like a target
+   and be keyboard reachable, so it carries a border and a focus ring rather than
+   being bare text.
+*/
+.caps-terminal__catalog li > button {
+  appearance: none;
+  flex: 0 0 auto;
+  cursor: pointer;
+  padding: 1px var(--s-2);
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-xs);
+  background: var(--bg-3);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+
+.caps-terminal__catalog li > button:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.caps-terminal__catalog li > button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/*
+   The resolution note is the security-relevant part of a catalog entry: it says
+   which absolute path will actually run and through which trusted directory. It
+   is deliberately dimmer than the name and is allowed to wrap, because it is long
+   and truncating it would remove the part that matters.
+*/
+.caps-terminal__catalog-reason {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1.45;
+  color: var(--fg-4);
+  overflow-wrap: anywhere;
+}
+
+/* The refused-by-policy block. A different tone, because it is a refusal. */
+.caps-terminal__catalog details {
+  border: 1px solid var(--line-0);
+  border-radius: var(--r-sm);
+  background: var(--bg-1);
+}
+
+.caps-terminal__catalog details > summary {
+  padding: var(--s-2) var(--s-3);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-2);
+}
+
+.caps-terminal__catalog details > dl {
+  display: grid;
+  gap: var(--s-2);
+  margin: 0;
+  padding: 0 var(--s-3) var(--s-3);
+}
+
+.caps-terminal__catalog details > dl > div {
+  display: grid;
+  gap: var(--s-1);
+}
+
+/* ------------------------------------------------------------------ the run button */
+
+/*
+   `Run` sits at the end of the tab panel, not directly under `.caps-terminal`.
+
+   The panel is `<div id="terminal-mode-panel" role="tabpanel">`, so a
+   `.caps-terminal > button` rule matched nothing and the browser's default button
+   is what a visitor clicks to execute a command. That is the one control on this
+   route that must not look like a stray form control, so it is targeted by its
+   role instead -- which also keeps working if the panel is ever wrapped again.
+*/
+[role="tabpanel"] > button {
+  justify-self: start;
+  padding: var(--s-2) var(--s-5);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+[role="tabpanel"] > button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+[role="tabpanel"] > button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+[role="tabpanel"] > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+/* ------------------------------------------------------- reduced motion */
+
+/*
+   The global `prefers-reduced-motion` rule in index.css neutralises transitions
+   and animations app-wide. This block is repeated here because the terminal is
+   the one route that can be open for minutes at a time while a command runs, so
+   its disclosure and focus transitions are the ones a reader would notice most.
+*/
+@media (prefers-reduced-motion: reduce) {
+  /*
+     The catalog's own selector here used to be `.caps-terminal__catalog >
+     details > summary::before`, a disclosure triangle left over from when the
+     catalog was a list of `<details>`. It has been a plain `<ul>` ever since, so
+     the rule matched nothing and silently disabled no transition. It now names
+     the elements that actually carry one: the mode buttons, the catalog command
+     buttons, and the refused-by-policy summary.
+  */
+  .caps-terminal__modes button,
+  .caps-terminal__catalog li > button,
+  .caps-terminal__catalog details > summary {
+    transition: none;
+  }
+}

@@ -1,6 +1,6 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, Box, Cpu, Grid3x3, LineChart, MemoryStick, MousePointerClick, Orbit, Radio, RotateCcw, Tag, TriangleAlert } from "lucide-react";
+import { Focus, Grid3x3, MousePointerClick, Orbit, RotateCcw, TreePine, TriangleAlert } from "lucide-react";
 
 import { Button, Card, EmptyState } from "../ui";
 import { ProcessGraph } from "../execution/ProcessGraph";
@@ -16,12 +16,13 @@ import {
   type MetricMode,
   type SpaceNodeState,
 } from "../../lib/processSpace";
-import { buildEvidenceIndex, resolveSelection, type EvidenceSelection, type ProcessIdentity } from "../../lib/evidenceCorrelation";
+import { buildEvidenceIndex, cursorMsForIdentity, resolveSelection, type EvidenceSelection, type ProcessIdentity } from "../../lib/evidenceCorrelation";
 import { SpaceErrorBoundary } from "./SpaceErrorBoundary";
 import { detectWebGL, usePrefersReducedMotion } from "./webgl";
-import { CAMERA_PRESETS, CAMERA_PRESET_ORDER, type CameraPreset } from "./SceneChrome";
+import { CAMERA_PRESETS, CAMERA_PRESET_ORDER, type CameraPreset, type CameraRequest } from "./SceneChrome";
 import { EvidencePanel, ProcessList } from "./ProcessList";
 import { NodeTooltip } from "./NodeTooltip";
+import { SpaceLegend } from "./SpaceLegend";
 import type { HoverPoint } from "./ProcessSpaceScene";
 import type { CanonicalEvent, SessionRecord } from "../../types/observability";
 
@@ -79,12 +80,27 @@ export function ProcessSpace({
   const [failure, setFailure] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
   const [preset, setPreset] = useState<CameraPreset>(mode === "topology" ? "tree" : "timeline");
+  /*
+   * ONE camera request, not two counters.
+   *
+   * Reset and focus used to share a single counter, and only the reset effect
+   * depended on it, so pressing Focus (or `F`) on an already-selected node
+   * re-ran nothing and fell back to the global preset -- the exact opposite of
+   * what the button title and the shortcut help promised. `revision` is what
+   * the rig watches, so asking twice does the same thing as asking once, and
+   * asking for a different thing cannot be mistaken for the other one.
+   */
+  const [request, setRequest] = useState<CameraRequest>({ kind: "frame", revision: 0 });
+  const revision = useRef(0);
+  const requestCamera = useCallback((kind: CameraRequest["kind"]) => {
+    revision.current += 1;
+    setRequest({ kind, revision: revision.current });
+  }, []);
   const [followCursor, setFollowCursor] = useState(false);
   const [showMarkers, setShowMarkers] = useState(true);
   const [showLabels, setShowLabels] = useState(true);
   const [hovered, setHovered] = useState<{ key: string; point: HoverPoint } | null>(null);
   const [listHoverKey, setListHoverKey] = useState<string | null>(null);
-  const [resetToken, setResetToken] = useState(0);
   const [view, setView] = useState<"scene" | "table">("scene");
 
   const space = useMemo(() => buildProcessSpace(events), [events]);
@@ -112,7 +128,8 @@ export function ProcessSpace({
   // different dataset: both modes read the same evidence.
   useEffect(() => {
     setPreset(mode === "topology" ? "tree" : "timeline");
-  }, [mode]);
+    requestCamera("frame");
+  }, [mode, requestCamera]);
 
   const clearSelection = useCallback(() => {
     onSelectProcess(null);
@@ -120,11 +137,28 @@ export function ProcessSpace({
     onClearSelection();
   }, [onSelectProcess, onSelectEvidence, onClearSelection]);
 
+  /*
+   * Selecting a process is one store write: identity, no event, and the cursor
+   * that selection implies.
+   *
+   * The cursor goes to that process's FIRST RECORDED evidence -- its first procfs
+   * sample, or the event that established it when it is never sampled -- so the
+   * scene, the list and the inspector all read the same moment. In live the
+   * cursor is deliberately left following the newest evidence: pinning it to a
+   * single process's first sample would stop a running execution from advancing.
+   * Nothing here is local state; `selection` comes from the shared store.
+   */
   const selectNodeKey = useCallback(
     (key: string) => {
-      onSelectProcess(space.byKey.get(key)?.identity ?? null);
+      const identity = space.byKey.get(key)?.identity ?? null;
+      const atMs = identity === null || live ? null : cursorMsForIdentity(identity, index);
+      onSelectEvidence(null, identity, atMs);
+      // Requested here as well as in the effect below, so clicking the node
+      // that is ALREADY selected re-frames it. The effect can only see a
+      // selection that changed; the click is the reader asking again.
+      requestCamera("focus");
     },
-    [space.byKey, onSelectProcess],
+    [space.byKey, index, live, onSelectEvidence, requestCamera],
   );
 
   const selectMarker = useCallback(
@@ -133,6 +167,27 @@ export function ProcessSpace({
     },
     [space.byKey, onSelectEvidence],
   );
+
+  const choosePreset = useCallback(
+    (next: CameraPreset) => {
+      setPreset(next);
+      requestCamera("frame");
+    },
+    [requestCamera],
+  );
+
+  /** Focus is a no-op with nothing selected: there is nothing to frame. */
+  const focusSelected = useCallback(() => {
+    if (selectedKey === null) return;
+    requestCamera("focus");
+  }, [selectedKey, requestCamera]);
+
+  // Choosing a process frames it, from any surface: the canvas, the list or the
+  // table. One effect, so all three behave identically.
+  useEffect(() => {
+    if (selectedKey === null) return;
+    requestCamera("focus");
+  }, [selectedKey, requestCamera]);
 
   // Keyboard shortcuts. R and F are scoped to this view; Space, arrows and
   // Escape act on the shared cursor through the page's own handlers.
@@ -144,17 +199,17 @@ export function ProcessSpace({
       const key = event.key.toLowerCase();
       if (key === "r") {
         event.preventDefault();
-        setResetToken((token) => token + 1);
+        requestCamera("frame");
       } else if (key === "f") {
         event.preventDefault();
-        setResetToken((token) => token + 1);
+        focusSelected();
       } else if (event.key === "Escape") {
         clearSelection();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [clearSelection]);
+  }, [clearSelection, focusSelected, requestCamera]);
 
   const unavailable = webgl.supported ? null : webgl.reason;
   const lensSpec = LENS_SPECS[lens];
@@ -199,7 +254,7 @@ export function ProcessSpace({
             key={key}
             size="sm"
             variant={preset === key ? "primary" : "ghost"}
-            onClick={() => setPreset(key)}
+            onClick={() => choosePreset(key)}
             title={CAMERA_PRESETS[key].meaning}
           >
             {CAMERA_PRESETS[key].label}
@@ -209,12 +264,28 @@ export function ProcessSpace({
         <Toggle active={followCursor} onClick={() => setFollowCursor((value) => !value)} label="Follow cursor" />
         <Toggle active={showMarkers} onClick={() => setShowMarkers((value) => !value)} label="Event markers" />
         <Toggle active={showLabels} onClick={() => setShowLabels((value) => !value)} label="HUD labels" />
-        <Button size="sm" variant="ghost" onClick={() => setResetToken((token) => token + 1)} title="Reset the camera (R)">
-          <RotateCcw className="h-3 w-3" /> Reset
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 text-[11px]">
+        <Button size="sm" variant="ghost" onClick={() => requestCamera("frame")} title="Reframe the whole record from the current preset (R)">
+          <RotateCcw className="h-3 w-3" /> Reset view
         </Button>
-        <Button size="sm" variant="ghost" onClick={() => setResetToken((token) => token + 1)} disabled={selectedKey === null} title="Frame the selected process (F)">
-          <MousePointerClick className="h-3 w-3" /> Focus
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={focusSelected}
+          disabled={selectedKey === null}
+          title={selectedKey === null ? "Select a process first (F)" : "Frame the selected process (F)"}
+        >
+          <Focus className="h-3 w-3" /> Focus selected
         </Button>
+        <Button size="sm" variant="ghost" onClick={() => choosePreset("tree")} title="Fit the whole observed process tree, looking down the time axis">
+          <TreePine className="h-3 w-3" /> Fit process tree
+        </Button>
+        <span className="ml-auto flex items-center gap-1 font-mono text-[9.5px] text-[var(--fg-4)]">
+          <MousePointerClick className="h-3 w-3" />
+          R reframes · F frames the selection · camera moves are eased, never cut
+        </span>
       </div>
 
       {view === "scene" ? (
@@ -232,13 +303,13 @@ export function ProcessSpace({
                     cursorActive={cursorActive}
                     mode={lens}
                     preset={preset}
+                    request={request}
                     followCursor={followCursor}
                     showMarkers={showMarkers}
                     reducedMotion={reducedMotion}
                     selectedKey={selectedKey}
                     emphasis={emphasis}
                     selectedSequence={resolution.markerSequence}
-                    resetToken={resetToken}
                     onSelect={(key) => (key === null ? clearSelection() : selectNodeKey(key))}
                     onHover={(key, point) => setHovered(key === null || point === null ? null : { key, point })}
                     onSelectEvent={selectMarker}
@@ -295,7 +366,7 @@ export function ProcessSpace({
         onClear={clearSelection}
       />
 
-      <Legend lens={lens} />
+      <SpaceLegend lens={lens} />
 
       {/* The honest limits of this record, stated where they are seen. A
           fork-tree workload shows two nodes, and the reader is told why. */}
@@ -518,32 +589,6 @@ function Field({ label, value }: { label: string; value: string }) {
 }
 
 /** §33: the legend that keeps the encoding unambiguous. */
-function Legend({ lens }: { lens: MetricMode }) {
-  const spec = LENS_SPECS[lens];
-  const items = [
-    { icon: <Box className="h-3 w-3 text-[var(--accent)]" />, text: "Node — one observed process" },
-    { icon: <LineChart className="h-3 w-3 text-[var(--blue)]" />, text: "Edge — verified parent/child (observed PPID match)" },
-    { icon: <MemoryStick className="h-3 w-3 text-[var(--cyan)]" />, text: `Node size — ${spec.label}: ${spec.unit}` },
-    { icon: <Radio className="h-3 w-3 text-[var(--green)]" />, text: "Ring — recorded activity for the active lens" },
-    { icon: <Tag className="h-3 w-3 text-[var(--violet)]" />, text: "Ring — recorded execvp() image change (same PID)" },
-    { icon: <AlertTriangle className="h-3 w-3 text-[var(--amber)]" />, text: "Diamond — recorded lifecycle event; click to select the event" },
-  ];
-  return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded border border-[var(--line-0)] bg-[var(--bg-1)] px-3 py-2 font-mono text-[9.5px] text-[var(--fg-3)]">
-      {items.map((item) => (
-        <span key={item.text} className="flex items-center gap-1.5">
-          {item.icon}
-          {item.text}
-        </span>
-      ))}
-      <span className="flex items-center gap-1.5 text-[var(--fg-2)]">
-        <Cpu className="h-3 w-3" />
-        Positions, sizes, colours and activity are visualization mappings of recorded state, not physical properties.
-      </span>
-    </div>
-  );
-}
-
 function Segmented({ label, value, options, onChange }: { label: string; value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void }) {
   // aria-labelledby takes a space-separated id *list*, so the generated id has
   // to be a single token. A multi-word label would otherwise resolve to nothing

@@ -187,11 +187,6 @@ function splitTokens(line: string): string[] {
   return tokens;
 }
 
-/** The stage count the grammar allows, for the input's own limit indicator. */
-export function stageLimit(grammar: GrammarResponse | null): number {
-  return grammar?.limits.maxStages ?? 16;
-}
-
 /**
  * Whether the line exceeds a stated grammar limit, checked on the CLIENT only
  * to give immediate feedback.
@@ -253,4 +248,25 @@ export function filterCommands<T extends { name: string }>(commands: readonly T[
 export function nextCommandIndex(current: number, length: number): number {
   if (length === 0) return 0;
   return (current + 1) % length;
+}
+
+/**
+ * The command name at the start of a line, for the catalog's prefix hint.
+ *
+ * This is the ONE place the browser may look at a command line's structure, and
+ * it deliberately reads no further than argv[0]: it skips leading whitespace and
+ * takes the first run of non-whitespace. It does not need to know about quotes,
+ * because argv[0] cannot be quoted in a way that changes which word it is -- a
+ * line beginning `"echo"` is not a command this product can run anyway, since
+ * argv[0] must be a bare allowlisted name.
+ *
+ * The distinction matters because the alternative -- `split(/\s+/)[0]` -- is what
+ * this replaced, and the broader habit it belongs to is the bug: a caller that
+ * wants to rewrite the line uses a whole-array split and mangles quoted arguments
+ * in transit. Returning only the token, so the line itself is never reassembled,
+ * removes that possibility.
+ */
+export function firstToken(line: string): string | null {
+  const match = /^\s*(\S+)/.exec(line);
+  return match?.[1] ?? null;
 }

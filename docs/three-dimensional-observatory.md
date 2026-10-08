@@ -50,9 +50,34 @@ so a reader who runs `caps_fork_tree` can see exactly why there are two nodes
 rather than a tree. See [process telemetry](telemetry.md) for why the sample set
 is what it is.
 
+## What is derived, and what is only presentation
+
+`position`, `size`, `colour` and `activity` are each a **pure function of the
+record**: the same execution draws the same geometry every time, for every
+reader. Nothing is interpolated between samples and nothing is wall-clock.
+
+The one thing that moves on a clock is the slow idle turn and emissive pulse of a
+node that is still running. It is deliberately on channels that encode nothing:
+**rotation** and **emissive intensity**, both bounded by fixed ceilings, never
+**size** (size is RSS) and never position. It is switched off entirely when the
+process is terminal, when the active lens recorded nothing, and when
+`prefers-reduced-motion` is set. It once displaced `position` by a wall-clock
+sine, which made two readers of the same record see different geometry and made
+the page's own "every position is a mapping of recorded state" claim false.
+
+Node **colour** is the lifecycle state and nothing else, using the product's
+semantic tokens — cyan active/observed, violet execution transition, emerald
+successful completion, amber signal or timeout, red failure, and neutral greys
+for "the record cannot place this process in a state at this cursor". That
+includes the CAPS engine node, which used to be painted a fixed grey: colour
+meant "unsampled" there instead of "this process is running, or has been
+reaped". Its missing sample is stated by its minimum size, its absent activity
+ring, and the note in the tooltip and the table — the channels that can state an
+absence without misstating a lifecycle.
+
 ## Coordinate system
 
-One deterministic mapping, used by both camera presets:
+One deterministic mapping, used by every camera preset:
 
 | Axis | Meaning |
 | --- | --- |
@@ -73,6 +98,39 @@ datasets:
   makes parent/child structure readable.
 - **Timeline** looks along the time axis, so the run reads like a flight-recorder
   strip: lifetime bars, exec markers and gaps in the record are what you see.
+
+## Camera presets, and what a camera move is allowed to do
+
+The preset set is **Orbit**, **Process tree**, **Timeline**, **Top**, **Side**
+and **Fit**. A preset is a *direction*, never a coordinate: the camera's distance
+from its target is derived from the bounding sphere of what the record actually
+draws (`sceneBounds`, from the same `nodePosition` mapping, the largest radius a
+node can reach, each node's recorded lifetime along Z, and the grid's own
+extent), divided by the camera's real field of view and aspect ratio. A 40 ms run
+and a 40 s run therefore both land framed, and a narrow window does not clip the
+record.
+
+| Control | Effect |
+| --- | --- |
+| Reset view (`R`) | Reframe the whole record from the current preset direction. |
+| Focus selected (`F`) | Frame the selected process. A **no-op when nothing is selected** — there is nothing to frame, and it is never a reset. |
+| Fit process tree | The `tree` direction, refitted to the whole observed record, looking down the time axis. |
+
+Focus has its own request counter, separate from Reset. Both used to bump one
+shared counter that only the reset path read, so `F` on an already-selected node
+re-ran nothing and silently reset the camera — the opposite of what the button
+title and the shortcut help promised.
+
+Every one of these moves is expressed as a goal and consumed by the **same
+exponential lerp** (`1 - exp(-7·dt)`). No path assigns the camera position
+outright, so a preset is never an abrupt cut. The single exception is
+`prefers-reduced-motion`, where the lerp factor is 1 and the move is instant
+*by design*: that is the accessibility contract, not a shortcut.
+
+A framing is requested, not tracked. The rig's effect keys on the request and on
+the scene's extent, so a fresh procfs snapshot for a process that already exists
+cannot re-centre the view behind a reader who is orbiting it. `Follow cursor`
+remains the only automatic camera motion, and it is opt-in.
 
 ## The shared cursor
 
@@ -260,7 +318,13 @@ dropping the reader out of it.
   pointer.
 - Every value in the scene has a textual equivalent; the encoding legend is
   always visible so no visual channel is ambiguous.
-- Shortcuts: `R` reset camera, `F` focus selection, `Space` toggle replay,
+- The legend is **below** the scene, not over it, and it is generated from the
+  view-model: the lifecycle colours come from `statePalette`/`spaceStateLegend`,
+  the lens list and each lens's unit from `LENS_SPECS`, and the three provenance
+  classes from the shared `ProvenanceBadge`. A legend written out by hand beside
+  the model is a legend that eventually describes a state the scene cannot
+  produce.
+- Shortcuts: `R` reset view, `F` focus selection, `Space` toggle replay,
   `←`/`→` step between samples, `Esc` clear selection. The app-wide single-letter
   shortcuts are untouched, and typing in a field triggers nothing.
 

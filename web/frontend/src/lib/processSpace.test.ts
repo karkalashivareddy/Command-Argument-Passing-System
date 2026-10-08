@@ -188,7 +188,10 @@ describe("causal cursor state", () => {
     // The first recorded sample cannot have a CPU rate: the backend says so.
     const state = nodeStateAt(space, 1000, child);
     expect(state.visual).not.toBeNull();
-    expect(state.visual?.raw.cpuPercent).toBeNull();
+    // Both the value AND the class, because the failure this guards is a missing
+    // rate being drawn or labelled as though it had been measured.
+    expect(state.visual?.raw.cpuPercent.value).toBeNull();
+    expect(state.visual?.raw.cpuPercent.provenance).toBe("UNAVAILABLE");
     expect(state.visual?.unavailable.length).toBeGreaterThan(0);
   });
 

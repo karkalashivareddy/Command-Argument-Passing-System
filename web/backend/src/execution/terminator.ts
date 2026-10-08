@@ -105,7 +105,7 @@ export function resetIdentityCache(): void {
  * recycled -- collapsing them into a boolean loses the only part an operator
  * needs in order to trust the record.
  */
-export type SignalMechanism = "pidfd" | "kill" | "none";
+export type SignalMechanism = "pidfd" | "kill" | "kill-group" | "none";
 
 /** POSIX signal numbers, so a name can be handed to the C helper. */
 const SIGNAL_NUMBERS: Readonly<Record<string, number>> = {
@@ -253,25 +253,177 @@ export async function escalateTo(
   }
 }
 /**
+ * Signal an entire process group, after verifying the group leader's identity.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * The engine already puts every stage of a pipeline into one process group
+ * (src/process.c: stage 0 calls setpgid(0,0) and the rest join it), and records
+ * that pgid on every per-stage event. The group was then used as EVIDENCE only:
+ * both the timeout path and the terminate path called kill() on a single PID.
+ * Two things followed from that, and both were wrong in a way a reviewer notices:
+ *
+ *   1. `runner.observe` sets `childPid` on every `process.started`, so for an
+ *      N-stage pipeline the gateway's kill handle was the LAST stage's PID.
+ *      A timeout could leave stages 0..N-2 running, and the session would be
+ *      finalised as TIMED_OUT while they were still executing.
+ *   2. The documented claim -- published verbatim by GET /api/terminal/grammar --
+ *      was "a timeout or a signal reaches the whole pipeline". It did not.
+ *
+ * WHY IT IS SAFE TO SIGNAL A NEGATIVE PID
+ * ---------------------------------------
+ * `kill(-pgid, sig)` has no identity check of its own: if the group id had been
+ * recycled it would hit an unrelated group. So this function establishes that the
+ * group is still CAPS's before signalling:
+ *
+ *   - the leader's start ticks must equal the ticks CAPS recorded for it, which
+ *     is the same check `escalateTo` performs and which a recycled PID cannot pass;
+ *   - the leader's own pgrp field must equal the pgid, proving the process it
+ *     just read is really the leader of the group being addressed rather than an
+ *     unrelated member that happens to share the number;
+ *   - the group id must be strictly greater than 1, so a bug can never produce
+ *     `kill(-1)` (which would signal every process the gateway may signal).
+ *
+ * If any check fails, nothing is signalled and the caller is told why, so the
+ * single-PID path can still run rather than the execution being abandoned.
+ *
+ * pidfd cannot address a process group -- the kernel handle is per-process -- so
+ * this path is necessarily a kill(2). It is recorded as such: `mechanism` says
+ * `kill-group`, never `pidfd`, so the audit record never claims a kernel-bound
+ * verification it did not get. The leader's identity was still checked first.
+ */
+export function signalProcessGroup(
+  pgid: number | null,
+  leader: ProcessIdentity | null,
+  signal: NodeJS.Signals | number,
+): SignalResult {
+  if (pgid === null || pgid <= 1) {
+    return { sent: false, reason: "no verified process group", identity: null, mechanism: "none" };
+  }
+  if (leader === null) {
+    return {
+      sent: false,
+      reason: "process group observed but its leader's identity was never recorded",
+      identity: null,
+      mechanism: "none",
+    };
+  }
+
+  // The leader must be the process that is actually still there.
+  const current = readProcessIdentity(leader.pid);
+  if (current === null) {
+    return {
+      sent: false,
+      reason: "group leader is gone; falling back to the single recorded PID",
+      identity: null,
+      mechanism: "none",
+    };
+  }
+  if (current.startTicks !== leader.startTicks) {
+    logger.warn("SECURITY", "refusing to signal a process group whose leader was recycled", {
+      pgid,
+      pid: leader.pid,
+      expectedStartTicks: leader.startTicks,
+      actualStartTicks: current.startTicks,
+    });
+    return {
+      sent: false,
+      reason:
+        `group leader PID ${leader.pid} was reused (start ticks ${leader.startTicks} -> ${current.startTicks}); refusing to signal group ${pgid}`,
+      identity: current,
+      mechanism: "none",
+    };
+  }
+
+  // Proves the process just read is the leader of THIS group, not a bystander.
+  let leaderPgid: number | null = null;
+  try {
+    const stat = readFileSync(`/proc/${leader.pid}/stat`, "utf8");
+    const afterComm = stat.lastIndexOf(")");
+    if (afterComm > 0) leaderPgid = Number.parseInt(stat.slice(afterComm + 2).split(" ")[2] ?? "", 10);
+  } catch {
+    leaderPgid = null;
+  }
+  if (leaderPgid === null || Number.isNaN(leaderPgid)) {
+    return {
+      sent: false,
+      reason: "could not read the group leader's pgrp field; not signalling the group",
+      identity: current,
+      mechanism: "none",
+    };
+  }
+  if (leaderPgid !== pgid) {
+    logger.warn("SECURITY", "refusing to signal a process group the leader does not lead", {
+      pgid,
+      leaderPid: leader.pid,
+      leaderPgid,
+    });
+    return {
+      sent: false,
+      reason: `PID ${leader.pid} leads group ${leaderPgid}, not the requested group ${pgid}; refusing to signal it`,
+      identity: current,
+      mechanism: "none",
+    };
+  }
+
+  try {
+    kill(-pgid, signal as number);
+    return { sent: true, reason: null, identity: current, mechanism: "kill-group" };
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    return {
+      sent: false,
+      reason: e.code === "ESRCH" ? "process group is empty (ESRCH)" : e.message,
+      identity: current,
+      mechanism: "none",
+    };
+  }
+}
+
+/**
  * Graceful termination with a verified escalation.
  *
  * SIGTERM first, then SIGKILL after `gracefulMs` -- but the SIGKILL is sent
  * only if the identity still matches.  Returns a handle the caller can await,
  * which is what lets shutdown be a sequence rather than a race.
+ *
+ * `group` is optional and is preferred when present and provable. The escalation
+ * itself is always per-process, because pidfd binds to a single process and the
+ * leader is the only member whose identity CAPS recorded -- so a pipeline is
+ * stopped by signalling the group first and then escalating against the leader.
+ * That combination is what makes "a timeout reaches every stage" true without
+ * ever signalling a group whose ownership was not verified.
  */
 export function terminateGracefully(
   pid: number | null,
   gracefulMs: number,
+  options: { signal?: NodeJS.Signals; group?: { pgid: number | null; leader: ProcessIdentity | null } | null } = {},
 ): {
   identity: ProcessIdentity | null;
+  first: SignalResult;
   waitForEscalation: () => Promise<{ sent: boolean; reason: string; mechanism: SignalMechanism }>;
 } {
-  const result = signalChild(pid, "SIGTERM");
+  /*
+   * The first signal is the caller's, not SIGTERM.
+   *
+   * This function used to take no signal at all and always sent SIGTERM, which
+   * was correct only because it had exactly one caller and that caller wanted
+   * SIGTERM. When the group path was added, the terminate API's own signal --
+   * SIGINT, as the tests and the UI request -- was being replaced by SIGTERM on
+   * the way through. A user asking for SIGINT got SIGTERM, and the session was
+   * recorded as `exit_code 143` instead of `130`, which is the shell convention
+   * for a signal the caller never asked to send. The escalation is always
+   * SIGKILL and stays hardcoded below.
+   */
+  const signal: NodeJS.Signals = options.signal ?? "SIGTERM";
+  const asGroup = options.group ? signalProcessGroup(options.group.pgid, options.group.leader, signal) : null;
+  const result = asGroup !== null && asGroup.sent ? asGroup : signalChild(pid, signal);
   const identity = result.identity;
 
   if (!result.sent) {
     return {
       identity,
+      first: result,
       waitForEscalation: async () => ({
         sent: false,
         reason: result.reason ?? "not signalled",
@@ -280,28 +432,35 @@ export function terminateGracefully(
     };
   }
 
+  // Escalation targets the recorded PID: it is the one whose identity exists to
+  // be checked, and pidfd cannot address a group.
+  const escalationTarget = pid ?? identity?.pid ?? null;
+
   return {
     identity,
+    first: result,
     waitForEscalation: () =>
       new Promise((resolve) => {
         const timer = setTimeout(() => {
-          void escalateTo(identity, "SIGKILL").then((outcome) => {
-            if (!outcome.sent) {
-              logger.info("EXECUTION", "escalation skipped", {
-                pid,
-                reason: outcome.reason,
-                mechanism: outcome.mechanism,
-              });
-            } else {
-              logger.info("EXECUTION", "escalation delivered", {
-                pid,
-                mechanism: outcome.mechanism,
-              });
-            }
-            // The mechanism travels with the outcome, so a caller recording
-            // "terminated" also records HOW it was terminated.
-            resolve({ sent: outcome.sent, reason: outcome.reason, mechanism: outcome.mechanism });
-          });
+          void escalateTo(escalationTarget !== null ? { pid: escalationTarget, startTicks: identity?.startTicks ?? -1 } : null, "SIGKILL").then(
+            (outcome) => {
+              if (!outcome.sent) {
+                logger.info("EXECUTION", "escalation skipped", {
+                  pid: escalationTarget,
+                  reason: outcome.reason,
+                  mechanism: outcome.mechanism,
+                });
+              } else {
+                logger.info("EXECUTION", "escalation delivered", {
+                  pid: escalationTarget,
+                  mechanism: outcome.mechanism,
+                });
+              }
+              // The mechanism travels with the outcome, so a caller recording
+              // "terminated" also records HOW it was terminated.
+              resolve({ sent: outcome.sent, reason: outcome.reason, mechanism: outcome.mechanism });
+            },
+          );
         }, Math.max(0, gracefulMs));
         timer.unref?.();
       }),

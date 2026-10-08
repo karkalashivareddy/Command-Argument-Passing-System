@@ -1,6 +1,20 @@
-# Development Phases
+# Development Phases (1.x)
 
-Status: **live roadmap** (updated as phases complete)
+> **HISTORICAL — not current truth.**
+> This file records the engineering roadmap of the **1.x** line, phase by
+> phase, as it stood then. It is not a live roadmap and not a statement about
+> the shipped product. The current product is **2.0.0**; the authoritative
+> verification record is
+> [`audit/RELEASE_VERIFICATION_2_0_0.md`](audit/RELEASE_VERIFICATION_2_0_0.md)
+> and the authoritative change list is [`../CHANGELOG.md`](../CHANGELOG.md).
+>
+> The one place this file would mislead a reader today is **pipelines**.
+> Phase 8b below is recorded as skipped, because through 1.x that was true.
+> **Pipelines shipped in 2.0.0** and are the flagship feature of that release:
+> `|` on a single command or across stages, per-stage process groups with
+> stage 0 as leader, and per-stage redirection including `2>` and `2>>`. See
+> CHANGELOG 2.0.0 and [`architecture.md`](architecture.md). Any statement in
+> this file about pipelines being unimplemented describes 1.x, not 2.0.
 
 This file records the engineering roadmap and the actual state of each
 phase. A phase is marked complete only after it has been implemented,
@@ -21,7 +35,7 @@ compiled, tested, reviewed, and committed.
 | 6     | Automated testing                         | Complete | `d258be7` |
 | 7     | Basic signal handling                     | Complete | `5789864` |
 | 8a    | Redirection (>, >>, <)                    | Complete | `11cf4ba` |
-| 8b    | Pipeline (pipe)                           | Skipped — not implemented, documented as planned |
+| 8b    | Pipeline (pipe)                           | Skipped in 1.x — **shipped in 2.0.0** |
 | 9     | Final documentation                       | Complete | `c649b16` |
 | 10    | CI + final engineering review             | Complete | `35b532f`, `68ed348` |
 | 11    | Hardening + real-time execution monitoring | Complete | `0047170`, `6dc7f94`, `c9e9cff`, `ed63649`, `11fad6b`, `7c251e7`, `c84f1f0` |
@@ -202,10 +216,19 @@ Deliverables:
 
 ---
 
-## Phase 8b — Pipeline (not implemented)
+## Phase 8b — Pipeline (skipped in 1.x, shipped in 2.0.0)
 
-`cmd1 | cmd2` via `pipe()` + two `fork()`s + `dup2()` remains planned
-and is documented as such; it is not implemented.
+**As of 1.x:** `cmd1 | cmd2` via `pipe()` + two `fork()`s + `dup2()`
+remained planned, and this phase was deliberately skipped.
+
+**As of 2.0.0:** implemented, and it is the flagship feature of that
+release. `pipe()` + `fork()`s + `dup2()` is real, plus: the pipeline runs
+as one execution with N stages, its own process group with stage 0 as
+leader, per-stage redirection attaching to the stage it is written on,
+`2>` and `2>>` stderr forms, and `PIPELINE_PARSED` / `PIPELINE_STARTED` /
+`PIPELINE_COMPLETED` monitor events. See CHANGELOG 2.0.0,
+[`architecture.md`](architecture.md), and
+[`monitor.md`](monitor.md).
 
 ---
 
@@ -260,8 +283,13 @@ Deliverables:
   0..255)` and continuing the REPL. Regression:
   `tests/test_exit_parse.sh`.
 - **Signal setup error handling** (`src/signals.c`): `sigaction`
-  failures are reported instead of ignored (parent warns and
-  continues; child warns and proceeds to `exec`).
+  failures are reported and are **fatal to the operation**, not ignored
+  and not degraded. The current policy is fail-closed: `main()` refuses
+  to start if the parent's signal model cannot be initialised, and
+  `process.c` refuses to call `execvp()` if the child cannot restore
+  `SIGINT`/`SIGPIPE` to their defaults, reporting the errno on the status
+  pipe and exiting 126 instead. (This supersedes the original
+  warn-and-continue behaviour implemented in this phase.)
 - **Documentation accuracy:** the post-`fork()` child is no longer
   described as an async-signal-safe/signal-handler context; the
   whitespace-required redirection grammar and multiple-redirection

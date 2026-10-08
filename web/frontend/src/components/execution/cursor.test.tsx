@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CanonicalEvent, TelemetryMetric } from "../../types/observability";
@@ -103,16 +103,73 @@ describe("shared execution-time cursor", () => {
     expect(document.body.textContent).toContain("cursor follows the newest sample");
   });
 
-  it("moves the cursor when a track is clicked", () => {
+  it("moves the cursor when a track is pressed", () => {
     const onSeek = vi.fn();
     const { container } = render(<Timeline events={events} cursorMs={null} onSeek={onSeek} />);
-    const tracks = container.querySelector('[role="group"][aria-label*="cursor"]');
-    expect(tracks).not.toBeNull();
-    tracks!.getBoundingClientRect = () => ({ left: 0, width: 1000, top: 0, height: 300, right: 1000, bottom: 300, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
-    tracks!.dispatchEvent(new MouseEvent("click", { clientX: 500, bubbles: true }));
-    // The click lands mid-span of a 1.0 s execution.
+    /*
+     * role="slider", and seeking is on POINTERDOWN rather than click.
+     *
+     * Both are deliberate. This control used to be a click-only div labelled
+     * "click or drag"; it is now a real slider, because it has a position along
+     * an axis and hiding that behind a div meant the cursor could only be moved
+     * by a pointer. Seeking moved to pointerdown for the same reason the old
+     * `onClick` was wrong: a click fires at the end of a drag, so a drag ending
+     * outside the element still fired, and the cursor landed at the RELEASE
+     * position rather than the press position.
+     *
+     * A synthesised MouseEvent("click") is therefore no longer the right way to
+     * drive this control, and firing one would assert behaviour that no longer
+     * exists.
+     */
+    const track = container.querySelector('[role="slider"][aria-label*="cursor" i]');
+    expect(track).not.toBeNull();
+    track!.getBoundingClientRect = () => ({ left: 0, width: 1000, top: 0, height: 300, right: 1000, bottom: 300, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+    fireEvent.pointerDown(track!, { clientX: 500 });
+    // The press lands mid-span of a 1.0 s execution.
     expect(onSeek).toHaveBeenCalledOnce();
     expect(onSeek.mock.calls[0]![0]).toBeGreaterThan(400);
     expect(onSeek.mock.calls[0]![0]).toBeLessThanOrEqual(1_000);
+  });
+
+  it("exposes the cursor position as slider semantics, not only a click target", () => {
+    const onSeek = vi.fn();
+    const { container } = render(<Timeline events={events} cursorMs={500} onSeek={onSeek} />);
+    const track = container.querySelector('[role="slider"]')!;
+    /*
+     * Asserted with plain attribute reads: this project uses vitest's own expect
+     * without jest-dom, so `toHaveAttribute` does not exist and would silently
+     * be a type error rather than a passing assertion.
+     *
+     * A slider must publish its range and current value or assistive technology
+     * cannot announce it, and must be focusable or the keyboard arm is unreachable.
+     */
+    expect(track.getAttribute("tabindex")).toBe("0");
+    expect(track.getAttribute("aria-valuemin")).toBe("0");
+    expect(track.getAttribute("aria-valuemax")).not.toBeNull();
+    expect(track.getAttribute("aria-valuenow")).toBe("500");
+    // Announced in seconds, because a raw millisecond count means nothing aloud.
+    expect(track.getAttribute("aria-valuetext")).toContain("s");
+    expect(track.getAttribute("aria-orientation")).toBe("horizontal");
+  });
+
+  it("moves the cursor with the keyboard", () => {
+    const onSeek = vi.fn();
+    const { container } = render(<Timeline events={events} cursorMs={500} onSeek={onSeek} />);
+    const track = container.querySelector('[role="slider"]')!;
+    track.getBoundingClientRect = () => ({ left: 0, width: 1000, top: 0, height: 300, right: 1000, bottom: 300, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+
+    // Arrow right must advance the cursor: this is the interaction that did not
+    // exist before, and it is the one a keyboard-only reader depends on.
+    fireEvent.keyDown(track, { key: "ArrowRight" });
+    expect(onSeek).toHaveBeenCalled();
+    const afterArrow = onSeek.mock.calls.at(-1)![0] as number;
+    expect(afterArrow).toBeGreaterThan(500);
+
+    onSeek.mockClear();
+    // Home jumps to the start of the record, End to the end.
+    fireEvent.keyDown(track, { key: "Home" });
+    expect(onSeek.mock.calls.at(-1)![0]).toBe(0);
+    fireEvent.keyDown(track, { key: "End" });
+    expect(onSeek.mock.calls.at(-1)![0]).toBeGreaterThanOrEqual(1_000);
   });
 });

@@ -162,25 +162,49 @@ tested in Phase 4.)
 
 ---
 
-## 9. What the parser deliberately does *not* do
+## 9. What the lexer does, and what it deliberately does not
 
-Documented limitations (single space rule aside):
+The lexer that runs is `parser_tokenize()`, and it is a strict subset of POSIX.
+Its rules, as implemented:
 
-- no quoted strings — `echo "hello world"` stays **three** tokens:
-  `"` is a regular character;
-- no escapes — backslash is literal;
-- no glob expansion — `*.c` is passed literally;
-- no environment or tilde expansion — `$HOME`, `~` stay literal;
-- no pipes, background `&`, `&&`, `||`.
+| Construct | Behaviour |
+| --- | --- |
+| unquoted space, tab, newline | separates tokens; runs compress to one separator |
+| `'...'` | single-quoted: **every** byte literal, backslash included; the closing quote must exist |
+| `"..."` | double-quoted; inside, backslash escapes only `" \ $ \`` and newline, so `"\d"` stays `\d` |
+| `\` outside quotes | escapes the next byte |
+| `#` | starts a comment only at the **beginning** of a token, which is why `echo a#b` prints `a#b` |
+| unterminated quote, over-long token or line, too many tokens, embedded NUL | `-2`, with a message on stderr and the out-parameters untouched |
 
-Redirection is the one extra-token feature the parser does handle:
-`parser_split_redirections()` (see `docs/redirection.md`) recognizes
-`<`, `>`, and `>>` as whole tokens in the interactive REPL and removes
-them from the argv handed to `execvp()`.
+Deliberately **not** implemented, and therefore inert literal bytes rather than
+syntax: variable expansion, command substitution, subshells, globbing, brace
+expansion, tilde expansion, job control, and lists. `*.c` and `$HOME` reach the
+program unchanged; `*` and `?` are never expanded by CAPS, because CAPS is not a
+shell. On the pipeline layer, `|` splits stages, `&`, `&&`, `||`, and `;` do not
+exist.
 
-Each limitation is intentional and keeps the argument-passing story
-clear. A future tokenizer may add quoting; the module boundary makes
-that a local change.
+### Two lexers exist; only one of them runs
+
+This distinction matters when reading recorded output, so it is stated rather
+than left to be discovered:
+
+| | `parser_tokenize()` | `parser_parse()` |
+| --- | --- | --- |
+| used by | the REPL, `--inspect`, and `--run-line` — i.e. **everything that executes** | only `caps --parse` |
+| quoting and escapes | honoured | whitespace only; `"` and `\` are ordinary bytes |
+| role | the one lexer in the product | a legacy whitespace-only split, retained because `tests/test_parser.sh` pins its behaviour |
+
+So `caps --parse 'echo "a b"'` prints three tokens — `"a` and `b"` — because it
+is showing you the debug split, **not** the argv the program would receive. The
+same line executed prints `a b`. `tests/test_parser.sh` line 67 pins that
+`--parse` behaviour deliberately, so a change there is a change to a documented
+contract rather than a regression to fix quietly.
+
+Redirection is handled one layer up, as whole tokens, by
+`parser_split_redirections()` (see [`redirection.md`](redirection.md)): `<`, `>`,
+`>>`, `2>`, and `2>>` are removed from the argv handed to `execvp()`. Anything
+glued to an operator (`cmd>file`) stays one literal token, because the
+tokeniser has no rule that could split it.
 
 ---
 

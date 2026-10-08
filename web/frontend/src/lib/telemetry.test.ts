@@ -307,13 +307,70 @@ describe("buildVisualStates", () => {
     expect(states[2]!.memory).toBe(1);
     expect(states[0]!.memory).toBe(0.25);
     expect(states[0]!.cpu).toBeNull();
-    expect(states[0]!.raw.cpuPercent).toBeNull();
+    // `raw` carries provenance, so the assertion is on `.value` and the class is
+    // checked alongside it. Asserting only the value would pass whether the
+    // metric was UNAVAILABLE or a genuine zero, which is the distinction this
+    // whole boundary exists to keep.
+    expect(states[0]!.raw.cpuPercent.value).toBeNull();
+    expect(states[0]!.raw.cpuPercent.provenance).toBe("UNAVAILABLE");
+    expect(states[0]!.raw.cpuPercent.reason).toBe(FIRST_SAMPLE_REASON);
     expect(states[0]!.unavailable.some((u) => u.reason === FIRST_SAMPLE_REASON)).toBe(true);
     expect(states[1]!.io).toBe(1);
-    expect(states[1]!.raw.wcharBytesPerSec).toBe(128 * 1024);
+    expect(states[1]!.raw.wcharBytesPerSec.value).toBe(128 * 1024);
     expect(states[1]!.pid).toBe(100);
     expect(states[1]!.capsEnginePid).toBe(40);
     expect(states[1]!.sequence).toBeGreaterThan(0);
+  });
+
+  /*
+   * Provenance survives the boundary into the 3D view-model.
+   *
+   * These are the assertions that were impossible to write before `raw` stopped
+   * being a bag of numbers. Previously there was no way to ask a visual state
+   * whether a value was derived, so the scene, the HUD, the node table and the
+   * tooltip all had to treat an OBSERVED gauge and nine DERIVED rates as the same
+   * kind of thing.
+   */
+  it("keeps provenance attached to every recorded value", () => {
+    const states = buildVisualStates(collectSamples(events(...RAMPS_UP)));
+    const sampled = states[2]!;
+
+    // RSS is read straight out of /proc/<pid>/status.
+    expect(sampled.raw.rssBytes.provenance).toBe("OBSERVED");
+    // CPU utilization is a delta of two samples, so it can never be observed.
+    expect(sampled.raw.cpuPercent.provenance).toBe("DERIVED");
+    expect(sampled.raw.minorFaultsPerSec.provenance).toBe("DERIVED");
+    expect(sampled.raw.majorFaultsPerSec.provenance).toBe("DERIVED");
+  });
+
+  it("distinguishes the character counters from the storage counters", () => {
+    const sampled = buildVisualStates(collectSamples(events(...RAMPS_UP)))[2]!;
+    // Both are per-second rates, so both are DERIVED, but they count different
+    // physical things. The io lens takes a max over all four, so without these
+    // notes it would label a character count as bytes.
+    expect(sampled.raw.rcharBytesPerSec.unitNote).toMatch(/characters/i);
+    expect(sampled.raw.wcharBytesPerSec.unitNote).toMatch(/characters/i);
+    expect(sampled.raw.readBytesPerSec.unitNote).toMatch(/storage device/i);
+    expect(sampled.raw.writeBytesPerSec.unitNote).toMatch(/storage device/i);
+  });
+
+  it("reports every absent metric, not a hand-picked four", () => {
+    // The unavailable list used to inspect cpuPercent, rssBytes, minorFaults and
+    // threadCount only, so the panel meant to explain missing telemetry claimed
+    // a process was fully measured while seven of its metrics were absent.
+    const first = buildVisualStates(collectSamples(events(...RAMPS_UP)))[0]!;
+    const reported = first.unavailable.map((u) => u.metric);
+    for (const metric of [
+      "cpuPercent",
+      "rcharBytesPerSec",
+      "wcharBytesPerSec",
+      "readBytesPerSec",
+      "writeBytesPerSec",
+      "minorFaultsPerSec",
+      "majorFaultsPerSec",
+    ]) {
+      expect(reported).toContain(metric);
+    }
   });
 
   it("is a plain serializable object a 3D scene could consume directly", () => {

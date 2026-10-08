@@ -1,22 +1,60 @@
-import { ArrowRight, Cpu, History, RadioTower, Timer, Zap } from "lucide-react";
-import { useEffect, useState } from "react";
+import { ArrowRight, Cpu, History, RadioTower, Timer } from "lucide-react";
+import { clsx } from "clsx";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
 import { useGlobalFeed } from "../api/sse";
+import { LifecycleRail } from "../components/evidence/LifecycleRail";
+import { LiveExecution } from "../components/evidence/LiveExecution";
+import { StructuredCommand } from "../components/execution/StructuredCommand";
 import { Badge, Button, Card, EmptyState, StatusDot } from "../components/ui";
 import { useUi } from "../store/ui";
 import { fmtDuration, shortId } from "../lib/format";
 import { STATUS_META } from "../lib/stages";
 import type { AnalyticsOverview, ProcessInfo, SessionRecord } from "../types/observability";
 
-function StatOrPlaceholder({ label, value }: { label: string; value: string }) {
+function StatOrPlaceholder({ label, value, detail }: { label: string; value: string; detail?: string }) {
+  const unavailable = value === "unavailable";
   return (
-    <div className="rounded-[var(--r-md)] border border-[var(--line-0)] bg-[var(--bg-2)] px-3 py-2.5">
-      <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-[var(--fg-3)]">{label}</div>
-      <div className="mt-0.5 font-mono text-lg font-semibold tracking-tight text-[var(--fg-0)] tabular-nums">{value}</div>
+    <div
+      className={clsx(
+        "rounded-[var(--r-md)] border px-3 py-2.5 transition-colors duration-[var(--motion-quick)]",
+        unavailable
+          ? "border-[var(--line-0)] bg-[var(--bg-1)]/40"
+          : "border-[var(--line-0)] bg-[var(--bg-2)]/70 hover:border-[var(--line-1)]",
+      )}
+    >
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-[9.5px] font-semibold uppercase tracking-[var(--tracking-micro)] text-[var(--fg-3)]">
+          {label}
+        </span>
+        {detail !== undefined ? (
+          <span className="text-[9.5px] text-[var(--fg-4)]">{detail}</span>
+        ) : null}
+      </div>
+      <div
+        className={clsx(
+          "mt-1 font-mono text-[17px] font-semibold tabular-nums tracking-tight",
+          unavailable ? "text-[var(--fg-4)]" : "text-[var(--fg-0)]",
+        )}
+      >
+        {value}
+      </div>
     </div>
   );
+}
+
+/**
+ * The honest answer for a statistic that could not be read.
+ *
+ * Distinguishes "the gateway did not answer" from "there is no data yet", because
+ * those are different facts and a reader acting on "0" would be wrong about one of
+ * them. Never returns 0: a percentile of no samples is not zero milliseconds.
+ */
+function unavailableOr(booted: boolean, error: string | undefined): string {
+  if (error !== undefined) return "unavailable";
+  return booted ? "none yet" : "…";
 }
 
 export default function OverviewPage() {
@@ -24,7 +62,16 @@ export default function OverviewPage() {
   const engineState = useUi((s) => s.engineState);
   const engineDetail = useUi((s) => s.engineDetail);
   const capabilities = useUi((s) => s.capabilities);
-  const [command, setCommand] = useState("echo Hello Shiva");
+  /*
+   * argv, held as a vector.
+   *
+   * This used to be one string, split on whitespace at submit time, which
+   * silently discarded every quoting rule the engine implements and then had the
+   * flight recorder certify the result as a validated gateway request. See
+   * components/execution/StructuredCommand.tsx for the full account.
+   */
+  const [program, setProgram] = useState("echo");
+  const [args, setArgs] = useState<string[]>(["Hello CAPS"]);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [analytics, setAnalytics] = useState<AnalyticsOverview | null>(null);
   const [processes, setProcesses] = useState<{ processes: ProcessInfo[]; capacity: number } | null>(null);
@@ -73,9 +120,60 @@ export default function OverviewPage() {
     processes?.processes.filter((p) => p.state === "RUNNING" || p.state === "STARTING").length ??
     (loadError.analytics !== undefined && loadError.processes !== undefined ? null : (analytics?.running ?? 0));
 
+  /*
+   * The most recently touched session, reconstructed from the global feed.
+   *
+   * The feed is the ONLY source here on purpose: subscribing to one session's SSE
+   * stream would open a second connection for a page that is meant to be a summary
+   * of everything, and the two connections would then disagree about what is
+   * running. From the feed we already have every event, grouped by session.
+   */
+  const recentSessionId = events.at(0)?.sessionId ?? null;
+  const recentSessionEvents = useMemo(() => {
+    if (recentSessionId === null) return [];
+    return events.filter((e) => e.sessionId === recentSessionId);
+  }, [events, recentSessionId]);
+
+  const recentSession = useMemo<SessionRecord | null>(() => {
+    if (recentSessionId === null) return null;
+    return sessions.find((s) => s.id === recentSessionId) ?? null;
+  }, [sessions, recentSessionId]);
+
+  /*
+   * A live elapsed clock, and only while the session is actually live.
+   *
+   * Two things this deliberately does not do. It does not keep ticking after the
+   * session is terminal, which would show a duration that is still growing on a
+   * process that has already exited. And it does not derive elapsed time from the
+   * gateway clock by subtracting timestamps, which would include the time between
+   * the previous poll and this one -- a number that grows whether or not anything
+   * is happening.
+   */
+  const recentStatus = recentSession?.status ?? null;
+  const recentLive = recentStatus !== null && !["COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED"].includes(recentStatus);
+  const [tick, setTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (!recentLive) return;
+    const t = window.setInterval(() => setTick(Date.now()), 100);
+    return () => window.clearInterval(t);
+  }, [recentLive]);
+  const elapsedMs =
+    recentSession !== null && recentLive
+      ? Math.max(0, tick - Date.parse(recentSession.startedAt))
+      : null;
+
+  /*
+   * The argv goes to /execute verbatim.
+   *
+   * No tokenisation happens here, because there is nothing to tokenise: the
+   * vector is already split, one element per box. Anything that trimmed or
+   * joined these back into a string and re-split it would reintroduce the defect
+   * this control exists to remove.
+   */
   const quickRun = () => {
-    const parts = command.trim().split(/\s+/);
-    navigate("/execute", { state: { command: parts[0], args: parts.slice(1) } });
+    const name = program.trim();
+    if (name.length === 0) return;
+    navigate("/execute", { state: { command: name, args: args.slice() } });
   };
 
   return (
@@ -100,46 +198,86 @@ export default function OverviewPage() {
           </p>
 
           <form
-            className="mt-4 flex max-w-2xl items-center gap-2"
+            className="mt-4 max-w-3xl"
             onSubmit={(e) => {
               e.preventDefault();
               quickRun();
             }}
           >
-            <div className="flex flex-1 items-center gap-2 rounded-[var(--r-sm)] border border-[var(--line-1)] bg-[var(--bg-2)] px-3 focus-within:border-[var(--accent)]">
-              <Zap className="h-3.5 w-3.5 shrink-0 text-[var(--fg-3)]" />
-              <input
-                value={command}
-                onChange={(e) => setCommand(e.target.value)}
-                placeholder="echo Hello Shiva"
-                aria-label="Command to execute"
-                className="h-9 flex-1 bg-transparent font-mono text-[13px] text-[var(--fg-0)] placeholder:text-[var(--fg-3)] focus:outline-none"
-              />
+            <StructuredCommand
+              program={program}
+              args={args}
+              onProgramChange={setProgram}
+              onArgsChange={setArgs}
+              onGoToTerminal={() => navigate("/terminal")}
+              engineOnline={engineState === "online"}
+            />
+            <div className="mt-3 flex items-center gap-2">
+              <Button type="submit" variant="primary" disabled={engineState !== "online" || program.trim().length === 0}>
+                EXECUTE <ArrowRight className="h-3.5 w-3.5" />
+              </Button>
+              <span className="text-[11px] text-[var(--fg-3)]">
+                Opens Execute with this argv prefilled. Nothing runs until you press Run.
+              </span>
             </div>
-            <Button type="submit" variant="primary" disabled={engineState !== "online"}>
-              EXECUTE <ArrowRight className="h-3.5 w-3.5" />
-            </Button>
           </form>
         </div>
 
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-6 py-3.5" aria-label="Observed command lifecycle stages">
-          {["INPUT", "ARGV", "FORK", "EXEC", "RUN", "WAIT", "RESULT"].map((stage, i, stages) => (
-            <span key={stage} className="flex items-center gap-2 font-mono text-[10px] font-bold tracking-[0.12em] text-[var(--fg-3)]">
-              {stage}{i < stages.length - 1 ? <span aria-hidden="true" className="text-[var(--line-2)]">→</span> : null}
+        {/*
+          The lifecycle rail.
+
+          This replaces a fixed strip of seven stage NAMES. A strip of names asserts
+          nothing, which makes it decoration; the rail lights each stage from the
+          recorded event stream and marks the first un-reached one as the expected
+          next step. With nothing running it stays dim and says so, because
+          animating it would draw a process into existence that never happened.
+        */}
+        <div className="border-t border-[var(--line-0)] px-6 py-3.5">
+          <div className="mb-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="text-[9.5px] font-semibold uppercase tracking-[var(--tracking-micro)] text-[var(--fg-4)]">
+              Lifecycle
             </span>
-          ))}
-          <span className="ml-auto rounded-[var(--r-sm)] border border-[var(--line-1)] px-1.5 py-0.5 font-mono text-[9.5px] text-[var(--fg-3)]">
-            {connection === "connected" ? "SSE · CONNECTED" : connection === "reconnecting" ? "SSE · RECONNECTING" : "SSE · CONNECTING"}
-          </span>
+            <span
+              className="rounded-[var(--r-xs)] border border-[var(--line-1)] px-1.5 py-0.5 font-mono text-[9.5px] text-[var(--fg-3)]"
+              title="Event stream connection state"
+            >
+              SSE · {connection === "connected" ? "CONNECTED" : connection === "reconnecting" ? "RECONNECTING" : "CONNECTING"}
+            </span>
+          </div>
+          <LifecycleRail events={events} />
         </div>
       </section>
 
-      {/* Where is the engine right now */}
-      <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      {/*
+        The most recent execution, live.
+
+        Driven by the global feed rather than by a session started on this page, so
+        the panel reflects whatever is actually running anywhere in the observatory
+        -- which is what makes it useful during a demonstration where the presenter
+        starts work on another tab.
+      */}
+      <LiveExecution
+        session={recentSession}
+        events={recentSessionEvents}
+        elapsedMs={elapsedMs}
+      />
+
+      {/*
+        Percentiles, not a mean.
+
+        A mean is the one statistic that cannot be read: on this workload mix it
+        is dominated by whichever execution happened to be slowest, so it moves for
+        reasons a reader cannot see. P50 and P95 are reported instead, and MAX is
+        included because a tail is the thing worth looking at on an execution
+        recorder. The mean is still available on the Analytics page, where it sits
+        beside the distribution it summarises.
+      */}
+      <section className="grid grid-cols-2 gap-3 lg:grid-cols-5">
         <StatOrPlaceholder label="Executions" value={analytics ? String(analytics.totalExecutions) : loadError.analytics !== undefined ? "unavailable" : booted ? "none yet" : "…"} />
         <StatOrPlaceholder label="Running now" value={running === null ? "unavailable" : String(running)} />
-        <StatOrPlaceholder label="Median duration" value={analytics?.p50Ms != null ? fmtDuration(analytics.p50Ms) : loadError.analytics !== undefined ? "unavailable" : "…"} />
-        <StatOrPlaceholder label="Avg duration" value={analytics?.avgDurationMs != null ? fmtDuration(analytics.avgDurationMs) : loadError.analytics !== undefined ? "unavailable" : "…"} />
+        <StatOrPlaceholder label="P50" value={analytics?.p50Ms != null ? fmtDuration(analytics.p50Ms) : unavailableOr(booted, loadError.analytics)} detail="median" />
+        <StatOrPlaceholder label="P95" value={analytics?.p95Ms != null ? fmtDuration(analytics.p95Ms) : unavailableOr(booted, loadError.analytics)} detail="tail" />
+        <StatOrPlaceholder label="Failed" value={analytics ? String(analytics.failed) : unavailableOr(booted, loadError.analytics)} />
       </section>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">

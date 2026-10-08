@@ -8,7 +8,7 @@
  *
  *   node scripts/capture-screenshots.mjs
  */
-import { mkdirSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
@@ -30,6 +30,62 @@ const VIEWPORT = { width: 1600, height: 1000 };
 mkdirSync(OUT, { recursive: true });
 
 const log = (m) => console.log(`  ${m}`);
+
+/** Newest mtimeMs under `dir`, or null when the directory does not exist. */
+function newestMtime(dir) {
+  let newest = null;
+  let stack = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch (err) {
+      if (err.code === "ENOENT") return null;
+      throw err;
+    }
+    for (const entry of entries) {
+      const path = join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(path);
+        continue;
+      }
+      const { mtimeMs } = statSync(path);
+      if (newest === null || mtimeMs > newest) newest = mtimeMs;
+    }
+  }
+  return newest;
+}
+
+/**
+ * Refuse to photograph a stale build.
+ *
+ * The bundle served to Chromium is `web/frontend/dist`, produced by an earlier
+ * `npm run build`. If a source file is newer than that build, the images would
+ * show yesterday's UI while the repository says today's, and every image in
+ * `docs/screenshots` would be quietly wrong. Comparing mtimes is the cheapest
+ * honest check: it cannot prove the bundle corresponds to these sources, but it
+ * does refuse the specific failure of photographing a build older than the
+ * code, and it fails loudly instead of producing plausible images.
+ */
+function assertBuildIsCurrent() {
+  const src = join(REPO_ROOT, "web", "frontend", "src");
+  const dist = join(REPO_ROOT, "web", "frontend", "dist");
+  const newestSource = newestMtime(src);
+  const built = newestMtime(dist);
+  if (newestSource === null) return;
+  if (built === null) {
+    throw new Error(
+      `web/frontend/dist does not exist, so there is nothing to photograph. Run "npm run build" in web/frontend first.`,
+    );
+  }
+  if (newestSource > built) {
+    throw new Error(
+      "web/frontend/src is newer than web/frontend/dist: this run would photograph a stale build. " +
+        'Run "npm run build" in web/frontend, or set CAPS_SHOT_ALLOW_STALE=1 to override deliberately.',
+    );
+  }
+}
 
 /** POST a real execution and wait for the gateway to finalize it. */
 async function run(api, body, timeoutMs = 40000) {
@@ -129,6 +185,17 @@ async function shot(page, name, note, scrollTo) {
 
 const main = async () => {
   console.log(`Capturing real screenshots from ${FRONTEND} (gateway ${GATEWAY})`);
+
+  // ---- 0. refuse a stale build -------------------------------------------
+  // Every other check in this script guards against a screenshot that shows
+  // something other than what the code does. This one guards against the
+  // screenshots showing what the code did before the last edit.
+  if (process.env.CAPS_SHOT_ALLOW_STALE === "1") {
+    log("CAPS_SHOT_ALLOW_STALE=1: skipping the source-versus-dist freshness check");
+  } else {
+    assertBuildIsCurrent();
+    log("web/frontend/dist is at least as new as web/frontend/src");
+  }
 
   // ---- 1. generate the evidence, through the real engine -------------------
   log("running real executions through the real C engine…");

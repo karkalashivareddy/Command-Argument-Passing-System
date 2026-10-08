@@ -179,6 +179,23 @@ static const char *outcome_name(caps_outcome_t outcome)
     }
 }
 
+/*
+ * Print one duration_ms value as JSON.
+ *
+ * The engine's elapsed_ms() returns -1 when the monotonic clock could not be
+ * sampled at either end of the process, and that is a real absence rather
+ * than a measurement of zero: a program that finished inside a millisecond
+ * measures 0. Emitting null for the first case keeps the two distinguishable,
+ * which is the same UNAVAILABLE-never-zero rule the rest of the project follows.
+ */
+static void print_duration_ms(FILE *out, long long duration_ms)
+{
+    if (duration_ms < 0)
+        fputs("null", out);
+    else
+        fprintf(out, "%lld", duration_ms);
+}
+
 static void emit_terminal(caps_monitor_t *mon, const caps_event_t *ev)
 {
     char wall[32];
@@ -203,9 +220,18 @@ static void emit_terminal(caps_monitor_t *mon, const caps_event_t *ev)
                 event_name(ev->type), (long)ev->pid, ev->status);
         break;
     case CAPS_EVENT_PROCESS_EXITED:
-        fprintf(mon->out, "[%s] %-22s pid=%ld status=%d duration=%lldms\n",
-                wall, event_name(ev->type), (long)ev->pid, ev->status,
-                ev->duration_ms);
+        fprintf(mon->out, "[%s] %-22s pid=%ld status=%d duration=", wall,
+                event_name(ev->type), (long)ev->pid, ev->status);
+        /*
+         * -1 is the sentinel for "not measured" (see elapsed_ms() in
+         * process.c), and it is printed as such rather than as 0.  A
+         * sub-millisecond run measures 0, so 0 is a real reading and
+         * cannot double as an absent one.
+         */
+        if (ev->duration_ms < 0)
+            fputs("UNAVAILABLE\n", mon->out);
+        else
+            fprintf(mon->out, "%lldms\n", ev->duration_ms);
         break;
     case CAPS_EVENT_EXEC_ERROR:
     case CAPS_EVENT_WAIT_FAILED:
@@ -362,11 +388,12 @@ static void emit_json(caps_monitor_t *mon, const caps_event_t *ev)
         fprintf(mon->out,
                 "{\"event\":\"%s\",\"time\":\"%s\",\"pid\":%ld,"
                 "\"pgid\":%ld,\"stage\":%d,\"stages\":%d,"
-                "\"exit_code\":%d,\"duration_ms\":%lld,\"outcome\":\"%s\","
-                "\"command\":",
-                event_name(ev->type), wall, (long)ev->pid, (long)ev->pgid,
-                ev->stage_index, ev->stage_count, ev->status,
-                ev->duration_ms, outcome_name(ev->outcome));
+                "\"exit_code\":%d,\"duration_ms\":", event_name(ev->type),
+                wall, (long)ev->pid, (long)ev->pgid, ev->stage_index,
+                ev->stage_count, ev->status);
+        print_duration_ms(mon->out, ev->duration_ms);
+        fprintf(mon->out, ",\"outcome\":\"%s\",\"command\":",
+                outcome_name(ev->outcome));
         json_escape(mon->out, ev->command ? ev->command : "");
         fputs("}\n", mon->out);
         break;
@@ -427,11 +454,12 @@ static void emit_json(caps_monitor_t *mon, const caps_event_t *ev)
         fprintf(mon->out,
                 "{\"event\":\"%s\",\"time\":\"%s\",\"pid\":%ld,"
                 "\"exit_code\":null,\"errno\":%d,\"errno_name\":\"%s\","
-                "\"reason\":\"%s\",\"duration_ms\":%lld,"
-                "\"outcome\":\"%s\",\"command\":",
+                "\"reason\":\"%s\",\"duration_ms\":",
                 event_name(ev->type), wall, (long)ev->pid, ev->errno_value,
                 ev->errno_value ? strerror(ev->errno_value) : "",
-                ev->message ? ev->message : "", ev->duration_ms,
+                ev->message ? ev->message : "");
+        print_duration_ms(mon->out, ev->duration_ms);
+        fprintf(mon->out, ",\"outcome\":\"%s\",\"command\":",
                 outcome_name(ev->outcome));
         json_escape(mon->out, ev->command ? ev->command : "");
         fputs("}\n", mon->out);
@@ -452,8 +480,16 @@ void caps_monitor_emit(caps_monitor_t *mon, const caps_event_t *ev)
         mon->commands++;
         break;
     case CAPS_EVENT_PROCESS_EXITED:
-        mon->timed++;
-        mon->total_duration_ms += ev->duration_ms;
+        /*
+         * Only a real measurement contributes to the average. An event whose
+         * duration is unavailable (-1, see print_duration_ms) still counts as
+         * a command and still counts as succeeded or failed; it just does not
+         * become a 0 in the mean, which would silently pull the average down.
+         */
+        if (ev->duration_ms >= 0) {
+            mon->timed++;
+            mon->total_duration_ms += ev->duration_ms;
+        }
         if (ev->status == 0)
             mon->succeeded++;
         else

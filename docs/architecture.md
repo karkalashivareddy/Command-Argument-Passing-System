@@ -102,10 +102,29 @@ that could not open its database still looked healthy.
 
 This is the part that was wrong, so it is stated precisely.
 
-**CAPS is not a shell.** There is no quoting, globbing, expansion, pipe, or
-job control. A command line is whitespace-separated tokens plus the three
-redirection operators `>`, `>>`, `<`, each requiring exactly one file-name
-token that may not itself be an operator.
+**CAPS is not a shell.** It tokenises like one and does not *expand* like one, and
+this file is the tie-breaker when two documents disagree, so it states both halves
+exactly as `include/parser.h` implements them.
+
+Not supported, and there is no partial support to mistake for the real thing:
+
+* no globbing (`*`, `?`, `[…]`)
+* no variable expansion (`$VAR`) and no command substitution
+* no `&`, `&&`, `||`, or `;`
+* no subshells, no heredocs, no brace or tilde expansion
+* no job control
+
+Supported:
+
+* **quoting** — single and double quotes, and backslash escapes, honoured by the
+  single lexer `parser_tokenize()`
+* **redirection** — one operator set: `<`, `>`, `>>`, `2>`, `2>>`, each requiring
+  exactly one file-name token that may not itself be an operator
+* **pipelines** — `|`, on a single command or across several stages, with the
+  redirections attaching to the stage they are written on
+
+There is no `1<`. The fd-number prefix is implemented for `2` only, because that
+is what the engine opens a second descriptor for; `1<` is left literal.
 
 The engine reports a **machine-readable outcome** on every terminal process
 event:

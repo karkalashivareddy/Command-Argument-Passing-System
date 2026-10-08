@@ -1,7 +1,9 @@
 import { useEffect, useRef } from "react";
 
 import { formatMiB, formatPercent } from "../../lib/format";
-import { LENS_SPECS, lensRawValue, type MetricMode, type SpaceNodeState } from "../../lib/processSpace";
+import { LENS_SPECS, lensRawMetric, type MetricMode, type SpaceNodeState } from "../../lib/processSpace";
+import { ProvenanceBadge } from "../evidence/Provenance";
+import type { RawMetric } from "../../types/observability";
 
 /**
  * The hover evidence tooltip.
@@ -10,7 +12,12 @@ import { LENS_SPECS, lensRawValue, type MetricMode, type SpaceNodeState } from "
  * cursor: identity, the observed parent, the lifecycle state, the sample that
  * the state was read from, and the observed CPU and RSS. Anything the kernel did
  * not report is written as "Unavailable" — never as zero, because "0 % CPU" and
- * "no CPU reading" are different claims.
+ * "no CPU reading" are different claims. Every telemetry row carries its
+ * provenance badge, from the one shared component the rest of the observatory
+ * uses.
+ *
+ * The surface is glass: it floats over the scene, blurs what is behind it, and
+ * is never drawn on top of the node being described.
  *
  * Position updates are written straight to the element through a ref. Pointer
  * movement therefore never re-renders React, and no state is updated per frame.
@@ -27,6 +34,12 @@ interface TooltipRow {
   label: string;
   value: string;
   unavailable?: boolean;
+  /**
+   * Present on every row that displays a recorded metric. Required for those rows
+   * rather than optional, because the whole point of this tooltip is that a
+   * reader can tell an observed gauge from a derived rate without leaving it.
+   */
+  provenance?: RawMetric | null;
 }
 
 const UNAVAILABLE = "Unavailable";
@@ -34,9 +47,22 @@ const UNAVAILABLE = "Unavailable";
 /** The evidence a tooltip may show, derived from one node state. Pure. */
 export function hoverEvidence(state: SpaceNodeState, lens: MetricMode): { heading: string; rows: TooltipRow[] } {
   const node = state.node;
-  const cpu = state.visual?.raw.cpuPercent ?? null;
-  const rss = state.visual?.raw.rssBytes ?? null;
-  const lensRaw = lensRawValue(state, lens);
+  /*
+   * Every telemetry row carries its provenance.
+   *
+   * `cpu` and `rss` used to be plain `number | null` here, so this tooltip
+   * printed a DERIVED CPU rate and an OBSERVED RSS reading in the same style with
+   * nothing to tell a reader which was which. They now come from the same
+   * RawMetric objects the 3D node geometry is driven by, so the number in the
+   * tooltip and the size of the node are guaranteed to describe the same
+   * recorded value with the same classification.
+   */
+  const cpuMetric = state.visual?.raw.cpuPercent ?? null;
+  const cpu = cpuMetric?.value ?? null;
+  const rssMetric = state.visual?.raw.rssBytes ?? null;
+  const rss = rssMetric?.value ?? null;
+  const lensRawMetricValue = lensRawMetric(state, lens);
+  const lensRaw = lensRawMetricValue?.value ?? null;
   const spec = LENS_SPECS[lens];
 
   const rows: TooltipRow[] = [
@@ -59,8 +85,18 @@ export function hoverEvidence(state: SpaceNodeState, lens: MetricMode): { headin
           : `${(state.visual.atMs / 1000).toFixed(2)} s${state.stateAgeMs === null ? "" : ` (${(state.stateAgeMs / 1000).toFixed(2)} s before the cursor)`}`,
       unavailable: state.visual === null,
     },
-    { label: "CPU", value: cpu === null ? UNAVAILABLE : formatPercent(cpu), unavailable: cpu === null },
-    { label: "RSS", value: rss === null ? UNAVAILABLE : formatMiB(rss), unavailable: rss === null },
+    {
+      label: "CPU",
+      value: cpu === null ? UNAVAILABLE : formatPercent(cpu),
+      unavailable: cpu === null,
+      provenance: cpuMetric,
+    },
+    {
+      label: "RSS",
+      value: rss === null ? UNAVAILABLE : formatMiB(rss),
+      unavailable: rss === null,
+      provenance: rssMetric,
+    },
   ];
 
   // The lens is named so a reader knows which quantity the geometry encodes,
@@ -70,6 +106,7 @@ export function hoverEvidence(state: SpaceNodeState, lens: MetricMode): { headin
       label: `${spec.label} lens`,
       value: lensRaw === null ? UNAVAILABLE : `${spec.metric === "rss" ? formatMiB(lensRaw) : lensRaw.toFixed(1)} ${spec.unit}`,
       unavailable: lensRaw === null,
+      provenance: lensRawMetricValue,
     });
   }
   if (node.telemetryNote !== null) {
@@ -102,7 +139,7 @@ export function NodeTooltip({ state, point, lens, selected }: NodeTooltipProps) 
     <div
       ref={ref}
       role="tooltip"
-      className="pointer-events-none fixed left-0 top-0 z-20 w-[14.5rem] rounded border border-[var(--line-1)] bg-[var(--bg-1)]/95 px-2.5 py-2 font-mono text-[10px] leading-snug text-[var(--fg-1)] shadow-lg"
+      className="glass-panel pointer-events-none fixed left-0 top-0 z-20 w-[14.5rem] rounded border border-[var(--line-1)] px-2.5 py-2 font-mono text-[10px] leading-snug text-[var(--fg-1)]"
     >
       <div className="flex items-center gap-1.5 text-[var(--fg-0)]">
         {selected ? <span className="text-[var(--violet)]" aria-label="selected">◆</span> : null}
@@ -111,7 +148,24 @@ export function NodeTooltip({ state, point, lens, selected }: NodeTooltipProps) 
       <dl className="mt-1.5 space-y-0.5">
         {evidence.rows.map((row) => (
           <div key={row.label} className="flex items-baseline justify-between gap-2">
-            <dt className="shrink-0 text-[var(--fg-4)]">{row.label}</dt>
+            <dt className="shrink-0 text-[var(--fg-4)]">
+              {row.label}
+              {/*
+                The badge sits on the label rather than after the value, because
+                the value column is right-aligned and a badge there would move
+                every number on the row. It is also the last thing read in a
+                tooltip that a pointer is about to leave.
+              */}
+              {row.provenance !== undefined && row.provenance !== null ? (
+                <ProvenanceBadge
+                  className="ml-1 align-middle"
+                  provenance={row.provenance.provenance}
+                  source={row.provenance.source}
+                  formula={row.provenance.formula}
+                  reason={row.provenance.reason}
+                />
+              ) : null}
+            </dt>
             <dd className={`min-w-0 text-right ${row.unavailable ? "text-[var(--fg-3)] italic" : "text-[var(--fg-0)]"}`}>{row.value}</dd>
           </div>
         ))}

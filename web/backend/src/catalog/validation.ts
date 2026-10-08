@@ -21,6 +21,7 @@
 import { probeCommand, type ArgumentSchema, type ProbedCommand } from "./commands.js";
 import type { CapsConfig } from "../config/env.js";
 import { assertReadableFileInWorkspace, RedirectionPolicyError } from "../security/policy.js";
+import { findAwkProgramViolations, findSedScriptViolations } from "./programPolicy.js";
 
 export class ArgumentError extends Error {
   override name = "ArgumentError";
@@ -243,6 +244,27 @@ export function validateArguments(
      */
     const isLeadingPattern = positionalSeen < leadingPatterns && !looksLikePath(arg);
     positionalSeen += 1;
+
+    /*
+     * A leading operand that is an EXECUTED PROGRAM is checked separately from
+     * the path policy, because the path policy cannot see what the program does.
+     *
+     * The exemption below is what makes `awk PROGRAM FILE` and `sed SCRIPT FILE`
+     * usable at all, and it is exactly why the program needs its own rule: an awk
+     * program can call a shell, read a file outside the workspace, or write one,
+     * none of which any argument-shape rule can intercept. Without this the
+     * gateway accepts and runs
+     *
+     *   awk 'BEGIN{system("id > /tmp/x")}'
+     *
+     * which is the capability CAPS refuses python, perl, node, ruby, php, gcc
+     * and make for. See catalog/programPolicy.ts for the scanner and the
+     * reasoning behind each refusal.
+     */
+    if (schema.programOperand !== undefined && positionalSeen === 1) {
+      assertProgramOperand(command, schema.programOperand, arg);
+    }
+
     const isPath = schema.positionalArePaths && !isLeadingPattern;
     pathsToCheck.push({ index: i, value: arg, isPath });
   }
@@ -261,6 +283,37 @@ export function validateArguments(
   }
 
   return args;
+}
+
+/**
+ * Refuse a program operand that would break out of the no-shell, confined
+ * workspace model.
+ *
+ * The first violation found is reported, with its kind named, because "awk
+ * program refused" without saying which construct was seen is not something the
+ * user can act on. The message quotes the offending program so the user can see
+ * which part of their own input was the problem.
+ */
+function assertProgramOperand(
+  command: string,
+  language: NonNullable<ArgumentSchema["programOperand"]>,
+  program: string,
+): void {
+  const violations =
+    language === "awk" ? findAwkProgramViolations(program) : findSedScriptViolations(program);
+  const first = violations[0];
+  if (first === undefined) return;
+
+  const what = language === "awk" ? "awk program" : "sed script";
+  throw new ArgumentError(
+    `the ${what} "${truncateForMessage(program)}" was refused: ${first.rule}`,
+    first.rule,
+  );
+}
+
+/** Keep a refusal message readable when the operand is at the schema byte limit. */
+function truncateForMessage(value: string, max = 120): string {
+  return value.length <= max ? value : `${value.slice(0, max)}...`;
 }
 
 /**

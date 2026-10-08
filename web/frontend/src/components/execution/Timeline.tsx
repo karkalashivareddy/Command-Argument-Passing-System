@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   CartesianGrid,
   ComposedChart,
@@ -27,8 +27,18 @@ const TOOLTIP_STYLE = {
 const TRACK_HEIGHT = 76;
 const PLOT_MARGIN = { top: 6, right: 8, bottom: 0, left: 0 } as const;
 
+/**
+ * Axis-tick and marker formatter for the shared execution-time axis.
+ *
+ * The `s < 0` arm was `return "0"`. A negative or non-finite time is not zero
+ * time: it is a time this axis cannot describe, and rendering it as "0" places a
+ * marker at the instant the execution began, which reads as an observation. An
+ * axis tick has no room for prose, so the glyph is an em dash -- the same mark
+ * `fmtDuration` and `fmtNumber` already use for "not recorded" everywhere else in
+ * this app -- rather than a number that was never measured.
+ */
 function fmtSeconds(s: number): string {
-  if (!Number.isFinite(s) || s < 0) return "0";
+  if (!Number.isFinite(s) || s < 0) return "—";
   if (s < 10) return `${s.toFixed(2)}s`;
   return `${s.toFixed(1)}s`;
 }
@@ -74,7 +84,7 @@ export function Timeline({ events, cursorMs, onSeek, selectedEvent = null, onCle
 
   const cursorSec = cursorMs === null ? null : Math.min(Math.max(0, cursorMs) / 1000, model.spanSeconds);
 
-  /** Click anywhere on a track to move the shared cursor. */
+  /** Click or press anywhere on a track to move the shared cursor. */
   const seekFromPointer = useCallback(
     (clientX: number) => {
       const node = wrapRef.current;
@@ -86,6 +96,100 @@ export function Timeline({ events, cursorMs, onSeek, selectedEvent = null, onCle
       onSeek(Math.round(Math.min(Math.max(ratio, 0), 1) * model.spanSeconds * 1000));
     },
     [model.spanSeconds, onSeek],
+  );
+
+  /**
+   * Drag-to-scrub, with pointer capture on the wrapper so a drag that leaves the
+   * element keeps feeding moves to it.
+   *
+   * The wrapper element carries these handlers rather than each chart: the charts
+   * are siblings stacked on one axis, and a pointer that wanders between them
+   * must not stop tracking. `dragging` is state rather than a ref because the
+   * cursor has to change while the pointer is down.
+   */
+  const [dragging, setDragging] = useState(false);
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      // Primary button / single touch only: a right-click opens the context menu
+      // and a two-finger gesture is a pinch, neither of which is a scrub.
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      setDragging(true);
+      /*
+       * Pointer capture is an optimisation, not a requirement: it keeps receiving
+       * moves after the pointer leaves the element, which is what makes a drag
+       * feel continuous.
+       *
+       * It is therefore guarded, and the seek happens FIRST. This call was
+       * unguarded and ran before `seekFromPointer`, so in any environment that
+       * does not implement the Pointer Capture API the exception propagated and
+       * the cursor never moved at all -- the control silently did nothing. The
+       * `endDrag` counterpart below already guards its `hasPointerCapture` check,
+       * so the two halves disagreed about whether the API is optional.
+       *
+       * Without capture the drag degrades to "tracks while over the element",
+       * which is worse but still correct. With an unguarded throw it is dead.
+       */
+      seekFromPointer(e.clientX);
+      if (typeof e.currentTarget.setPointerCapture === "function") {
+        try {
+          e.currentTarget.setPointerCapture(e.pointerId);
+        } catch {
+          // A refused capture is not a failure of the interaction.
+        }
+      }
+    },
+    [seekFromPointer],
+  );
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!dragging) return;
+      seekFromPointer(e.clientX);
+    },
+    [dragging, seekFromPointer],
+  );
+  const endDrag = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    // Guarded for the same reason as the capture in onPointerDown: this API is
+    // optional and its absence must not throw out of a pointer-up handler.
+    try {
+      if (e.currentTarget.hasPointerCapture?.(e.pointerId) === true) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // Nothing to release.
+    }
+    setDragging(false);
+  }, []);
+
+  /**
+   * Keyboard scrubbing.
+   *
+   * The control was a `role="group"` with a click handler and no tabIndex, so the
+   * cursor it promised to move on "click or drag" could not be reached at all
+   * without a pointer. It is now a real slider: one tab stop, arrow keys step,
+   * Page keys step by a tenth of the span, Home/End jump to the ends, and the
+   * value is announced in seconds because the raw millisecond count means nothing
+   * to a reader hearing it.
+   */
+  const KEY_STEP_MS = 100;
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      const spanMs = model.spanSeconds * 1000;
+      if (spanMs <= 0) return;
+      const current = cursorSec === null ? 0 : cursorSec * 1000;
+      const clamp = (v: number) => Math.min(Math.max(v, 0), spanMs);
+      let next: number | null = null;
+      if (e.key === "ArrowLeft" || e.key === "ArrowDown") next = clamp(current - KEY_STEP_MS);
+      else if (e.key === "ArrowRight" || e.key === "ArrowUp") next = clamp(current + KEY_STEP_MS);
+      else if (e.key === "PageDown") next = clamp(current - spanMs / 10);
+      else if (e.key === "PageUp") next = clamp(current + spanMs / 10);
+      else if (e.key === "Home") next = 0;
+      else if (e.key === "End") next = spanMs;
+      if (next === null) return;
+      // Arrows and Page keys scroll the page; here they move the cursor.
+      e.preventDefault();
+      onSeek(Math.round(next));
+    },
+    [cursorSec, model.spanSeconds, onSeek],
   );
 
   if (events.length === 0) {
@@ -127,12 +231,28 @@ export function Timeline({ events, cursorMs, onSeek, selectedEvent = null, onCle
         <span className="ml-auto text-[var(--fg-4)]">only collected samples are plotted</span>
       </div>
 
+      {/*
+        `touch-action: none` is required, not cosmetic: without it the browser
+        owns the vertical pan gesture on touch, so a horizontal drag to scrub
+        scrolls the page instead and the cursor never moves.
+      */}
       <div
         ref={wrapRef}
-        className="w-full cursor-crosshair"
-        role="group"
-        aria-label="Resource tracks; click or drag to move the shared execution-time cursor"
-        onClick={(e) => seekFromPointer(e.clientX)}
+        className={`w-full ${dragging ? "cursor-grabbing" : "cursor-crosshair"}`}
+        style={{ touchAction: "none" }}
+        role="slider"
+        tabIndex={0}
+        aria-label="Resource tracks; shared execution-time cursor"
+        aria-orientation="horizontal"
+        aria-valuemin={0}
+        aria-valuemax={Math.round(model.spanSeconds * 1000)}
+        aria-valuenow={cursorSec === null ? undefined : Math.round(cursorSec * 1000)}
+        aria-valuetext={cursorSec === null ? "no cursor position set" : `t = ${fmtSeconds(cursorSec)}`}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onKeyDown={onKeyDown}
       >
         {model.tracks.map((track, index) => {
           const tick = axisTick(track.spec.unit);

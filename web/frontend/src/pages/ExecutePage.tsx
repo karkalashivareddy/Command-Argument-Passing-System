@@ -237,8 +237,8 @@ export default function ExecutePage() {
         subtitle={<>Sent verbatim to <code className="font-mono text-[11px] text-[var(--fg-2)]">./caps --monitor --json …</code> — no shell involved</>}
       >
         <div className="grid grid-cols-1 gap-4">
-          <Field label="Program" hint={`Must be on the engine allowlist: ${(capabilities?.allowlist ?? []).slice(0, 6).join(", ")}${(capabilities?.allowlist.length ?? 0) > 6 ? ", …" : ""}`}>
-            <input value={command} onChange={(e) => setCommand(e.target.value)} className={inputCls} placeholder="echo" disabled={disabled} />
+          <Field label="Program" controlId="exec-program" hint={`Must be on the engine allowlist: ${(capabilities?.allowlist ?? []).slice(0, 6).join(", ")}${(capabilities?.allowlist.length ?? 0) > 6 ? ", …" : ""}`}>
+            <input id="exec-program" value={command} onChange={(e) => setCommand(e.target.value)} className={inputCls} placeholder="echo" disabled={disabled} />
           </Field>
 
           {activeProfile !== null && (
@@ -265,13 +265,29 @@ export default function ExecutePage() {
             </div>
           )}
 
-          <Field label={`Arguments (argv[1…argc-1]) — ${args.length}`}>
+          <Field label={`Arguments (argv[1…argc-1]) — ${args.length}`} groupId="exec-arguments">
             <div className="space-y-1.5">
               {args.map((a, i) => (
                 <div key={i} className="flex items-center gap-1.5">
+                  {/*
+                    The visible `argv[n]` text is not a <label>: it is a caption
+                    for one input inside a row that also holds a remove button, so
+                    making it a label element would put two labelable controls
+                    under one name again. `aria-label` on the input gives that
+                    input a unique name that includes its argv index, which is what
+                    a screen reader announces when the reader tabs through the
+                    rows and has no way to see the neighbouring text.
+                  */}
                   <span className="w-16 shrink-0 font-mono text-[11px] text-[var(--fg-3)]">argv[{i + 1}]</span>
-                  <input value={a} onChange={(e) => onArgChange(i, e.target.value)} className={inputCls} placeholder={`argument ${i + 1}`} disabled={disabled} />
-                  <button onClick={() => setArgs((x) => x.filter((_, j) => j !== i))} className="rounded p-1 text-[var(--fg-3)] hover:bg-[var(--bg-3)] hover:text-[var(--red)]" aria-label="Remove argument" disabled={disabled}>
+                  <input
+                    value={a}
+                    onChange={(e) => onArgChange(i, e.target.value)}
+                    className={inputCls}
+                    placeholder={`argument ${i + 1}`}
+                    aria-label={`Argument argv[${i + 1}]`}
+                    disabled={disabled}
+                  />
+                  <button onClick={() => setArgs((x) => x.filter((_, j) => j !== i))} className="rounded p-1 text-[var(--fg-3)] hover:bg-[var(--bg-3)] hover:text-[var(--red)]" aria-label={`Remove argument argv[${i + 1}]`} disabled={disabled}>
                     <X className="h-3.5 w-3.5" />
                   </button>
                 </div>
@@ -287,17 +303,22 @@ export default function ExecutePage() {
             )}
           </Field>
 
-          <Field label="Redirections">
+          {/*
+            Three inputs behind one caption, so the caption names the group and
+            each input names itself. A shared name of "Redirections" on all three
+            is what the old <label> wrapper produced.
+          */}
+          <Field label="Redirections" groupId="exec-redirections">
             <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
-              <input value={redirIn} onChange={(e) => setRedirIn(e.target.value)} className={inputCls} placeholder="stdin file (no space)" disabled={disabled} />
-              <input value={redirOut} onChange={(e) => setRedirOut(e.target.value)} className={inputCls} placeholder="stdout file" disabled={disabled} />
-              <input value={redirAppend} onChange={(e) => setRedirAppend(e.target.value)} className={inputCls} placeholder="append file" disabled={disabled} />
+              <input value={redirIn} onChange={(e) => setRedirIn(e.target.value)} className={inputCls} placeholder="stdin file (no space)" aria-label="Redirect stdin from file" disabled={disabled} />
+              <input value={redirOut} onChange={(e) => setRedirOut(e.target.value)} className={inputCls} placeholder="stdout file" aria-label="Redirect stdout to file" disabled={disabled} />
+              <input value={redirAppend} onChange={(e) => setRedirAppend(e.target.value)} className={inputCls} placeholder="append file" aria-label="Append stdout to file" disabled={disabled} />
             </div>
             <p className="mt-1 text-[11.5px] text-[var(--fg-3)]">Plain relative paths only — absolute paths, <code className="font-mono">..</code>, and <code className="font-mono">~</code> are rejected by policy.</p>
           </Field>
 
-          <Field label="Timeout">
-            <select value={timeoutMs ?? ""} onChange={(e) => setTimeoutMs(e.target.value ? Number(e.target.value) : null)} className={inputCls} disabled={disabled}>
+          <Field label="Timeout" controlId="exec-timeout">
+            <select id="exec-timeout" value={timeoutMs ?? ""} onChange={(e) => setTimeoutMs(e.target.value ? Number(e.target.value) : null)} className={inputCls} disabled={disabled}>
               <option value="">Default ({capabilities === null ? "…" : `${capabilities.limits.defaultTimeoutMs / 1000}s`})</option>
               {requiredTimeout > 0 && <option value={String(requiredTimeout)}>Workload budget + margin ({requiredTimeout / 1000}s)</option>}
               <option value="5000">5s</option>

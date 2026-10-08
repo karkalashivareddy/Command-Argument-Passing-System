@@ -1,6 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { useUi } from "../../store/ui";
 import { useSpaceKeys } from "./useSpaceKeys";
 
 /**
@@ -31,6 +32,21 @@ function setup(options: Partial<Parameters<typeof useSpaceKeys>[0]> = {}) {
   };
   return { onSeek, onClear, onTogglePlay, sampleTimes, view, press };
 }
+
+beforeEach(() => {
+  /*
+    The presentation overlay is a modal and claims the arrow keys, Escape and the
+    single-letter navigation keys while it is open. Step 09 of its script lands on
+    this very route, so the default here is "closed" — and it is set explicitly
+    rather than left to module state, so one test cannot leak a presentation into
+    the next one's Escape handling.
+  */
+  useUi.setState({ presentation: { open: false, index: 0, paused: false, sessionId: null } });
+});
+
+afterEach(() => {
+  useUi.setState({ presentation: { open: false, index: 0, paused: false, sessionId: null } });
+});
 
 describe("process space cursor shortcuts", () => {
   it("steps forward to the next recorded sample", () => {
@@ -96,7 +112,40 @@ describe("process space cursor shortcuts", () => {
     input.remove();
   });
 
-  it("unregisters its listener on unmount", () => {
+  it("stands down entirely while a presentation is open", () => {
+    /*
+      The overlap is real, not hypothetical: presentation step 09 navigates to
+      /execution/<id>/3d, so a presenter's Right arrow would both advance the deck
+      and move the replay cursor, and Escape would clear the selection instead of
+      exiting. The overlay is the modal here and owns these keys outright.
+    */
+    const { onClear, onSeek, onTogglePlay, press } = setup();
+    useUi.setState({ presentation: { open: true, index: 8, paused: false, sessionId: "exec_1" } });
+
+    press("ArrowRight");
+    press("ArrowLeft");
+    press(" ");
+    press("Escape");
+
+    expect(onSeek).not.toHaveBeenCalled();
+    expect(onTogglePlay).not.toHaveBeenCalled();
+    expect(onClear).not.toHaveBeenCalled();
+    // And the deck is where it was: the 3D view did not step the presentation.
+    expect(useUi.getState().presentation.index).toBe(8);
+  });
+
+it("resumes taking keys once the presentation closes", () => {
+    const { onClear, press } = setup();
+    useUi.setState({ presentation: { open: true, index: 8, paused: false, sessionId: "exec_1" } });
+    press("Escape");
+    expect(onClear).not.toHaveBeenCalled();
+
+    useUi.setState({ presentation: { open: false, index: 8, paused: false, sessionId: "exec_1" } });
+    press("Escape");
+    expect(onClear).toHaveBeenCalledTimes(1);
+  });
+
+it("unregisters its listener on unmount", () => {
     const { onSeek, view, press } = setup();
     view.unmount();
     press("ArrowRight");

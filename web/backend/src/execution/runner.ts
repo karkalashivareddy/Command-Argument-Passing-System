@@ -15,7 +15,7 @@ import { parseCapsLine } from "./parser.js";
 import { classifyLine, splitLines } from "./output.js";
 import { gatewayEvent, normalizeCapsEvent } from "./normalizer.js";
 import { ExecutionRegistry, type ActiveSession } from "./registry.js";
-import { escalateTo, forgetIdentity, rememberIdentity, signalChild, terminateGracefully, type ProcessIdentity } from "./terminator.js";
+import { escalateTo, forgetIdentity, rememberIdentity, signalChild, signalProcessGroup, terminateGracefully, type ProcessIdentity } from "./terminator.js";
 import {
   evaluateThermalGuard,
   logThermalDecision,
@@ -72,19 +72,62 @@ export type StartResult =
  * standard utilities; it is not needed to locate the allowlisted binary,
  * because that is passed to the engine as an absolute path.
  */
-function sanitizedEnv(): NodeJS.ProcessEnv {
+/**
+ * The environment the CAPS engine is given.
+ *
+ * MINIMAL BY DEFAULT. A child inherits nothing from the gateway except these
+ * four variables, so an operator's own environment cannot reach the program
+ * being observed.
+ *
+ * THE LIMITS ARE THE EXCEPTION, AND THEY ARE ADDED HERE DELIBERATELY.
+ * ------------------------------------------------------------
+ * `CAPS_LIMIT_ADDRESS_SPACE_BYTES` and `CAPS_LIMIT_CPU_SECONDS` are the names the
+ * C engine reads (src/limits.c) and applies to every pipeline stage before
+ * execvp(). They are the only way RLIMIT_AS or RLIMIT_CPU can ever be in force
+ * in a child, so omitting them here made both guardrails decorative: the
+ * operator set a limit, `/api/capabilities` reported `enforced: true`, and the
+ * kernel applied nothing.
+ *
+ * They are absent unless configured, because the engine treats an absent limit
+ * as unlimited and a malformed one as a refusal. That is the correct behaviour,
+ * so an unset gateway setting must stay unset all the way down.
+ *
+ * Note the unit conversion on the CPU budget: the operator configures
+ * milliseconds because that is the resolution the gateway's own wall-clock
+ * accounting uses, while RLIMIT_CPU is whole seconds. The ceiling rounds UP, so
+ * the kernel can only ever be given a limit at least as generous as the one
+ * asked for -- rounding down would silently enforce a tighter limit than the
+ * configuration states.
+ */
+function sanitizedEnv(config: CapsConfig): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of ["PATH", "LANG", "HOME", "TERM"]) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   env.LANG ??= "C.UTF-8";
   env.TERM ??= "dumb";
+
+  if (config.guardrails.addressSpaceBytes > 0) {
+    env.CAPS_LIMIT_ADDRESS_SPACE_BYTES = String(config.guardrails.addressSpaceBytes);
+  }
+  if (config.guardrails.cpuBudgetMs > 0) {
+    env.CAPS_LIMIT_CPU_SECONDS = String(Math.ceil(config.guardrails.cpuBudgetMs / 1000));
+  }
   return env;
 }
 
 function key(channel: "stdout" | "stderr", sessionId: string): string {
   return `${channel}:${sessionId}`;
 }
+
+/**
+ * Longest unterminated stderr line retained while waiting for its newline.
+ *
+ * Sized well above any real diagnostic and well below the output cap, so a
+ * program that legitimately writes a long single line is still recorded whole,
+ * while an unbounded writer is cut off rather than allowed to grow the heap.
+ */
+const MAX_PENDING_LINE = 64 * 1024;
 
 /**
  * The serialisable form of one admission decision.
@@ -369,7 +412,7 @@ export class ExecutionRunner {
         cwd: this.config.workspace,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
-        env: sanitizedEnv(),
+        env: sanitizedEnv(this.config),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -398,6 +441,11 @@ export class ExecutionRunner {
       process: child,
       childPid: null,
       childIdentity: null,
+      // The pipeline's process group and its leader's identity, both taken from
+      // the engine's observed records. Null until a `process.started` carries
+      // them; the single-PID path remains available until then.
+      childPgid: null,
+      childGroupLeader: null,
       ownedIdentities: [],
       processStartedAt: null,
       processReaped: false,
@@ -494,7 +542,32 @@ private failBeforeStart(
     active.lastEventAt = Date.now();
     const text = chunk.toString();
     const { lines, rest } = splitLines(active.stderrLineBuffer + text);
-    active.stderrLineBuffer = rest;
+
+    /*
+     * The partial line is bounded.
+     *
+     * The retained output channels are capped, but this buffer is not output --
+     * it is an unterminated line waiting for its newline -- and it was
+     * accumulated without a bound. A program that writes one enormous line with
+     * no `\n` therefore grew the gateway's heap without limit, which is the exact
+     * failure the stderr guardrail exists to prevent, on the one path that
+     * bypassed it.
+     *
+     * When the cap is exceeded the fragment is emitted as truncated output and
+     * the buffer restarts. Dropping the excess is honest here in a way it is not
+     * for a metric: the record says the line was truncated, and a line this long
+     * is not a human-readable diagnostic in any case.
+     */
+    if (rest.length > MAX_PENDING_LINE) {
+      this.append(
+        "stderr",
+        active.sessionId,
+        `${rest.slice(0, MAX_PENDING_LINE)}\n[truncated: an unterminated line exceeded ${MAX_PENDING_LINE} characters]\n`,
+      );
+      active.stderrLineBuffer = "";
+    } else {
+      active.stderrLineBuffer = rest;
+    }
 
     for (const line of lines) this.routeStderrLine(active, line);
   }
@@ -549,33 +622,94 @@ private failBeforeStart(
     this.append("stdout", active.sessionId, chunk.toString());
   }
 
+  /**
+ * Signal an execution, preferring the whole pipeline over one PID.
+ *
+ * The group is preferred because the engine puts every stage in it and because
+ * signalling only the LAST stage -- which is what `active.childPid` holds for a
+ * multi-stage pipeline, since `observe` overwrites it on every
+ * `process.started` -- leaves earlier stages running while the session is
+ * finalised as terminated. terminateGracefully makes that choice and reports
+ * which mechanism actually ran, so the audit record says "kill-group" or "kill"
+ * rather than a bare "terminated".
+ */
+  private terminateActive(active: ActiveSession, signal: NodeJS.Signals): ReturnType<typeof terminateGracefully> {
+    return terminateGracefully(active.childPid, this.config.terminateGraceMs, {
+      signal,
+      group: { pgid: active.childPgid, leader: active.childGroupLeader },
+    });
+  }
+
   private handleTimeout(active: ActiveSession): void {
     const { sessionId } = active;
     if (active.timedOut || active.finalized) return;
     active.timedOut = true;
     active.state = "TIMED_OUT";
     logger.warn("EXECUTION", "timeout reached", { sessionId, timeoutMs: active.timeoutMs });
-    this.emit(gatewayEvent({ sessionId, sequence: 0, evId: newId }, "gateway", "execution.timeout", { timeoutMs: active.timeoutMs }));
+
+    /*
+     * No event is emitted here, and that used to be a defect worth reading.
+     *
+     * `execution.timeout` is a TERMINAL event type, and this used to emit one.
+     * The session was not finalized, so finalize() emitted the same terminal type
+     * again. On every timeout that produced three real problems, two of which
+     * the product reports about itself:
+     *
+     *   1. invariant I5 (one terminal event) was violated;
+     *   2. invariant I6 (terminal event is last) was violated, because the
+     *      sampler kept running and wrote process.snapshot events after it;
+     *   3. the live SSE stream closed on the FIRST terminal event, so a
+     *      subscriber never received process.exited, the escalation, or the real
+     *      terminal event -- and a reconnecting subscriber replaying the backlog
+     *      hit `if (stream.isClosed) break;` and got the same truncated history.
+     *
+     * The /replay integrity block was reporting violations of the product's own
+     * rules, on every timed-out session, with no test failing: the one test on
+     * this path asserted only the session status.
+     *
+     * The timeout is therefore recorded once, by finalize(), as the single
+     * terminal event it is. The log line above still marks the moment the timer
+     * fired, which is what an operator watching the console needs; the event
+     * stream is not a place to announce something twice.
+     */
 
     // SIGTERM, then a SIGKILL that is only delivered if the PID still belongs
-    // to the process that was actually signalled.
-    const handle = terminateGracefully(active.childPid, this.config.terminateGraceMs);
-    active.childIdentity = handle.identity;
+    // to the process that was actually signalled. The pipeline's process group is
+    // preferred, so every stage is reached rather than only the last one observed.
+    const handle = this.terminateActive(active, "SIGTERM");
+    active.childIdentity = handle.identity ?? active.childIdentity;
     active.escalation = handle.waitForEscalation();
+    logger.warn("EXECUTION", "timeout signal delivered", {
+      sessionId,
+      mechanism: handle.first.mechanism,
+      pgid: active.childPgid,
+    });
   }
 
   /**
    * Persist one event, then publish it.
    *
    * The event row is always written before the bus is told, so a client can
-   * never be handed an event that replay would not return.
+   * never be handed an event that replay would not return. That is the whole
+   * contract, and it used to be honoured for telemetry alone: only
+   * `process.snapshot` returned early on a persistence failure, so every other
+   * event type -- including `process.exited` and every terminal event -- could
+   * be pushed to a live subscriber and never appear in /replay. A client that
+   * reconnected would then see the event twice in its lifetime, having recorded
+   * it once.
    *
    * A persistence failure is caught and logged rather than thrown: this runs
    * inside a stream 'data' callback, where an escaping exception becomes an
    * unhandled rejection that takes the process down and loses the execution
-   * entirely.  The sequence counter still advances, because a sequence that
-   * was skipped must not later be reused -- a gap is visible in the invariant
+   * entirely. The sequence counter still advances, because a sequence that was
+   * skipped must not later be reused -- a gap is visible in the invariant
    * report, whereas a duplicate is silent corruption.
+   *
+   * So the trade is now uniform and deliberate: an event that could not be
+   * persisted is not published. Live delivery is allowed to lose a row; replay
+   * completeness is not allowed to lie about one. Telemetry is treated exactly
+   * like every other event rather than being the exception, because an
+   * inconsistent rule here is how the original bug happened.
    */
   private emit(ev: CanonicalEvent): void {
     const active = this.registry.get(ev.sessionId);
@@ -583,13 +717,13 @@ private failBeforeStart(
     try {
       this.events.insert(ev);
     } catch (err) {
-      logger.error("EXECUTION", "failed to persist event", {
+      logger.error("EXECUTION", "failed to persist event; not publishing it", {
         sessionId: ev.sessionId,
         type: ev.type,
         sequence: ev.sequence,
         err: err instanceof Error ? err.message : String(err),
       });
-      if (ev.type === "process.snapshot") return; // telemetry is best-effort
+      return;
     }
     this.bus.publish(ev);
   }
@@ -603,6 +737,26 @@ private failBeforeStart(
         active.childPid = ev.pid;
         active.processStartedAt = ev.timestamp;
         active.processReaped = false;
+        /*
+         * The pipeline's process group, taken from the engine's own record of
+         * it rather than assumed. Stage 0 is the group leader, so the first
+         * `process.started` to arrive carries the pgid the gateway must be able
+         * to signal as a unit; later stages report the same value, so this
+         * assignment is idempotent rather than last-writer-wins.
+         *
+         * This is what makes a timeout reach every stage instead of only the
+         * last one -- see signalProcessGroup for the verification that makes
+         * signalling a negative pid safe here.
+         */
+        const observedPgid = typeof ev.payload.pgid === "number" ? ev.payload.pgid : null;
+        if (observedPgid !== null && observedPgid > 1) {
+          active.childPgid = observedPgid;
+          // The leader's identity is captured here for the same reason the PID's
+          // is: it must be recorded while the process provably cannot be recycled.
+          if (active.childGroupLeader === null && ev.pid === observedPgid) {
+            active.childGroupLeader = rememberIdentity(ev.pid);
+          }
+        }
         if (ev.pid !== null) this.sessions.setPid(sessionId, ev.pid);
         if (typeof ev.pid === "number") {
           /*
@@ -683,15 +837,41 @@ private failBeforeStart(
     this.emit(gatewayEvent({ sessionId, sequence: 0, evId: newId }, "gateway", "process.snapshot", payload, { pid }));
   }
 
+  /**
+   * Retain one output channel, bounded, and record that it was truncated.
+   *
+   * The two channels are bounded SEPARATELY, which is what `/api/capabilities`
+   * claims and what the deadlock argument in that claim actually requires: a
+   * program writing megabytes of stderr while its stdout pipe fills would
+   * otherwise wedge on a stream the gateway had silently discarded. Sharing one
+   * cap across both channels would make a loud stderr consume the stdout budget,
+   * so the caps are looked up per channel.
+   *
+   * The bound is on what the gateway RETAINS, not on what the child produces.
+   * The child is never stopped for writing too much, and this does not claim to
+   * be: the gateway drains both pipes continuously, so a chatty program cannot
+   * block on a full pipe and cannot deadlock. What is bounded is memory.
+   *
+   * Truncation keeps the TAIL. For a terminal view the last thing a program said
+   * is the useful part, and it is the part that explains a failure.
+   */
   private append(channel: "stdout" | "stderr", sessionId: string, text: string): void {
     const k = key(channel, sessionId);
     const cur = this.buffers.get(k) ?? { text: "", truncated: false };
+    const limit = this.outputCapFor(channel);
     const combined = cur.text + text;
-    if (combined.length <= this.config.maxOutputBytes) {
+    if (combined.length <= limit) {
       this.buffers.set(k, { text: combined, truncated: cur.truncated });
     } else {
-      this.buffers.set(k, { text: combined.slice(-this.config.maxOutputBytes), truncated: true });
+      this.buffers.set(k, { text: combined.slice(-limit), truncated: true });
     }
+  }
+
+  /** The retention cap for one channel: stderr has its own, stdout the global one. */
+  private outputCapFor(channel: "stdout" | "stderr"): number {
+    return channel === "stderr"
+      ? this.config.guardrails.stderrBytes
+      : this.config.guardrails.stdoutBytes;
   }
 
   /**
@@ -812,6 +992,7 @@ private failBeforeStart(
     const ev = gatewayEvent({ sessionId, sequence: 0, evId: newId }, "gateway", finalType, payload, {
       pid: active.childPid,
     });
+    let persisted = false;
     try {
       transact(this.db, () => {
         this.sessions.finalize(sessionId, {
@@ -822,10 +1003,14 @@ private failBeforeStart(
         ev.sequence = active.nextSeq++;
         this.events.insert(ev);
       });
+      persisted = true;
     } catch (err) {
-      // A persistence failure must still leave a terminal event in the stream
-      // and the execution out of the registry, or the session would hang in
-      // the API forever.
+      // A persistence failure must still leave the session out of the registry,
+      // or it would hang in the API forever. It must NOT, however, publish the
+      // terminal event: that would hand a live subscriber an event that replay
+      // will never return, which is the same live-versus-replay divergence
+      // emit() was corrected to avoid. The sequence advances either way, so a
+      // later event cannot reuse the number.
       logger.error("EXECUTION", "failed to persist terminal state", {
         sessionId,
         err: err instanceof Error ? err.message : String(err),
@@ -833,9 +1018,10 @@ private failBeforeStart(
       active.nextSeq += 1;
     }
 
-    this.bus.publish(ev);
+    // Published only when it is durable, for the same reason emit() gates on it.
+    if (persisted) this.bus.publish(ev);
     this.registry.delete(sessionId);
-    logger.info("EXECUTION", "finalized", { sessionId, status, exitCode, signal: active.signal, durationMs, engineOutcome: active.engineOutcome });
+    logger.info("EXECUTION", "finalized", { sessionId, status, exitCode, signal: active.signal, durationMs, engineOutcome: active.engineOutcome, terminalEventPersisted: persisted });
   }
 
   private finalizeFailed(active: ActiveSession, reason: string): void {
@@ -916,18 +1102,23 @@ private failBeforeStart(
   }
 
   /** Terminate one execution, verifying identity before escalating. */
-  requestTerminate(sessionId: string, signal: NodeJS.Signals): { sent: boolean; reason: string | null; identity: ProcessIdentity | null } {
+  requestTerminate(
+    sessionId: string,
+    signal: NodeJS.Signals,
+  ): { sent: boolean; reason: string | null; identity: ProcessIdentity | null; mechanism: string } {
     const active = this.registry.get(sessionId);
-    if (!active) return { sent: false, reason: "execution is not running", identity: null };
-    const result = signalChild(active.childPid, signal);
-    if (result.sent) {
+    if (!active) {
+      return { sent: false, reason: "execution is not running", identity: null, mechanism: "none" };
+    }
+    const result = this.terminateActive(active, signal);
+    if (result.first.sent) {
       active.terminateRequested = true;
-      active.childIdentity = result.identity;
+      active.childIdentity = result.identity ?? active.childIdentity;
       // A terminate request is also escalated, with the same identity guard,
       // so a process that ignores the requested signal cannot linger.
-      active.escalation = terminateGracefully(active.childPid, this.config.terminateGraceMs).waitForEscalation();
+      active.escalation = result.waitForEscalation();
     }
-    return result;
+    return { ...result.first, identity: result.identity };
   }
 
   /** Await any pending escalation for a session, if there is one. */

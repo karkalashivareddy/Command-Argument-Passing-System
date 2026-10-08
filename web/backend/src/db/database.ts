@@ -125,7 +125,8 @@ const MIGRATIONS: readonly Migration[] = [
        * types on `events`, for two reasons.
        *
        * First, the shapes are different. `events` is a per-session log with a
-       * contiguous sequence and thirteen structural invariants; a host sample
+       * contiguous sequence and fourteen structural invariants (I1-I14); a host
+       * sample
        * is a single wide observation with no session and no lifecycle, and
        * forcing it into that table would mean lying about both.
        *

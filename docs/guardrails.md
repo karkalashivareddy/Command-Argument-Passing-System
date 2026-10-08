@@ -68,14 +68,28 @@ prints diagnostics appears to hang.
 
 | | |
 | --- | --- |
-| Configured | `CAPS_MAX_OUTPUT_BYTES` |
+| Configured | `CAPS_MAX_OUTPUT_BYTES` for `stdout`, `CAPS_STDERR_MAX_BYTES` for `stderr` |
 | Enforced by | the gateway |
-| On overflow | output truncated at a byte boundary; the session records that truncation happened |
+| On overflow | the retained tail is kept at a character boundary and the earlier output is discarded; the session records that truncation happened |
 
-The CAPS monitor protocol travels on a separate descriptor from the child's
-stderr, so monitor output can never contaminate a program's error output. This is
-asserted end to end by the smoke suite, which checks that a program's `stderr`
-contains no protocol frames.
+Two properties of that mechanism are worth stating plainly, because both are
+easy to overstate:
+
+- **The bound is on what the gateway RETAINS, not on what the child produces.**
+  The child is never stopped, signalled, or paused for writing output. Both
+  pipes are drained continuously, so a chatty program cannot block on a full
+  pipe and cannot deadlock. What is bounded is the gateway's memory.
+- **Truncation keeps the tail.** For a terminal view the last thing a program
+  said is the useful part, and it is the part that explains a failure; the
+  earlier bytes are dropped.
+
+The CAPS monitor protocol does **not** travel on a separate descriptor. The
+engine writes the monitor to `stderr` (`caps_monitor_create(stderr, ...)` in
+`src/main.c`), and the child inherits that descriptor, so CAPS diagnostics and
+the program's own error output share **one** stream. They are separated
+**line-wise**, by the frame prefix, not at descriptor level. This is asserted end
+to end by the smoke suite, which checks that a program's `stderr` contains no
+protocol frames.
 
 ---
 
@@ -84,14 +98,32 @@ contains no protocol frames.
 Set in the child before `execvp`. All are configured through the environment and
 are **unlimited when unset**, not zero.
 
-| Limit | Environment variable | What it bounds |
-| --- | --- | --- |
-| `RLIMIT_AS` | `CAPS_LIMIT_ADDRESS_SPACE_BYTES` | Virtual address space |
-| `RLIMIT_CPU` | `CAPS_LIMIT_CPU_SECONDS` | CPU time, as the kernel counts it |
-| `RLIMIT_FSIZE` | `CAPS_LIMIT_FILE_BYTES` | Size of a file the child may create |
-| `RLIMIT_CORE` | always `0` | Core dumps are never written |
+| Limit | Gateway variable | Engine variable | What it bounds |
+| --- | --- | --- | --- |
+| `RLIMIT_AS` | `CAPS_ADDRESS_SPACE_LIMIT_BYTES` | `CAPS_LIMIT_ADDRESS_SPACE_BYTES` | Virtual address space |
+| `RLIMIT_CPU` | `CAPS_CPU_BUDGET_MS` | `CAPS_LIMIT_CPU_SECONDS` | CPU time, as the kernel counts it |
+| `RLIMIT_FSIZE` | — | `CAPS_LIMIT_FILE_BYTES` | Size of a file the child may create |
+| `RLIMIT_CORE` | — | always `0` | Core dumps are never written |
 
-Three points that are commonly got wrong:
+An operator sets the **gateway** names. `sanitizedEnv()` in
+`web/backend/src/execution/runner.ts` translates them into the **engine** names
+that the forked child actually reads, and passes only those plus a small
+pass-through set (`PATH`, `LANG`, `HOME`, `TERM`). Two consequences of that
+translation:
+
+- **The CPU budget rounds UP to whole seconds.** `CAPS_CPU_BUDGET_MS` is
+  millisecond-granular because that is how CPU time is reported everywhere else,
+  but `RLIMIT_CPU` counts in seconds, so `sanitizedEnv()` emits
+  `Math.ceil(ms / 1000)`. The ceiling is therefore never tighter than the
+  configured one — a 1500 ms budget becomes a 2 s kernel limit. `0` means the
+  variable is not passed at all and the limit is unlimited.
+- **The gateway's `stderr` cap is not the engine's file-size cap.**
+  `CAPS_STDERR_MAX_BYTES` bounds how much `stderr` the gateway retains; it is
+  never translated to anything the engine sees. `CAPS_LIMIT_FILE_BYTES` is
+  `RLIMIT_FSIZE` and bounds the size of a file the child may create. They are
+  unrelated mechanisms and one does not stand in for the other.
+
+Four points that are commonly got wrong:
 
 - **`RLIMIT_AS` is virtual address space, not physical memory.** A program with
   a large mapping fails under `RLIMIT_AS` while using little RAM. The UI labels
@@ -236,12 +268,12 @@ choose.
 
 | Guardrail | Configured | Enforced | Enforced by |
 | --- | --- | --- | --- |
-| Wall time | yes | yes | gateway |
-| Concurrency | yes | yes | gateway (refusal) |
-| stdout bytes | yes | yes, with recorded truncation | gateway |
-| stderr bytes | yes | yes, with recorded truncation | gateway |
-| CPU time | yes | yes | child `RLIMIT_CPU` |
-| Address space | yes | yes | child `RLIMIT_AS` |
+| Wall time | yes | yes | the gateway's own `setTimeout`; there is no timeout in the C engine at all |
+| Concurrency | yes | yes | gateway (refusal, `429 CONCURRENCY_LIMIT_REACHED`, never queued) |
+| stdout bytes | yes | yes, with recorded truncation | gateway, bounded retention |
+| stderr bytes | yes | yes, with recorded truncation | gateway, bounded retention, separate cap |
+| CPU time | yes | yes | `RLIMIT_CPU` applied to the child **before `execvp`**, so the kernel enforces it and sends `SIGXCPU` |
+| Address space | yes | yes | `RLIMIT_AS` applied to the child before `execvp` |
 | File size | yes | yes | child `RLIMIT_FSIZE` |
 | Core dumps | always off | yes | child `RLIMIT_CORE=0` |
 | Thermal | opt-in | yes when enabled | gateway, pre-spawn |
@@ -277,7 +309,7 @@ Stated plainly, because the alternative is a reader assuming coverage:
 | Thermal decision table, sensor discovery, refusal to fabricate | `web/backend/tests/unit/thermalGuard.test.ts`, `thermalGuardConfig.test.ts` |
 | Thermal guard is actually consulted when a workload starts | `web/backend/tests/unit/thermalAdmission.test.ts` |
 | Timeout escalates through a verified identity | `web/backend/tests/api/server.test.ts` |
-| Guardrails are published as configured vs enforced | `web/backend/tests/api/server.test.ts` |
+| Guardrails are published as `configured` vs `enforced`, and an unconfigured limit says so | `web/backend/tests/unit/thermalGuardConfig.test.ts` ("publishes configured, enforced, and mechanism for every limit") |
 | Concurrent execution is refused, not queued | `web/backend/tests/api/server.test.ts` |
 
 A real zombie cannot be produced from a shell — bash reaps its own jobs and an

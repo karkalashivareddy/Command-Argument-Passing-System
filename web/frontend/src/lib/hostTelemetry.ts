@@ -126,11 +126,7 @@ export function formatCount(n: number): string {
   return n.toLocaleString("en-US");
 }
 
-/** A ratio already in percent, or a 0..1 fraction converted to one. */
-export function formatPercent(value: number): string {
-  const pct = value > 0 && value <= 1 ? value * 100 : value;
-  return `${pct.toFixed(1)}%`;
-}
+
 
 /**
  * A temperature, rounded to one decimal.

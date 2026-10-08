@@ -282,8 +282,16 @@ How `caps` behaves today (see `docs/signals.md` for the full model):
   reported as `terminated by signal 2` with status `130`.
 
 Limitation (documented honestly): `caps` does **not** implement job
-control — no process groups, no foreground/background assignment, no
-`SIGTSTP` resume machinery.
+control — no foreground/background assignment, no `&`, and no `SIGTSTP`
+resume machinery. A **pipeline** is a partial exception on one point
+only: `process_exec_pipeline()` calls `setpgid()` so the pipeline is one
+addressable unit with stage 0 as the group leader, and every other stage
+joins it (`src/process.c`). That exists so a signal can reach every
+stage, and `pgid` is reported on `PROCESS_STARTED` / `PROCESS_EXITED` as
+evidence. It is signal delivery, not job control: there is still one
+process group per pipeline, not per interactive command, no terminal
+foreground-group ownership, and nothing that can be suspended and
+resumed.
 
 ---
 

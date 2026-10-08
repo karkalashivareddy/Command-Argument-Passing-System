@@ -127,13 +127,7 @@ export interface EvidenceSelection {
   eventSeq: number | null;
 }
 
-export function emptySelection(sessionId: string): EvidenceSelection {
-  return { sessionId, cursorMs: null, identity: null, eventSeq: null };
-}
 
-export function isSelectionEmpty(selection: EvidenceSelection): boolean {
-  return selection.identity === null && selection.eventSeq === null;
-}
 
 // ---------------------------------------------------------------------------
 // The record index

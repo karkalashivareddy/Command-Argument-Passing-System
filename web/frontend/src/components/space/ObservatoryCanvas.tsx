@@ -3,7 +3,7 @@ import { Canvas } from "@react-three/fiber";
 import { ACESFilmicToneMapping, SRGBColorSpace } from "three";
 
 import type { MetricMode, ProcessSpace, SpaceNodeState } from "../../lib/processSpace";
-import { CameraRig, CursorPlane, ExecutionGrid, SelectionRing, sceneDepth, sceneWidth, spaceTimeScale, type CameraPreset } from "./SceneChrome";
+import { CameraRig, CursorPlane, ExecutionGrid, SelectionRing, sceneDepth, sceneWidth, spaceTimeScale, type CameraPreset, type CameraRequest } from "./SceneChrome";
 import { EventMarkers, LifetimeBars, ProcessEdges, ProcessNodeMesh, type EdgeEmphasis, type HoverPoint } from "./ProcessSpaceScene";
 
 export interface ObservatoryCanvasProps {
@@ -13,6 +13,8 @@ export interface ObservatoryCanvasProps {
   cursorActive: boolean;
   mode: MetricMode;
   preset: CameraPreset;
+  /** What the camera should frame next: reset, a preset change, or the selection. */
+  request: CameraRequest;
   followCursor: boolean;
   showMarkers: boolean;
   reducedMotion: boolean;
@@ -21,7 +23,6 @@ export interface ObservatoryCanvasProps {
   emphasis: EdgeEmphasis;
   /** Canonical sequence of the selected event, highlighted among the markers. */
   selectedSequence: number | null;
-  resetToken: number;
   onSelect: (key: string | null) => void;
   onHover: (key: string | null, point: HoverPoint | null) => void;
   onSelectEvent: (sequence: number, atMs: number, nodeKey: string | null) => void;
@@ -42,13 +43,13 @@ export default function ObservatoryCanvas({
   cursorActive,
   mode,
   preset,
+  request,
   followCursor,
   showMarkers,
   reducedMotion,
   selectedKey,
   emphasis,
   selectedSequence,
-  resetToken,
   onSelect,
   onHover,
   onSelectEvent,
@@ -131,11 +132,11 @@ export default function ObservatoryCanvas({
           <CameraRig
             space={space}
             preset={preset}
+            request={request}
             followCursor={followCursor}
             cursorMs={cursorMs}
             selectedKey={selectedKey}
             reducedMotion={reducedMotion}
-            resetToken={resetToken}
           />
         </Suspense>
       </Canvas>

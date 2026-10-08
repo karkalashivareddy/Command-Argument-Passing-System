@@ -50,13 +50,35 @@ const envSchema = z.object({
   CAPS_MAX_CONCURRENT: z.coerce.number().int().min(1).max(64).default(4),
   CAPS_DEFAULT_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(30000),
   CAPS_MAX_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(120000),
-  CAPS_MAX_OUTPUT_BYTES: z.coerce.number().int().min(1024).max(10 * 1024 * 1024).default(64 * 1024),
+CAPS_MAX_OUTPUT_BYTES: z.coerce.number().int().min(1024).max(10 * 1024 * 1024).default(64 * 1024),
   /**
-   * Retention is explicit and never implicit.  0 means "keep everything" and
-   * is a deliberate configuration, not an absence of one, so an operator who
-   * wants an unbounded recorder has to say so.
+   * Retention is a bound, and the bound is on by default.
+   *
+   * THIS USED TO DEFAULT TO 0, "keep everything", under a comment claiming that
+   * an operator who wanted an unbounded recorder "has to say so". That was false:
+   * 0 WAS the default, so doing nothing produced an unbounded recorder.
+   *
+   * The consequence was measured rather than argued. One audit session against a
+   * gateway with no explicit retention grew `system_process_snapshots` to 330,254
+   * rows and 3.3 GB, filled the 3.8 GB tmpfs holding the database to 100%, and
+   * then broke an unrelated production build: the build was killed writing its
+   * output and exited 1 with a ZERO-BYTE log, which is what a kernel OOM reap
+   * looks like and what no compiler error looks like.
+   *
+   * The host collector samples every process on the host roughly twice a second
+   * and persists the whole row, so growth is proportional to the host's process
+   * count and to uptime. "Unbounded" is not a recording philosophy, it is a disk
+   * exhaustion schedule.
+   *
+   * So the default is now 7 days, which keeps a week of history and bounds a
+   * long-running gateway to something an operator can reason about. 0 remains
+   * available and remains "keep everything" -- unbounded is now opt-in, which is
+   * what the old comment always claimed it was.
+   *
+   * Retention covers sessions, host snapshots and their per-process rows. See
+   * api/system.ts for the sweep.
    */
-  CAPS_RETENTION_DAYS: z.coerce.number().int().min(0).max(3650).default(0),
+   CAPS_RETENTION_DAYS: z.coerce.number().int().min(0).max(3650).default(7),
   CAPS_RETENTION_SWEEP_MS: z.coerce.number().int().min(60_000).max(86_400_000).default(3_600_000),
   /** Graceful window between SIGTERM and SIGKILL during shutdown and timeout. */
   CAPS_TERMINATE_GRACE_MS: z.coerce.number().int().min(0).max(60_000).default(2000),
@@ -93,13 +115,30 @@ const envSchema = z.object({
    * can be hit by mmap alone, and a generous one says nothing about RSS. It is
    * named AS everywhere in the config and the UI for exactly that reason.
    *
-   * The CPU budget is in USER_HZ-seconds of kernel-reported CPU time, which is
+* The CPU budget is in USER_HZ-seconds of kernel-reported CPU time, which is
    * what `wait4()`/`getrusage()` report and what `/proc/<pid>/stat` publishes,
    * so it is directly comparable with the telemetry rather than a separate
    * accounting convention.
+   *
+   * ADDRESS SPACE IS IN BYTES, and the ceiling is written as `2 ** 46`, not
+   * `1 << 46`.
+   *
+   * That is not a style preference. JavaScript's `<<` is a THIRTY-TWO-BIT
+   * operation: the shift count is taken modulo 32, so `1 << 46` is `1 << 14`,
+   * which is 16384 -- sixteen kilobytes. Written the obvious way, this bound
+   * silently became a 16 KiB ceiling, and the gateway then REFUSED TO START for
+   * any realistic value: 1 MiB, 64 MiB, 512 MiB and 1 GiB were all rejected with
+   * "Number must be less than or equal to 16384".
+   *
+   * The consequence is worse than an unenforced limit. An operator who set an
+   * address-space bound got a gateway that would not boot, so the configuration
+   * was not merely ineffective -- it was unusable, and the only way out was to
+   * remove the setting and lose the bound entirely. Nothing in the code or the
+   * comments suggests a 16 KiB bound, which is why it survived review: it reads
+   * exactly like the intended constant.
    */
-  CAPS_CPU_BUDGET_MS: z.coerce.number().int().min(0).max(3_600_000).default(0),
-  CAPS_ADDRESS_SPACE_LIMIT_BYTES: z.coerce.number().int().min(0).max(1 << 46).default(0),
+   CAPS_CPU_BUDGET_MS: z.coerce.number().int().min(0).max(3_600_000).default(0),
+   CAPS_ADDRESS_SPACE_LIMIT_BYTES: z.coerce.number().int().min(0).max(2 ** 46).default(0),
   CAPS_STDERR_MAX_BYTES: z.coerce.number().int().min(1024).max(64 * 1024 * 1024).default(1024 * 1024),
 });
 

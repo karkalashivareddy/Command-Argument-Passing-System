@@ -1,5 +1,23 @@
 @import "tailwindcss";
 @import "./tokens.css";
+/*
+   The terminal surface's own rules.
+
+   Imported AFTER tokens.css so it can resolve every token, and after tailwind so
+   that a component class of the same name would win if one were ever added --
+   neither is true today, and both are stated so the ordering is not "correct by
+   accident".
+*/
+@import "./terminal.css";
+/*
+   The ambient field and the glass/motion utilities.
+
+   Last, because field.css consumes every colour, glass and motion token declared
+   above it. It only references variables rather than literal values, so load order
+   does not affect the computed result -- but keeping it last means the dependency
+   is visible in the file rather than implicit in the cascade.
+*/
+@import "./field.css";
 
 @theme {
   --color-bg0: var(--bg-0);
@@ -15,6 +33,7 @@
   --color-fg1: var(--fg-1);
   --color-fg2: var(--fg-2);
   --color-fg3: var(--fg-3);
+  --color-fg4: var(--fg-4);
   --color-accent: var(--accent);
   --color-violet: var(--violet);
   --color-success: var(--green);
@@ -23,6 +42,23 @@
   --color-info: var(--blue);
   --font-ui: var(--font-ui);
   --font-mono: var(--font-mono);
+
+  /*
+     Type scale promoted into the Tailwind theme so components can use
+     `text-title` / `tracking-label` rather than an arbitrary `text-[15px]`.
+     The previous 6-step scale had no theme entry at all, which is why every page
+     spelled its own sizes inline and the result drifted between pages.
+  */
+  --text-display: var(--text-display);
+  --text-title: var(--text-title);
+  --text-section: var(--text-section);
+  --text-body: var(--text-body);
+  --text-meta: var(--text-meta);
+  --text-micro: var(--text-micro);
+
+  --shadow-raised: var(--shadow-raised);
+  --shadow-floating: var(--shadow-floating);
+  --shadow-overlay: var(--shadow-overlay);
 }
 
 html,
@@ -34,10 +70,22 @@ body,
 body {
   margin: 0;
   font-family: var(--font-ui);
-  background: var(--bg-0);
+  font-size: var(--text-body);
   color: var(--fg-0);
+  background: var(--bg-0);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+/*
+   Every page sits ON the ambient field rather than replacing it.
+
+   The field is `position: fixed` at z-index 0 and the shell is above it, so this
+   only has to guarantee the shell's own surfaces are not opaque to the corners.
+*/
+#root {
+  position: relative;
+  isolation: isolate;
 }
 
 .font-mono,

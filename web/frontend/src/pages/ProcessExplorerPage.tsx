@@ -141,6 +141,15 @@ export default function ProcessExplorerPage(): React.JSX.Element {
     return buildTree(visible);
   }, [asTree, visible]);
 
+  /*
+   * The flattened order and its depths are derived from the tree together, once
+   * per sample, so the two can never disagree about which row is at which depth.
+   */
+  const flatTree = useMemo(() => {
+    if (tree === null) return null;
+    return { rows: flattenTree(tree), depths: depthMap(tree) };
+  }, [tree]);
+
   const toggleSort = useCallback(
     (key: SortKey) => {
       if (key === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -237,41 +246,52 @@ export default function ProcessExplorerPage(): React.JSX.Element {
 
         {pssSupported === false && <p className="mt-2 text-[var(--fg-3)]">{pssNote}</p>}
 
+        {/*
+          Eleven columns of `w-full table-fixed` need a scroll container: without
+          one the table did not overflow on a narrow viewport, it compressed, and
+          the metric columns its header still named became unreadable. This
+          matches the `overflow-x-auto` wrapper the other wide tables in the app
+          already use. `tabIndex` plus `role="region"` makes the scroll container
+          reachable by keyboard, because an overflow box is not scrollable with
+          arrow keys unless it is focusable, and the label says what is inside.
+        */}
         {shown.length === 0 ? (
           <EmptyState title="No processes match" body="Clear the search or the state filters." />
         ) : (
-          <table className="mt-3 w-full table-fixed border-collapse text-[11.5px]">
+          <div className="mt-3 overflow-x-auto" tabIndex={0} role="region" aria-label="Host processes table">
+            <table className="w-full table-fixed border-collapse text-[11.5px]">
             <caption className="sr-only">Host processes with per-metric provenance</caption>
-            <thead className="text-left">
-              <tr>
-                <th scope="col" className="border-b border-[var(--line-0)] pb-1.5 pr-4 font-semibold uppercase tracking-[0.1em] text-[var(--fg-3)]">Owner</th>
-                {SORTABLE.map((s) => (
-                  <th key={s.key} scope="col">
-                    <button type="button" onClick={() => toggleSort(s.key)} aria-sort={sortKey === s.key ? (sortDir === "asc" ? "ascending" : "descending") : "none"}>
-                      {s.label}
-                      {sortKey === s.key ? (sortDir === "asc" ? " ↑" : " ↓") : ""}
-                    </button>
-                  </th>
-                ))}
-                <th scope="col" className="border-b border-[var(--line-0)] pb-1.5 pr-4 font-semibold uppercase tracking-[0.1em] text-[var(--fg-3)]">Lifecycle</th>
-              </tr>
-            </thead>
-            <tbody>
-              {asTree && tree !== null
-                ? flattenTree(tree).map((row) => (
-                    <tr key={row.identity.key} style={{ paddingLeft: `${depthOf(tree, row) * 1.25}rem` }}>
-                      <OwnerCell row={row} />
-                      <Cells row={row} onSelect={setDetail} />
-                    </tr>
-                  ))
-                : shown.map((row) => (
-                    <tr key={row.identity.key}>
-                      <OwnerCell row={row} />
-                      <Cells row={row} onSelect={setDetail} />
-                    </tr>
+              <thead className="text-left">
+                <tr>
+                  <th scope="col" className="border-b border-[var(--line-0)] pb-1.5 pr-4 font-semibold uppercase tracking-[0.1em] text-[var(--fg-3)]">Owner</th>
+                  {SORTABLE.map((s) => (
+                    <th key={s.key} scope="col">
+                      <button type="button" onClick={() => toggleSort(s.key)} aria-sort={sortKey === s.key ? (sortDir === "asc" ? "ascending" : "descending") : "none"}>
+                        {s.label}
+                        {sortKey === s.key ? (sortDir === "asc" ? " ↑" : " ↓") : ""}
+                      </button>
+                    </th>
                   ))}
-            </tbody>
-          </table>
+                  <th scope="col" className="border-b border-[var(--line-0)] pb-1.5 pr-4 font-semibold uppercase tracking-[0.1em] text-[var(--fg-3)]">Lifecycle</th>
+                </tr>
+              </thead>
+              <tbody>
+                {flatTree !== null
+                  ? flatTree.rows.map((row) => (
+                      <tr key={row.identity.key}>
+                        <OwnerCell row={row} depth={flatTree.depths.get(row.identity.key) ?? 0} />
+                        <Cells row={row} onSelect={setDetail} />
+                      </tr>
+                    ))
+                  : shown.map((row) => (
+                      <tr key={row.identity.key}>
+                        <OwnerCell row={row} depth={0} />
+                        <Cells row={row} onSelect={setDetail} />
+                      </tr>
+                    ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </Card>
 
@@ -280,22 +300,40 @@ export default function ProcessExplorerPage(): React.JSX.Element {
   );
 }
 
-function depthOf(nodes: ReturnType<typeof buildTree>, target: HostProcessRow): number {
-  const walk = (list: ReturnType<typeof buildTree>, depth: number): number => {
+/**
+ * Depth of every row in a flattened tree, computed in one pass.
+ *
+ * The render used to call `depthOf(tree, row)` once per row, and each call
+ * walked the whole tree looking for that one key: O(n^2) over a 500-row sample
+ * that is re-fetched every 2 seconds, so a host of any size spent its time in
+ * this lookup. One walk up front makes it O(n) per sample.
+ */
+function depthMap(nodes: ReturnType<typeof buildTree>): Map<string, number> {
+  const depths = new Map<string, number>();
+  const walk = (list: ReturnType<typeof buildTree>, depth: number): void => {
     for (const n of list) {
-      if (n.row.identity.key === target.identity.key) return depth;
-      const found = walk(n.children, depth + 1);
-      if (found >= 0) return found;
+      depths.set(n.row.identity.key, depth);
+      walk(n.children, depth + 1);
     }
-    return -1;
   };
-  const found = walk(nodes, 0);
-  return found < 0 ? 0 : found;
+  walk(nodes, 0);
+  return depths;
 }
 
-function OwnerCell({ row }: { row: HostProcessRow }): React.JSX.Element {
+function OwnerCell({ row, depth }: { row: HostProcessRow; depth: number }): React.JSX.Element {
   return (
-    <td className="py-1 pr-2">
+    /*
+     * The tree indentation lives on this cell, not on the <tr>.
+     *
+     * It used to be `paddingLeft` on the row, and CSS does not render padding on
+     * a table-row box, so "Show as a tree" reordered the rows and indented
+     * nothing at all. Padding applies to a cell, so the indent and its matching
+     * left border are set here, where the hierarchy is finally visible.
+     */
+    <td
+      className="whitespace-nowrap py-1 pr-2"
+      style={depth > 0 ? { paddingLeft: `${depth * 1.25}rem`, borderLeft: "1px solid var(--line-1)" } : undefined}
+    >
       {/*
        * The owner distinction is stated, not implied by colour. A reader must be
        * able to tell at a glance which processes this gateway could terminate

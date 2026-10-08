@@ -2,18 +2,25 @@ import { useEffect, useMemo, useRef } from "react";
 import type { ComponentRef, ReactNode } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
-import type { Group, Mesh, MeshBasicMaterial, Vector3Tuple } from "three";
+import type { Group, Mesh, MeshBasicMaterial, PerspectiveCamera, Vector3Tuple } from "three";
 import { MathUtils, Vector3 } from "three";
 
 import type { ProcessSpace } from "../../lib/processSpace";
-import { TIME_AXIS_LENGTH, nodePosition } from "../../lib/processSpace";
+import { NODE_Z_OFFSET, RADIUS_MAX, TIME_AXIS_LENGTH, nodeEndZ, nodePosition } from "../../lib/processSpace";
 
-export type CameraPreset = "overview" | "tree" | "timeline" | "top" | "side";
+export type CameraPreset = "orbit" | "tree" | "timeline" | "top" | "side" | "fit";
 type Controls = ComponentRef<typeof OrbitControls>;
 
 export interface CameraPresetSpec {
-  /** Direction from the target to the camera, in world units. */
-  offset: Vector3Tuple;
+  /**
+   * Direction from the framing target toward the camera. The DISTANCE is not
+   * here: it is derived from the record's own extent, so the same preset frames
+   * a 40 ms run and a 40 s run at a readable size instead of one of them
+   * landing off-screen.
+   */
+  direction: Vector3Tuple;
+  /** Multiplier on the record-derived fit distance. */
+  zoom: number;
   label: string;
   meaning: string;
 }
@@ -24,25 +31,94 @@ export interface CameraPresetSpec {
  * running into the screen.
  */
 export const CAMERA_PRESETS: Record<CameraPreset, CameraPresetSpec> = {
-  overview: { offset: [13, 10, 21], label: "Overview", meaning: "lane, depth and time together" },
-  tree: { offset: [0.01, 0, 30], label: "Process tree", meaning: "looking down the time axis" },
-  timeline: { offset: [9, 6, 26], label: "Timeline", meaning: "time running into the screen" },
-  top: { offset: [0.01, 26, 14], label: "Top", meaning: "looking down on lanes and time" },
-  side: { offset: [28, 3, 0.01], label: "Side", meaning: "looking along the lanes" },
+  orbit: { direction: [13, 10, 21], zoom: 1, label: "Orbit", meaning: "lane, depth and time together" },
+  tree: { direction: [0.02, 0.2, 30], zoom: 1, label: "Process tree", meaning: "looking down the time axis" },
+  timeline: { direction: [9, 6, 26], zoom: 1, label: "Timeline", meaning: "time running into the screen" },
+  top: { direction: [0.02, 26, 14], zoom: 1, label: "Top", meaning: "looking down on lanes and time" },
+  side: { direction: [28, 3, 0.02], zoom: 1, label: "Side", meaning: "looking along the lanes" },
+  fit: { direction: [13, 10, 21], zoom: 1.22, label: "Fit", meaning: "the whole observed record in one frame" },
 };
 
-export const CAMERA_PRESET_ORDER: CameraPreset[] = ["overview", "tree", "timeline", "top", "side"];
+export const CAMERA_PRESET_ORDER: CameraPreset[] = ["orbit", "tree", "timeline", "top", "side", "fit"];
+
+/**
+ * A camera request.
+ *
+ * `revision` is what makes repeated requests work. The rig re-frames on a change
+ * of `revision`, not on a change of `kind` or `preset`, which is the whole point:
+ * pressing R twice, or pressing F on an already-selected node, must re-run the
+ * framing even though nothing it depends on has changed. The previous code had
+ * one counter driving two different effects, so the focus effect -- whose
+ * dependencies were the selection and the scene -- simply never re-ran and
+ * "focus" silently reset the camera instead.
+ */
+export interface CameraRequest {
+  kind: "frame" | "focus";
+  revision: number;
+}
+
+export interface SceneBounds {
+  center: Vector3;
+  radius: number;
+}
+
+/**
+ * The bounding sphere of everything the record actually draws.
+ *
+ * Derived from observed nodes only: their lane/depth/time position, the largest
+ * radius a node can reach under any lens, each node's recorded lifetime along Z,
+ * and the grid's own extent. A record with no observed process yields an empty
+ * sphere around the origin rather than a guessed scene.
+ */
+export function sceneBounds(space: ProcessSpace, scale: number): SceneBounds {
+  const axis = sceneDepth(space, scale);
+  if (space.nodes.length === 0) return { center: new Vector3(0, 0, axis * 0.5), radius: axis * 0.6 + 4 };
+
+  const min = new Vector3(Infinity, Infinity, Infinity);
+  const max = new Vector3(-Infinity, -Infinity, -Infinity);
+  for (const node of space.nodes) {
+    const p = nodePosition(node, scale);
+    min.x = Math.min(min.x, p.x - RADIUS_MAX);
+    max.x = Math.max(max.x, p.x + RADIUS_MAX);
+    min.y = Math.min(min.y, p.y - RADIUS_MAX);
+    max.y = Math.max(max.y, p.y + 1.9);
+    min.z = Math.min(min.z, p.z + NODE_Z_OFFSET);
+    max.z = Math.max(max.z, nodeEndZ(node, scale, space.spanMs));
+  }
+  // Event markers sit one lane to the right of their node and above it, and the
+  // selection ring lies flat on the ground plane.
+  min.x -= 1.6;
+  max.x += 1.6;
+  min.y -= 0.9;
+  max.z = Math.max(max.z, axis);
+  const center = new Vector3().addVectors(min, max).multiplyScalar(0.5);
+  return { center, radius: Math.max(4, min.distanceTo(max) * 0.5) };
+}
+
+/**
+ * How far back a sphere of this radius has to sit to fit the viewport.
+ *
+ * Uses the camera's real vertical FOV and aspect, so a narrow window does not
+ * clip the record. Clamped to the same range OrbitControls allows, so the rig
+ * never sets a goal the controls would fight.
+ */
+export function fitDistanceFor(radius: number, fovDegrees: number, aspect: number): number {
+  const vertical = MathUtils.degToRad(MathUtils.clamp(fovDegrees, 20, 80));
+  const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * Math.max(aspect, 0.4));
+  const narrowest = Math.min(vertical, horizontal);
+  return MathUtils.clamp(radius / Math.sin(narrowest / 2), 8, 130);
+}
 
 interface CameraRigProps {
   space: ProcessSpace;
   preset: CameraPreset;
+  /** What to frame next. Bumped on every explicit request. */
+  request: CameraRequest;
   /** The camera follows the replay cursor only when the user asks for it. */
   followCursor: boolean;
   cursorMs: number | null;
   selectedKey: string | null;
   reducedMotion: boolean;
-  /** Bumped to request a re-fit, e.g. from the "reset camera" shortcut. */
-  resetToken: number;
   controlsRef?: (controls: Controls | null) => void;
 }
 
@@ -50,41 +126,57 @@ interface CameraRigProps {
  * The camera is stable by default. It moves only when the user picks a preset,
  * resets, focuses a process, or enables cursor following, so a live execution
  * never re-centers the view behind the user's back.
+ *
+ * Every move is expressed as a goal and consumed by the same exponential lerp:
+ * there is no code path that assigns the camera position outright.
  */
-export function CameraRig({ space, preset, followCursor, cursorMs, selectedKey, reducedMotion, resetToken, controlsRef }: CameraRigProps) {
+export function CameraRig({ space, preset, request, followCursor, cursorMs, selectedKey, reducedMotion, controlsRef }: CameraRigProps) {
   const controls = useRef<Controls | null>(null);
   const { camera } = useThree();
   const scale = useMemo(() => timeScaleFor(space.spanMs), [space.spanMs]);
+  // The scene grows only when a process is observed or the recorded span grows;
+  // a new snapshot for an existing process does not move anything, so it must
+  // not re-frame the camera out from under a reader who is orbiting it.
+  const layout = useMemo(() => ({ nodes: space.nodes.length, spanMs: space.spanMs }), [space.nodes.length, space.spanMs]);
+  const bounds = useMemo(() => sceneBounds(space, scale), [layout, scale]);
   const goal = useRef<{ target: Vector3; position: Vector3 } | null>(null);
+  // Read the live scene through a ref so a fresh event batch cannot retrigger
+  // the effect: the effect is about the reader's request, not about the record
+  // changing underneath them.
+  const scene = useRef(space);
+  scene.current = space;
 
   useEffect(() => {
     controlsRef?.(controls.current);
   }, [controlsRef]);
 
-  // Fit the recorded record whenever the requested view changes.
+  // Fit the recorded record whenever a framing is requested.
   useEffect(() => {
+    if (request.kind === "focus") {
+      if (!selectedKey) return;
+      const node = scene.current.byKey.get(selectedKey);
+      if (!node) return;
+      const base = nodePosition(node, scale);
+      // A fixed, bounded world-space offset, so repeated focusing always lands
+      // on the same framing rather than drifting with the node's own depth.
+      goal.current = {
+        target: new Vector3(base.x, base.y, base.z + 2),
+        position: new Vector3(base.x + 8, base.y + 6, base.z + 11),
+      };
+      return;
+    }
     const spec = CAMERA_PRESETS[preset];
-    const axis = Math.max(TIME_AXIS_LENGTH * 0.5, space.spanMs * scale);
-    const lanes = Math.max(1, space.nodes.length);
+    const direction = new Vector3(spec.direction[0], spec.direction[1], spec.direction[2]);
+    if (direction.lengthSq() === 0) direction.set(0.02, 0.2, 1);
+    direction.normalize();
+    const perspective = camera as PerspectiveCamera;
+    const aspect = typeof perspective.aspect === "number" && perspective.aspect > 0 ? perspective.aspect : 1.6;
+    const distance = fitDistanceFor(bounds.radius, perspective.fov ?? 45, aspect) * spec.zoom;
     goal.current = {
-      target: new Vector3(lanes * 1.2, -1.2, axis * 0.45),
-      position: new Vector3(spec.offset[0], spec.offset[1], spec.offset[2]),
+      target: bounds.center.clone(),
+      position: bounds.center.clone().addScaledVector(direction, distance),
     };
-  }, [preset, space.nodes.length, space.spanMs, scale, resetToken]);
-
-  // Focus a selected process. Explicit action, not automatic tracking. The
-  // offset is a fixed, bounded world-space vector, so repeated focusing always
-  // lands on the same framing.
-  useEffect(() => {
-    if (!selectedKey) return;
-    const node = space.byKey.get(selectedKey);
-    if (!node) return;
-    const base = nodePosition(node, scale);
-    goal.current = {
-      target: new Vector3(base.x, base.y, base.z + 2),
-      position: new Vector3(base.x + 8, base.y + 6, base.z + 11),
-    };
-  }, [selectedKey, space.byKey, scale]);
+  }, [request, preset, bounds, scale, camera]);
 
   useFrame((_, delta) => {
     const next = goal.current;
@@ -98,6 +190,8 @@ export function CameraRig({ space, preset, followCursor, cursorMs, selectedKey, 
     } else {
       camera.lookAt(next.target);
     }
+    // Settled: the goal is reached, so the render loop has no camera work to do
+    // until the reader asks for something else.
     if (camera.position.distanceTo(next.position) < 0.06) goal.current = null;
   });
 

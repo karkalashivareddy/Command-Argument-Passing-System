@@ -63,17 +63,14 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      # `make test-scripts` runs every repository gate in Makefile's GATES --
+      # attribution, version, documentation links, lockfiles, repository
+      # hygiene, and trailing newlines -- plus the fixture tests for the gates
+      # that have them. The individual steps that used to follow it invoked
+      # three of those gates a second time by hand, which is how `make
+      # test-scripts` came to document seven gates while running three.
       - name: Every gate, against the real repository
         run: make test-scripts
-
-      - name: No build artifacts, databases, or local paths committed
-        run: sh scripts/check-repository-hygiene.sh
-
-      - name: Text files end with a newline
-        run: sh scripts/check-trailing-newline.sh
-
-      - name: Lockfiles are consistent with their manifests
-        run: sh scripts/check-lockfiles.sh
 
       - name: The version gate is itself trustworthy
         run: sh scripts/check-version.test.sh

@@ -71,6 +71,14 @@ The Linux backend now samples only the child PID reported by CAPS, at a controll
 ## Remaining limits
 
 - Web requests cannot produce `EXEC_ERROR` for arbitrary missing names because the gateway rejects unlisted executable names before fork; the C monitor tests cover true `execvp()` failure.
-- Stderr redirection and individual low-level file descriptor syscall events are unsupported.
+- Stderr redirection is **supported** — `2>` and `2>>` were verified above on the
+  C engine and through the gateway terminal, and on the API side it is a
+  terminal-route feature (`POST /api/terminal/execute`; `POST /api/sessions`
+  accepts only `in`/`out`/`append` and rejects a `stderr` slot with 400). What
+  remains unobserved is the individual low-level `open()`/`dup2()`/`close()`
+  events behind every redirection: the engine reports `REDIRECTION_OPENED` and
+  `REDIRECTION_FAILED` and then performs the syscalls, and nothing below that is
+  traced. This line was previously a flat "stderr redirection is unsupported",
+  which contradicted the PASS row above it.
 - The process graph shows the observed CAPS engine/target parent-child relation only when procfs PPID matches the gateway-spawned CAPS PID. It does not discover arbitrary descendants.
 - The browser-level gateway restart during an active child and dedicated long-duration memory profiling were not exercised. Backend restart persistence, SSE recovery, and replay remain covered by the prior verification pass.

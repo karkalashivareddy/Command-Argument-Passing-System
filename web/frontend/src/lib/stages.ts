@@ -85,43 +85,6 @@ export function stageStates(events: Array<{ type: CanonicalEventType }>, status:
   return out;
 }
 
-export function stageForEvent(t: CanonicalEventType): StageId | null {
-  switch (t) {
-    case "command.received":
-      return "input";
-    case "command.parse_error":
-      return "parse";
-    case "command.parsed":
-      return "argv";
-    case "redirection.failed":
-      return "fork";
-    case "process.started":
-      return "fork";
-    case "process.snapshot":
-      return "run";
-    case "process.exec_error":
-      return "exec";
-    case "process.exited":
-      return "run";
-    case "session.summary":
-      return "result";
-    /*
-     * The pipeline envelope belongs to the run phase: it brackets the stages
-     * rather than summarising the session, and PIPELINE_COMPLETED arrives
-     * BEFORE execution.completed, because every stage has been reaped but the
-     * gateway has not yet finalised the record.
-     */
-    case "pipeline.parsed":
-      return "parse";
-    case "pipeline.started":
-    case "pipeline.completed":
-      return "run";
-    case "signal.received":
-      return "wait";
-    default:
-      return null;
-  }
-}
 
 export const EVENT_LABELS: Record<CanonicalEventType, string> = {
   "execution.created": "EXECUTION CREATED",

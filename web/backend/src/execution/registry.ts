@@ -29,6 +29,26 @@ export interface ActiveSession {
    */
   childIdentity: ProcessIdentity | null;
   /**
+   * The pipeline's process group id, as reported by the engine on its per-stage
+   * events, and null until one arrives.
+   *
+   * This is an ADDRESS, not a record: it is what makes a timeout or a terminate
+   * reach every stage of a pipeline rather than only the last one, which
+   * `childPid` names. It is used only through `signalProcessGroup`, which first
+   * verifies the group leader's identity and its pgrp field, because
+   * `kill(-pgid)` has no identity check of its own.
+   */
+  childPgid: number | null;
+  /**
+   * The group leader's verified identity, captured at the moment the engine
+   * reported the fork.
+   *
+   * Paired with `childPgid` and required by it: a group id with no recorded
+   * leader cannot be proven to belong to this session, so the group path refuses
+   * and the single-PID path is used instead.
+   */
+  childGroupLeader: ProcessIdentity | null;
+  /**
    * Every process this session has forked, with its verified kernel identity.
    *
    * One field per session is not enough. A pipeline emits one `process.started`
@@ -195,17 +215,39 @@ export class ExecutionRegistry {
    * This is defensive cleanup for a case that should not happen: a finalized
    * execution is always removed here.  A session that survives is logged with
    * its state so the condition is visible rather than silently tidied away.
+   *
+   * Removal goes through `delete()`, not through the Map directly, because
+   * `delete()` is what clears the session's kill timer. Deleting from the Map
+   * behind its back orphaned that timer: it stayed armed, and when it fired it
+   * ran the timeout handler against a session the registry no longer tracked.
+   * The handler then emitted with its default sequence of 0 -- the registry
+   * lookup that assigns the sequence missed, because the session was gone --
+   * collided with the `UNIQUE(session_id, sequence)` constraint, had the failure
+   * swallowed, and signalled a PID belonging to a process nothing was tracking
+   * any more. Three symptoms, one wrong line.
+   *
+   * So the timer is cleared, and a session that is being swept while still
+   * non-terminal is reported with enough state to diagnose it.
    */
   sweep(now = Date.now(), staleMs = 120_000): string[] {
     const stale: string[] = [];
     for (const [id, s] of this.sessions) {
       const hasLiveProc = s.process !== null && s.process.exitCode === null && s.process.signalCode === null;
       if (!hasLiveProc && now - s.lastEventAt > staleMs) {
-        logger.warn("EXECUTION", "sweep removing stale session", { sessionId: id, state: s.state, finalized: s.finalized });
+        logger.warn("EXECUTION", "sweep removing stale session", {
+          sessionId: id,
+          state: s.state,
+          finalized: s.finalized,
+          // A non-terminal state here means the session row will be left without
+          // a terminal event, which is exactly the disagreement the sweep exists
+          // to avoid. Surfaced rather than hidden, because the caller is the only
+          // place that can finalize it.
+          strandedWithoutTerminalEvent: !s.finalized,
+        });
         stale.push(id);
       }
     }
-    for (const id of stale) this.sessions.delete(id);
+    for (const id of stale) this.delete(id);
     return stale;
   }
 }

@@ -32,8 +32,11 @@ it; where another document disagrees, this one is correct.
 * **Network I/O.** `/proc/<pid>/io` is not per-device, and no socket counter is
   collected.
 * **A file-descriptor census.**
-* **stderr redirection**, and the low-level `open`/`dup2`/`close` events behind
-  it.
+* **The low-level `open`/`dup2`/`close` events behind a redirection.** Redirection
+  *is* supported — `<`, `>`, `>>`, `2>`, `2>>`, on a single command or on one
+  stage of a pipeline — and the engine reports `REDIRECTION_OPENED` and
+  `REDIRECTION_FAILED` for it. What is not modelled is the descriptor-level
+  syscall trail underneath: nothing below the `open`/`dup2` pair is observed.
 * **Any metric on a PID other than the sampled one.**
 
 ### The one output-channel caveat

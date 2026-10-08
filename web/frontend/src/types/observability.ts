@@ -428,10 +428,51 @@ export interface SessionComparison {
 }
 
 /**
- * Future 3D contract: one frozen, serializable description of a process at a
- * point in execution time. The 3D scene is not implemented yet; this type is
- * the seam it will read, so no 3D code has to invent its own telemetry.
+ * One frozen, serializable description of a process at a point in execution
+ * time.
+ *
+ * This is the seam the 3D scene, the process list, the HUD and the tooltip all
+ * read, so no consumer has to re-parse telemetry or invent its own
+ * normalization. Consumers are components/space/ProcessSpace.tsx and
+ * components/space/NodeTooltip.tsx.
+ *
+ * WHY `raw` IS NOT A BAG OF NUMBERS
+ * ---------------------------------
+ * It used to be `Record<string, number | null>`. That dropped
+ * `TelemetryMetric.provenance` at this boundary: by the time a value reached the
+ * 3D node, the HUD, the node table or the tooltip, there was no way to tell an
+ * OBSERVED reading from a DERIVED rate, because both had become a bare number.
+ * One series is OBSERVED (`rssBytes`, read straight from /proc/<pid>/status) and
+ * nine are DERIVED (every per-second rate is a delta of two samples). They were
+ * drawn, hovered and labelled identically.
+ *
+ * So provenance travels WITH the value now. `RawMetric` is a value plus its
+ * provenance plus the reason when it is unavailable, and a renderer cannot
+ * display one without having been handed the other. This is the mechanism that
+ * makes "never present a DERIVED value as OBSERVED" a type-level property
+ * rather than a reviewer's memory.
  */
+export interface RawMetric {
+  /** The number, or null when UNAVAILABLE. Never 0 as a stand-in for absent. */
+  readonly value: number | null;
+  readonly provenance: TelemetryProvenance;
+  /** Present when UNAVAILABLE: why, verbatim from the backend. */
+  readonly reason?: string;
+  /**
+   * What the number counts. Present whenever the unit is not the obvious one,
+   * because `rchar`/`wchar` are CHARACTER counters and `read_bytes`/`write_bytes`
+   * are storage counters, and labelling either as "bytes" is the mistake this
+   * project has already made once.
+   */
+  readonly unitNote?: string;
+  /** The kernel path or backend field this value came from, when known. */
+  readonly source?: string;
+  /** How a DERIVED value was computed, when the backend stated it. */
+  readonly formula?: string;
+  /** The backend's own confidence in the value, when it stated one. */
+  readonly confidence?: string;
+}
+
 export interface ProcessVisualState {
   sessionId: string;
   sequence: number;
@@ -447,20 +488,24 @@ export interface ProcessVisualState {
   memory: number | null;
   io: number | null;
   faults: number | null;
-  /** Raw observed values behind the normalized ones, for labels and tooltips. */
+  /**
+   * The recorded values behind the normalized ones, each still carrying its own
+   * provenance. Consumers read `.value` for the number and MUST read
+   * `.provenance` before presenting it as anything but a number.
+   */
   raw: {
-    cpuPercent: number | null;
-    rssBytes: number | null;
-    rcharBytesPerSec: number | null;
-    wcharBytesPerSec: number | null;
-    readBytesPerSec: number | null;
-    writeBytesPerSec: number | null;
-    minorFaults: number | null;
-    majorFaults: number | null;
+    cpuPercent: RawMetric;
+    rssBytes: RawMetric;
+    rcharBytesPerSec: RawMetric;
+    wcharBytesPerSec: RawMetric;
+    readBytesPerSec: RawMetric;
+    writeBytesPerSec: RawMetric;
+    minorFaults: RawMetric;
+    majorFaults: RawMetric;
     /** DERIVED per-second rates, the values the fault lens actually reads. */
-    minorFaultsPerSec: number | null;
-    majorFaultsPerSec: number | null;
-    threadCount: number | null;
+    minorFaultsPerSec: RawMetric;
+    majorFaultsPerSec: RawMetric;
+    threadCount: RawMetric;
   };
   /** Why any of the above may be missing, verbatim from the backend. */
   unavailable: Array<{ metric: string; reason: string }>;

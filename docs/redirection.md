@@ -1,7 +1,7 @@
 # Redirection
 
-Feature: interactive REPL supports `>` (truncate), `>>` (append), and
-`<` (input).
+Feature: the interactive REPL and the terminal route support `>` (truncate),
+`>>` (append), `<` (input), and the fd-2 forms `2>` and `2>>`.
 
 Audience: a new systems programmer who knows `fork`/`exec`/`wait` and
 wants to understand *why* a shell needs file descriptors, and how one
@@ -35,19 +35,24 @@ close()  -> release a descriptor no longer needed  (closes the "a")
 
 ---
 
-## 2. The three operators
+## 2. The five operators
 
 | Token | Flags passed to `open()`                | Child target |
 | ----- | ---------------------------------------- | ------------ |
 | `<`   | `O_RDONLY`                               | fd 0 (stdin) |
 | `>`   | `O_WRONLY | O_CREAT | O_TRUNC`           | fd 1 (stdout)|
 | `>>`  | `O_WRONLY | O_CREAT | O_APPEND`          | fd 1 (stdout)|
+| `2>`  | `O_WRONLY | O_CREAT | O_TRUNC`           | fd 2 (stderr)|
+| `2>>` | `O_WRONLY | O_CREAT | O_APPEND`          | fd 2 (stderr)|
 
 Notes:
 
 - `<` must exist; `open()` fails with `ENOENT` otherwise.
 - `>` and `>>` create the file if absent (mode 0644).
 - `>` truncates; `>>` preserves prior content and writes at the end.
+- `2>` and `2>>` are the same pair aimed at fd 2. Every target is opened
+  `O_NOFOLLOW` with a regular-file check, so `2>` is held to the same
+  workspace policy as `>`.
 
 `O_TRUNC` vs `O_APPEND` is checkable: create a file, then run the same
 command twice with both spellings and inspect the contents.
@@ -147,48 +152,72 @@ whatever b currently holds."*
 
 ## 5. Parser contract
 
-The tokenizer stays dumb — it splits on whitespace only. Redirection is
-a *second pass* over the token list (`parser_split_redirections`):
+Redirection is a *second pass* over the token list
+(`parser_split_redirections`), applied to argv already built by
+`parser_tokenize()`:
 
-1. Validate first: every `<`, `>`, `>>` must be followed by a token.
+1. Validate first: every `<`, `>`, `>>`, `2>`, `2>>` must be followed by
+   a token, and an operator may never occupy the file-name slot.
    Any violation reports a syntax error and the line is left untouched.
-2. Classify each operator and record `(type, file)`.
+2. Classify each operator and record `(type, fd, file)`.
 3. Remove the operator tokens and move the file tokens into the
    redirection list, compacting the remaining argv in place;
    `argv[argc] == NULL` is re-established.
 
-Redirection only works on whole tokens: `echo 2>` writes `2>` to stdout
-as a literal argument; there is no fd-number syntax (`2>`) and no
-`&>`; a redirection operator cannot be embedded in a word (`x>`).
+Redirection works on whole tokens, and the tokenizer never splits inside a
+word: `echo hi >f` is two literal arguments, and `echo hi> f` is two literal
+arguments. There is no `&>`, and no heredocs or process substitution.
 
-### 5.1 Grammar: whitespace is required
+### 5.1 fd-number syntax is partial, and the partiality is deliberate
+
+The fd-number prefix is implemented for **2 only**:
+
+| Form | Status |
+| --- | --- |
+| `2>` | implemented: fd 2, truncate |
+| `2>>` | implemented: fd 2, append |
+| `1<` | **not** implemented — the token is an ordinary word |
+
+`2>` exists because the engine genuinely has to open a second descriptor for
+stderr and `dup2()` it onto slot 2; that is a mechanism worth demonstrating and
+it is the one the terminal grammar publishes. `1<` would spell out the default
+that `<` already gives, so it is not special-cased — and leaving it literal is
+documented here rather than left for a reader to discover by trying it.
+`tests/test_lifecycle.sh` exercises the strong form of `2>`: it asserts the
+program's stderr really lands in the named file and that stdout does not leak
+into it.
+
+### 5.2 Grammar: whitespace is required
 
 The operator is recognized **only** as a token equal to exactly `>`,
-`>>` or `<`, separated from its neighbours by whitespace. The tokenizer
-never splits inside a word, so:
+`>>`, `<`, `2>`, or `2>>`, separated from its neighbours by whitespace. The
+tokenizer never splits inside a word, so:
 
 | Input          | Interpretation                                   |
 | -------------- | ------------------------------------------------ |
 | `echo hi > f`  | redirect stdout to `f` (operator is token `>`)   |
 | `echo hi >f`   | literal arguments `hi` and `>f`; **no** redirect |
 | `echo hi> f`   | literal arguments `hi>` and `f`; **no** redirect  |
+| `echo hi 2> f` | redirect stderr to `f` (operator is token `2>`)  |
 
-This mirrors the project's "dumb tokenizer, explicit grammar" rule:
-there is no operator merging and no re-tokenization.
+This mirrors the project's "explicit grammar, no operator merging and no
+re-tokenization" rule.
 
-### 5.2 Multiple redirections
+### 5.3 Multiple redirections
 
 A line may contain more than one redirection operator. All of them are
 extracted; the command's argv keeps only non-redirection tokens:
 `cat < in > out` becomes argv `["cat", NULL]` plus two entries:
-`(<, "in")` and `(>, "out")`.
+`(<, "in")` and `(>, "out")`. Redirections attach to the stage they are
+written on, so in `a | b > out 2> err` both forms belong to `b`.
 
 The child applies them in the order the file tokens appeared on the
-line. Because each operator targets a fixed slot (`<` → fd 0, `>`/`>>`
-→ fd 1), a repeated target means **last one wins**: `echo hi > a > b`
-writes only to `b` (`a` is still created/truncated, since the parent
-opens every file first, but fd 1 ends up pointing at `b`). This is a
-deliberately simple, documented rule; it is not an error.
+line. Because each operator targets a fixed slot (`<` → fd 0,
+`>`/`>>` → fd 1, `2>`/`2>>` → fd 2), a repeated target means **last one
+wins**: `echo hi > a > b` writes only to `b` (`a` is still
+created/truncated, since the parent opens every file first, but fd 1 ends
+up pointing at `b`). This is a deliberately simple, documented rule; it is
+not an error.
 
 ---
 
@@ -198,7 +227,7 @@ deliberately simple, documented rule; it is not an error.
 | -------------------------- | --------------------------------------------------- |
 | Built-ins (`help`/`exit`/`cd`) with redirection | rejected with an error                  |
 | One-shot `caps cmd > f`    | tokens passed literally to `cmd` (no REPL parsing)  |
-| fd numbers (`2>`, `1<`)    | treated as literal words                            |
+| `1<` (explicit fd 1 for input) | treated as a literal word; only `2>`/`2>>` have fd-number syntax |
 | `&>` (stdout+stderr)       | not recognized                                      |
 | heredocs, process substitution | not recognized                                  |
 

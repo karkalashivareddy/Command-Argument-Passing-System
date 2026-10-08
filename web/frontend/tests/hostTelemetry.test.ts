@@ -18,7 +18,6 @@ import {
   formatHertz,
   formatMilliseconds,
   formatMilliCelsius,
-  formatPercent,
   hasValue,
   median,
   percentile,
@@ -158,10 +157,14 @@ describe("units are formatted so the number cannot be misread", () => {
     expect(formatMilliseconds(120_000)).toBe("2.00 min");
   });
 
-  it("treats a 0..1 fraction as a percentage and leaves a 0..100 one alone", () => {
-    expect(formatPercent(0.425)).toBe("42.5%");
-    expect(formatPercent(42.5)).toBe("42.5%");
-  });
+  /*
+   * The old host-telemetry `formatPercent` inferred a unit from the magnitude:
+   * `value > 0 && value <= 1 ? value * 100 : value`. procfs publishes CPU
+   * utilisation already in percent, so a genuine 0.4% share rendered as "40.0%",
+   * an error of two orders of magnitude on the one number the page exists to
+   * report honestly. The function and its test are both gone; the app formats
+   * percentages through `lib/format.ts`, which takes a percent and says so.
+   */
 });
 
 describe("a rate is not stated when it cannot be computed honestly", () => {

@@ -15,11 +15,12 @@ import { RedirectionDiagram } from "../components/execution/RedirectionDiagram";
 import { ReplayPanel } from "../components/execution/ReplayPanel";
 import { ResultPanel } from "../components/execution/ResultPanel";
 import { SequenceBadge } from "../components/execution/SequenceBadge";
+import { EvidenceChain } from "../components/evidence/EvidenceChain";
+import { FailureEvidence } from "../components/execution/FailureEvidence";
 import { SignalDiagram } from "../components/execution/SignalDiagram";
 import { Timeline } from "../components/execution/Timeline";
 import { Badge, Button, Card, CopyButton, EmptyState, LiveBadge, Spinner, StatusDot } from "../components/ui";
 import { fmtClock, fmtDuration, shortId } from "../lib/format";
-import { collectSamples } from "../lib/telemetry";
 import { buildEvidenceIndex, eventCursorMs, eventIdentity, resolveSelection } from "../lib/evidenceCorrelation";
 import type { ProcessSnapshot } from "../types/observability";
 import { STATUS_META } from "../lib/stages";
@@ -80,16 +81,49 @@ export default function ExecutionPage() {
 
   /**
    * One execution-time cursor for the whole observatory. In replay it comes
-   * from the scrubber; live, it follows the newest sample until the user
-   * clicks a track or a peak card, then it stays where they put it.
+   * from the scrubber; live, it follows the newest record until the user clicks
+   * a track or a peak card, then it stays where they put it.
    */
-  const liveSamples = useMemo(() => collectSamples(events), [events]);
-  const latestSampleMs = liveSamples.at(-1)?.atMs ?? null;
   const storeCursor = cursorForView({ cursorMs: storeCursorMs, cursorPinned, cursorSource }, !replayMode);
-  const sharedCursorMs = replayMode ? storeCursor : storeCursor ?? latestSampleMs;
+
+  /*
+   * The effective cursor is whatever `cursorForView` says, unchanged.
+   *
+   * This used to be `replayMode ? storeCursor : storeCursor ?? latestSampleMs`,
+   * and that one `??` made the two views disagree about the same record in the
+   * default live path. `cursorForView` returns null for an unpinned live cursor,
+   * and null means "the whole record" -- so a process that exited between its last
+   * telemetry sample and `execution.completed` read as COMPLETED here but
+   * RUNNING in the 3D scene, which resolved the same null to the end of the
+   * record. Two views, one store, two answers, on a path nobody would think to
+   * check.
+   *
+   * The 3D semantics are the correct ones and are now shared: null means the end
+   * of the record, so a finished execution is never still shown as running. Note
+   * that the last snapshot and the last event are almost never the same instant,
+   * which is exactly why the two answers differed.
+   */
+  const sharedCursorMs = storeCursor;
 
   const seekTo = (atMs: number) => {
     if (id) moveCursor(id, atMs, replayMode ? "replay" : "user");
+  };
+
+  /*
+   * Select an event BY SEQUENCE, for surfaces that hold a sequence number and
+   * not an event object (the evidence chain, the failure panel).
+   *
+   * It goes through `selectEvidence` with the same correlation the event console
+   * uses: the identity comes from the correlation layer, never from the event's
+   * envelope PID, and the cursor lands on the event's own recorded timestamp. A
+   * second, local "selected sequence" here would be exactly the second selection
+   * model this page is built to avoid.
+   */
+  const selectSequence = (sequence: number) => {
+    if (!id) return;
+    const ev = activeEvents.find((e) => e.sequence === sequence);
+    if (ev === undefined) return;
+    selectEvidence(id, ev.sequence, eventIdentity(ev, index), eventCursorMs(ev, index));
   };
 
   // The selection, resolved against the same events the page is showing. An
@@ -304,6 +338,22 @@ export default function ExecutionPage() {
         <ResultPanel status={activeStatus} exitCode={session.exitCode} signal={session.signal} durationMs={session.durationMs} isSuccess={session.isSuccess} error={session.error} />
       ) : null}
 
+      {/*
+        The failure evidence panel, on top of the status bar rather than inside
+        it. A FAILED status is a gateway verdict; this is the record behind it —
+        the reason, the exit status, and the event sequence that proves it. It
+        renders whenever there is a failure to explain, and says plainly when
+        there is not one, instead of leaving a bare red badge.
+      */}
+      {activeStatus === "FAILED" || activeStatus === "TIMED_OUT" || activeStatus === "CANCELLED" || session.error !== null || activeEvents.some((e) => e.type.endsWith("_failed") || e.type === "command.parse_error") ? (
+        <FailureEvidence
+          session={session}
+          events={activeEvents}
+          selectedSequence={eventSeq}
+          onSelectEvent={id ? selectSequence : undefined}
+        />
+      ) : null}
+
       {/* Execution pipeline — driven live by the event stream */}
       <Card title="Execution pipeline" subtitle={replayMode ? "showing the replayed snapshot of the real timeline" : "updates as real CAPS events arrive"} actions={<PipelineLegendInline />} pad={false}>
         <div className="px-4 py-3">
@@ -322,6 +372,20 @@ export default function ExecutionPage() {
        * instead of quietly disappearing from the total.
        */}
       <PipelineEvidenceView events={activeEvents} />
+
+      {/*
+        The evidence chain sits directly under the pipeline because it is the
+        other half of the same picture: the diagram shows the shape of the run,
+        the chain shows which of its stages the record actually supports. It
+        reads `activeEvents`, so in replay a reader who has scrubbed to the fork
+        sees exactly the stages that prefix justifies.
+      */}
+      <EvidenceChain
+        events={activeEvents}
+        sessionId={id}
+        selectedSequence={eventSeq}
+        onSelectEvent={id ? selectSequence : undefined}
+      />
 
       {/* Process topology + argument vector */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -396,12 +460,12 @@ export default function ExecutionPage() {
             live={!replayMode && !ended}
             selectedSequence={eventSeq}
             onSelect={(ev) => {
-              if (!id) return;
-              // The cursor goes to the event's own recorded timestamp. Nothing
-              // is interpolated, and the process comes from the correlation
-              // layer's verified mapping, so a recycled PID cannot ride along
-              // on an envelope PID alone.
-              selectEvidence(id, ev.sequence, eventIdentity(ev, index), eventCursorMs(ev, index));
+              // The same store write the chain and the failure panel make. The
+              // cursor goes to the event's own recorded timestamp. Nothing is
+              // interpolated, and the process comes from the correlation layer's
+              // verified mapping, so a recycled PID cannot ride along on an
+              // envelope PID alone.
+              selectSequence(ev.sequence);
             }}
             onClearSelection={id ? () => clearAll(id) : undefined}
           />

@@ -256,8 +256,11 @@ The capture **fails rather than producing a placeholder**:
 
 - if a route renders fewer than 200 characters of text, the view did not render;
 - if a screenshot's own subject is not on the page, the capture stops;
-- if a source file is newer than the built bundle, the run refuses to photograph
-  a stale build.
+- if the newest file under `web/frontend/src` is newer than the newest file
+  under `web/frontend/dist`, the run refuses: it compares mtimes across both
+  trees and throws before Chromium starts, so it cannot photograph a build older
+  than the code. `CAPS_SHOT_ALLOW_STALE=1` overrides that deliberately, and
+  says so in the log. An absent `dist` is refused rather than reported as fresh.
 
 Nothing is painted, mocked, or cropped to hide a state.
 

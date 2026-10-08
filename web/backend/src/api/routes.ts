@@ -237,21 +237,23 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
           configuredBytesOrMs: config.guardrails.wallTimeMs,
           unit: "ms",
           enforced: true,
-          mechanism: "the engine's own timeout; the gateway escalates with an identity-verified SIGKILL",
+          mechanism:
+            "the gateway's own timer; on expiry it escalates SIGTERM then SIGKILL. The engine has no timeout of its own",
         },
         wallTimeCeiling: { configuredBytesOrMs: config.guardrails.maxWallTimeMs, unit: "ms", enforced: true },
         stdout: {
           configuredBytesOrMs: config.guardrails.stdoutBytes,
           unit: "bytes",
           enforced: true,
-          mechanism: "the engine stops the child when a stream exceeds the cap and records the truncation",
+          mechanism:
+            "the gateway bounds the retained stdout buffer and records the truncation. The child is NOT stopped for producing output, and does not need to be: both pipes are drained continuously, so a full pipe cannot block the child",
         },
         stderr: {
           configuredBytesOrMs: config.guardrails.stderrBytes,
           unit: "bytes",
           enforced: true,
           mechanism:
-            "stderr is bounded separately from stdout; an unbounded stderr fills its pipe and would deadlock a child that is otherwise healthy",
+            "bounded separately from stdout, so a loud stderr cannot consume the stdout budget. The gateway drains both pipes continuously, so an unbounded stderr fills no pipe and cannot deadlock a healthy child",
         },
         cpuTime: {
           configuredBytesOrMs: config.guardrails.cpuBudgetMs,
@@ -259,9 +261,10 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
           enforced: config.guardrails.cpuBudgetMs > 0,
           mechanism:
             config.guardrails.cpuBudgetMs > 0
-              ? "compared against the kernel's own accounting after each wait; a process that exhausts its CPU budget is terminated"
+              ? "RLIMIT_CPU applied to the child before exec, via the engine's CAPS_LIMIT_CPU_SECONDS. The kernel counts the CPU time, not CAPS"
               : "not configured; CPU time is observed and recorded but not limited",
-          caveat: "This is CPU time, not wall-clock time. A process sleeping on I/O consumes none.",
+          caveat:
+            "This is CPU time, not wall-clock time. A process sleeping on I/O consumes none. The kernel's limit is whole seconds, so a millisecond budget is rounded UP to the next second and the real ceiling is never tighter than the configured one",
         },
         addressSpace: {
           configuredBytesOrMs: config.guardrails.addressSpaceBytes,
@@ -269,7 +272,7 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
           enforced: config.guardrails.addressSpaceBytes > 0,
           mechanism:
             config.guardrails.addressSpaceBytes > 0
-              ? "RLIMIT_AS applied to the child before exec"
+              ? "RLIMIT_AS applied to the child before exec, via the engine's CAPS_LIMIT_ADDRESS_SPACE_BYTES"
               : "not configured",
           caveat:
             "RLIMIT_AS caps VIRTUAL ADDRESS SPACE, not physical memory. It bears no simple relation to RSS or to the machine's RAM: a modest limit can be exhausted by mappings that never touch a page, and a generous one says nothing about resident memory. It is reported as address space everywhere in CAPS for this reason.",
@@ -278,7 +281,7 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
           configuredBytesOrMs: config.guardrails.maxConcurrent,
           unit: "simultaneous executions",
           enforced: true,
-          mechanism: "a request beyond the limit is refused with 503 rather than queued indefinitely",
+          mechanism: "a request beyond the limit is refused with 429 rather than queued indefinitely",
         },
         thermal: await (async () => {
           const guard = inspectThermalGuard(config.thermalGuard);
@@ -333,7 +336,12 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
         stderrNote:
           "stderr redirection is a terminal-route feature. POST /api/sessions accepts only in/out/append and rejects a stderr slot with 400. Both routes validate the target against the workspace policy and the engine opens it with O_NOFOLLOW.",
       },
-      signals: { supported: ["SIGINT", "SIGTERM", "SIGKILL", "SIGQUIT", "SIGTSTP"], identityVerified: true },
+      signals: {
+        supported: ["SIGINT", "SIGTERM", "SIGKILL", "SIGQUIT", "SIGTSTP"],
+        identityVerified: true,
+        identityVerificationScope:
+          "verified before every DELAYED escalation, and for every signal delivered through pidfd. The first signal of a terminate or a timeout is delivered by kill(2) to the PID the gateway spawned, without a re-read of /proc first; that PID is the gateway's own unreaped child at that moment, so it cannot have been recycled. This distinction is published rather than blurred because SECURITY.md documents it and a reviewer will compare the two.",
+      },
       workloads: {
         count: workloadCapabilities().length,
         available: workloadCapabilities().filter((w) => w.available).length,
@@ -360,7 +368,7 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
         kernel: identity.kernel,
         terminationMechanism: identity.available ? "pidfd" : identity.confidence === "UNVERIFIED" ? "start-ticks" : "unavailable",
         invariant:
-          "CAPS signals only processes it started, and only after checking that the kernel still reports the identity it recorded at spawn. A PID on its own is never sufficient, because PIDs are reused.",
+          "CAPS signals only processes it started. Every DELAYED escalation, and every pidfd signal, checks that the kernel still reports the identity it recorded before delivering. A PID on its own is never sufficient, because PIDs are reused. The first signal of a terminate is the one exception, and it is described under signals.identityVerificationScope.",
       },
       observability: {
         timeline: { enabled: true, axis: "seconds-relative-to-first-event" },
@@ -797,7 +805,17 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
 
     const result = runner.requestTerminate(id, parsed.data.signal);
     if (result.sent) {
-      logger.info("SECURITY", "terminate requested", { sessionId: id, signal: parsed.data.signal, pid: active.childPid, identityVerified: true });
+      // The recorded fields are what was actually observed, and nothing else.
+      // `identityVerified: true` used to be a literal here, which made the
+      // audit record of every kill attest to a check the first-signal path does
+      // not perform. The mechanism is now the fact.
+      logger.info("SECURITY", "terminate requested", {
+        sessionId: id,
+        signal: parsed.data.signal,
+        pid: active.childPid,
+        mechanism: result.mechanism,
+        startTicks: result.identity?.startTicks ?? null,
+      });
       return reply.code(202).send({ sessionId: id, signal: parsed.data.signal, status: "SIGNAL_SENT" });
     }
     return sendError(reply, 409, "SIGNAL_FAILED", result.reason ?? "Signal could not be delivered.", requestId(req));
@@ -990,7 +1008,7 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
       "- Missing values are UNAVAILABLE rather than filled with zero.",
       "",
       "## Limits of this report",
-      "- stderr redirection and low-level `open()`/`dup2()`/`close()` events are unsupported.",
+      "- Stderr redirection (`2>`, `2>>`) is supported and implemented; the low-level per-syscall `open()`/`dup2()`/`close()` events behind every redirection are not observed. The engine reports REDIRECTION_OPENED / REDIRECTION_FAILED and then performs the syscalls, and nothing below that is traced.",
       "- Only the CAPS-owned child PID is sampled; descendants it forks are NOT discovered, so a fork-heavy workload shows fork activity of one process, not a process tree.",
       "- CAPS diagnostics and the target's stderr share one descriptor and are separated line-wise, not at descriptor level.",
       "- Syscall tracing, eBPF, cgroup accounting, network I/O, and file-descriptor counts are not collected.",

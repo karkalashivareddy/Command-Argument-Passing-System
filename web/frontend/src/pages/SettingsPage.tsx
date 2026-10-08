@@ -8,7 +8,7 @@ import type { CapabilitiesResponse } from "../types/observability";
 
 export default function SettingsPage() {
   const engine = useUi((s) => s.engine);
-const readiness = useUi((s) => s.readiness);
+  const readiness = useUi((s) => s.readiness);
   const capabilities = useUi((s) => s.capabilities);
   const [sessions, setSessions] = useState<{ total: number } | null>(null);
 
@@ -17,6 +17,39 @@ const readiness = useUi((s) => s.readiness);
   }, []);
 
   const caps: CapabilitiesResponse | null = capabilities;
+
+  /*
+   * What to say about the engine binary.
+   *
+   * Three states, because "not probed" is not "not available" and this page used
+   * to say it was. `/api/ready` is fetched with `.catch(() => null)`, so an
+   * absent `readiness` means the readiness probe did not answer -- it does not
+   * mean the engine is down. The capability probe answers the same question
+   * independently, and the sidebar and top bar already render ITS answer, so the
+   * fallback has to agree with them or the screen contradicts itself.
+   */
+  const engineStatus = (() => {
+    if (readiness !== null && readiness !== undefined) {
+      return readiness.checks.engine.available
+        ? { label: "available", tone: "text-[var(--green)]", reason: readiness.checks.engine.detail }
+        : { label: "unavailable", tone: "text-[var(--danger)]", reason: readiness.checks.engine.detail };
+    }
+    if (capabilities !== null) {
+      return {
+        label: capabilities.engineAvailable ? "available (readiness not probed)" : "unavailable",
+        tone: capabilities.engineAvailable ? "text-[var(--green)]" : "text-[var(--danger)]",
+        reason: "The readiness probe did not answer, so this is the capability probe's own verdict.",
+      };
+    }
+    return {
+      label: "not probed",
+      tone: "text-[var(--fg-3)]",
+      reason: "Neither the readiness nor the capability probe has answered yet.",
+    };
+  })();
+  const engineStatusLabel = engineStatus.label;
+  const engineStatusTone = engineStatus.tone;
+  const engineStatusReason = engineStatus.reason;
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 px-6 py-6">
@@ -30,7 +63,33 @@ const readiness = useUi((s) => s.readiness);
             <EmptyState icon={<Cog className="h-5 w-5" />} title="No engine info" body="The gateway did not report health." />
           ) : (
             <dl className="space-y-2 text-[13px]">
-              <div className="flex justify-between gap-3"><dt className="text-[var(--fg-3)]">Status</dt><dd className="font-mono text-[var(--green)]">{readiness?.checks.engine.available ? "available" : "unavailable"}</dd></div>
+              {/*
+                Three states, not two.
+
+                This read `readiness?.checks.engine.available ? "available" : "unavailable"`,
+                and `readiness` is fetched with `.catch(() => null)`. So a failed
+                `/api/ready` -- while `/api/health` and `/api/capabilities` both
+                succeed, which is entirely possible since readiness also probes the
+                database and the host collector -- rendered "unavailable" in GREEN
+                type, at the same moment as the sidebar and top bar said "ENGINE
+                ONLINE" from `/api/capabilities`. Two contradictory statements about
+                one fact, both on screen.
+
+                It also conflated "not probed" with "not available", which is the
+                distinction this product is otherwise careful about everywhere else.
+
+                So an absent readiness probe reports that it was not probed, and
+                falls back to the capability probe's own answer.
+                */}
+              <div className="flex justify-between gap-3">
+                <dt className="text-[var(--fg-3)]">Status</dt>
+                <dd
+                  className={`font-mono ${engineStatusTone}`}
+                  title={engineStatusReason}
+                >
+                  {engineStatusLabel}
+                </dd>
+              </div>
               <div className="flex justify-between gap-3"><dt className="text-[var(--fg-3)]">Version</dt><dd className="font-mono">{engine.version}</dd></div>
               <div className="flex justify-between gap-3"><dt className="text-[var(--fg-3)]">Platform</dt><dd className="font-mono">{engine.platform}</dd></div>
               <div className="flex justify-between gap-3"><dt className="text-[var(--fg-3)]">Binary</dt><dd className="truncate font-mono">{capabilities?.enginePath ?? "UNAVAILABLE"}</dd></div>

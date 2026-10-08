@@ -2,6 +2,7 @@ import type {
   CanonicalEvent,
   ProcessSnapshot,
   ProcessVisualState,
+  RawMetric,
   RuntimePeakPoint,
   RuntimePeaks,
   TelemetryMetric,
@@ -453,24 +454,98 @@ function ratio(value: number | null, peak: number | null): number | null {
 }
 
 /**
- * One frozen, serializable description of a process at one instant. The 3D
- * scene is not built yet; this is the contract it will consume, so no 3D code
- * has to re-parse telemetry or invent its own normalization.
+ * Normalize one recorded metric into a value that still knows what it is.
+ *
+ * This is the single place a `TelemetryMetric` becomes a `RawMetric`, and it is
+ * where provenance used to be thrown away. `numeric()` returns a bare number, so
+ * every consumer downstream had no way to distinguish an OBSERVED reading from
+ * a DERIVED rate; the HUD, the node table and the tooltip all rendered nine
+ * derived rates in the same style as one observed gauge.
+ *
+ * Two notes on faithfulness:
+ *
+ *  - An UNAVAILABLE metric keeps `value: null` and its reason. It is never
+ *    coerced to 0, because 0 is a legitimate reading of several of these (a
+ *    process that never faulted really did record 0 minor faults) and conflating
+ *    the two would make the honest reading indistinguishable from the absent one.
+ *
+ *  - `unitNote` is attached where the name understates what is counted.
+ *    `rchar`/`wchar` in /proc/<pid>/io are CHARACTER counters that include page
+ *    cache and are NOT storage traffic; `read_bytes`/`write_bytes` are storage
+ *    counters. A lens that takes the max of both and labels the result "bytes
+ *    per second" is averaging two different physical quantities, so both carry
+ *    the note and the lens states which one it picked.
+ */
+function rawMetric(metric: unknown, unitNote?: string): RawMetric {
+  const found = metric as (TelemetryMetric<number> & { source?: string; formula?: string; confidence?: string }) | undefined;
+  if (found === undefined || found === null) {
+    return { value: null, provenance: "UNAVAILABLE", reason: "metric absent from this snapshot" };
+  }
+  const extras = {
+    ...(found.source === undefined ? {} : { source: found.source }),
+    ...(found.formula === undefined ? {} : { formula: found.formula }),
+    ...(found.confidence === undefined ? {} : { confidence: found.confidence }),
+    ...(unitNote === undefined ? {} : { unitNote }),
+  };
+  if (found.provenance === "UNAVAILABLE" || found.value === null) {
+    return {
+      value: null,
+      provenance: "UNAVAILABLE",
+      reason: found.reason ?? "unavailable for this sample",
+      ...extras,
+    };
+  }
+  return { value: found.value, provenance: found.provenance ?? "OBSERVED", ...extras };
+}
+
+/** The character-counter note, shared by the two rchar/wchar series. */
+const CHARS_NOT_BYTES =
+  "counts characters from /proc/<pid>/io, including page cache. Not storage traffic";
+/** The storage-counter note. */
+const STORAGE_BYTES = "counts bytes actually transferred to or from the storage device";
+
+/**
+ * One frozen, serializable description of a process at one instant.
+ *
+ * This is the contract the 3D scene, the process list, the HUD and the tooltip
+ * all read, so no consumer re-parses telemetry or invents its own
+ * normalization.
  */
 export function buildVisualState(sample: TelemetrySample, peaks: VisualStatePeaks): ProcessVisualState {
   const { snapshot, event } = sample;
+
+  /*
+   * Every metric that can be UNAVAILABLE is listed, not just four.
+   *
+   * This loop used to inspect cpuPercent, rssBytes, minorFaults and threadCount
+   * only. The io rates, the fault rates, majorFaults and cpuTimeMs were omitted,
+   * so the panel whose entire job is to explain missing telemetry under-reported
+   * it -- it would claim a process was fully measured while seven of its metrics
+   * were absent. Omission here is a false negative about the product's own
+   * completeness, which is the same class of error as rendering 0 for absent.
+   */
   const unavailable: Array<{ metric: string; reason: string }> = [];
-  const report = (metric: string, reason?: string): void => {
-    if (reason !== undefined) unavailable.push({ metric, reason });
-  };
-  for (const [metric, value] of [
+  const REPORTED = [
     ["cpuPercent", snapshot.cpuPercent],
     ["rssBytes", snapshot.rssBytes],
     ["minorFaults", snapshot.minorFaults],
+    ["majorFaults", snapshot.majorFaults],
     ["threadCount", snapshot.threadCount],
-  ] as const) {
+    ["cpuTimeMs", snapshot.cpuTimeMs],
+    ["rcharBytesPerSec", snapshot.rcharBytesPerSec],
+    ["wcharBytesPerSec", snapshot.wcharBytesPerSec],
+    ["readBytesPerSec", snapshot.readBytesPerSec],
+    ["writeBytesPerSec", snapshot.writeBytesPerSec],
+    ["minorFaultsPerSec", snapshot.minorFaultsPerSec],
+    ["majorFaultsPerSec", snapshot.majorFaultsPerSec],
+  ] as const;
+  for (const [metric, value] of REPORTED) {
     const found = value as TelemetryMetric<number> | undefined;
-    if (found?.provenance === "UNAVAILABLE") report(metric, found.reason ?? "unavailable for this sample");
+    if (found === undefined || found === null) {
+      unavailable.push({ metric, reason: "metric absent from this snapshot" });
+    } else if (found.provenance === "UNAVAILABLE" || found.value === null) {
+      unavailable.push({ metric, reason: found.reason ?? "unavailable for this sample" });
+    }
   }
 
   const rchar = numeric(snapshot.rcharBytesPerSec);
@@ -495,17 +570,17 @@ export function buildVisualState(sample: TelemetrySample, peaks: VisualStatePeak
     io: ratio(ioTotal, peaks.bytesPerSec),
     faults: ratio(Math.max(minorRate ?? 0, majorRate ?? 0), minorRate === null && majorRate === null ? null : peaks.faultsPerSec),
     raw: {
-      cpuPercent: numeric(snapshot.cpuPercent),
-      rssBytes: numeric(snapshot.rssBytes),
-      rcharBytesPerSec: rchar,
-      wcharBytesPerSec: wchar,
-      readBytesPerSec: readBlock,
-      writeBytesPerSec: writeBlock,
-      minorFaults: numeric(snapshot.minorFaults),
-      majorFaults: numeric(snapshot.majorFaults),
-      minorFaultsPerSec: minorRate,
-      majorFaultsPerSec: majorRate,
-      threadCount: numeric(snapshot.threadCount),
+      cpuPercent: rawMetric(snapshot.cpuPercent),
+      rssBytes: rawMetric(snapshot.rssBytes),
+      rcharBytesPerSec: rawMetric(snapshot.rcharBytesPerSec, CHARS_NOT_BYTES),
+      wcharBytesPerSec: rawMetric(snapshot.wcharBytesPerSec, CHARS_NOT_BYTES),
+      readBytesPerSec: rawMetric(snapshot.readBytesPerSec, STORAGE_BYTES),
+      writeBytesPerSec: rawMetric(snapshot.writeBytesPerSec, STORAGE_BYTES),
+      minorFaults: rawMetric(snapshot.minorFaults),
+      majorFaults: rawMetric(snapshot.majorFaults),
+      minorFaultsPerSec: rawMetric(snapshot.minorFaultsPerSec),
+      majorFaultsPerSec: rawMetric(snapshot.majorFaultsPerSec),
+      threadCount: rawMetric(snapshot.threadCount),
     },
     unavailable,
   };
@@ -514,6 +589,25 @@ export function buildVisualState(sample: TelemetrySample, peaks: VisualStatePeak
 export function buildVisualStates(samples: TelemetrySample[]): ProcessVisualState[] {
   const peaks = visualStatePeaks(samples);
   return samples.map((sample) => buildVisualState(sample, peaks));
+}
+
+/**
+ * The most recent sample's visual state, or null when no sample was recorded.
+ *
+ * "Most recent" is the last element because `collectSamples` returns them in
+ * sequence order, which is the order the gateway persisted them.
+ *
+ * This exists so that "show me the current telemetry" has exactly one
+ * implementation. The live execution panel, the 3D node HUD and the process
+ * inspector all want the same answer, and three independent
+ * `samples.at(-1)`-plus-rebuild computations would drift -- and a drift there is
+ * invisible until two panels on the same screen disagree about the same process,
+ * which is the failure this project cares most about.
+ */
+export function latestVisualState(samples: TelemetrySample[]): ProcessVisualState | null {
+  const last = samples.at(-1);
+  if (last === undefined) return null;
+  return buildVisualState(last, visualStatePeaks(samples));
 }
 
 function trackPeak<K extends keyof RuntimePeaks>(out: RuntimePeaks, key: K, value: unknown, atMs: number, timestamp: string): void {

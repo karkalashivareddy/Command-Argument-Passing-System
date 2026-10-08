@@ -1,6 +1,6 @@
 import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
-import type { Group, MeshStandardMaterial } from "three";
+import type { Group, Mesh, MeshStandardMaterial } from "three";
 import { MathUtils, QuadraticBezierCurve3, Vector3 } from "three";
 
 import type { MetricMode, ProcessSpace, SpaceEdge, SpaceMarker, SpaceNodeState } from "../../lib/processSpace";
@@ -14,7 +14,15 @@ import {
   statePalette,
 } from "../../lib/processSpace";
 
-const ENGINE_COLOR = "#5b6673";
+/**
+ * Bound on the idle turn, in radians, and on the emissive pulse, in intensity.
+ *
+ * Both are fixed ceilings, not free parameters: the motion can never grow past
+ * them, so no amount of observed activity can turn a decoration into a channel
+ * that competes with size or colour for meaning.
+ */
+const IDLE_SPIN_AMPLITUDE = 0.35;
+const IDLE_PULSE_AMPLITUDE = 0.12;
 
 /** Pointer position, in client coordinates, for the HTML evidence tooltip. */
 export interface HoverPoint {
@@ -40,9 +48,11 @@ interface ProcessNodeProps {
 /**
  * One node per observed process.
  *
- * size  = bounded mapping of the active resource lens (observed RSS by default)
- * colour = lifecycle state, taken from the canonical record only
- * ring  = the same lens value, animated only while the process runs
+ * position = lane (X), depth (Y), execution time (Z) -- a pure function of the
+ *            record, with nothing time-based added to it
+ * size     = bounded mapping of the active resource lens (observed RSS by default)
+ * colour   = lifecycle state, taken from the canonical record only
+ * ring     = the same lens value, animated only while the process runs
  *
  * Selection is a matte violet wireframe and a base outline, never a glow: the
  * data colour still means the lifecycle state, and it must keep meaning that
@@ -53,6 +63,7 @@ interface ProcessNodeProps {
  */
 export function ProcessNodeMesh({ state, scale, mode, selected, related, reducedMotion, selectedSequence, onSelect, onHover, onSelectEvent }: ProcessNodeProps) {
   const group = useRef<Group | null>(null);
+  const body = useRef<Mesh | null>(null);
   const material = useRef<MeshStandardMaterial | null>(null);
   const ringMaterial = useRef<MeshStandardMaterial | null>(null);
 
@@ -62,30 +73,48 @@ export function ProcessNodeMesh({ state, scale, mode, selected, related, reduced
   const palette = statePalette(state.state);
   const activity = lensIntensity(state, mode);
   const isEngine = node.role === "caps-engine";
-  const color = isEngine ? ENGINE_COLOR : palette.color;
+  // The CAPS engine node is coloured by its own lifecycle state like every other
+  // node. It used to be painted a fixed grey, which meant the colour channel
+  // said "unsampled" instead of "this process is running / has been reaped" --
+  // and the engine is exactly the process a reader is told about. Its missing
+  // procfs sample is carried by its minimum size, its absent activity ring, and
+  // the note in the tooltip and the table, which are the channels that can state
+  // an absence without lying about a lifecycle.
+  const color = palette.color;
   const execOffset = node.execAtMs !== null && node.createdAtMs !== null ? (node.execAtMs - node.createdAtMs) * scale : null;
 
   useFrame((frameState, delta) => {
+    const t = frameState.clock.elapsedTime;
+    /*
+     * Idle motion.
+     *
+     * It used to displace `instance.position` by a wall-clock sine, which made
+     * node POSITION a function of when the reader happened to be looking: two
+     * readers of the same record saw different geometry, so the position channel
+     * was not what the page claimed it was. Position is now written once, from
+     * `base`, and never touched again.
+     *
+     * The motion moved to two channels that encode no quantity: the body's turn
+     * and its emissive pulse. Size is untouched, because size is RSS. Both stay
+     * off when the process is terminal, when the reader asked for reduced
+     * motion, and when the lens recorded nothing.
+     */
+    const moving = !reducedMotion && !state.terminal && activity > 0;
     const instance = group.current;
     if (instance) {
-      // A running process gets a subtle activity wobble driven by the observed
-      // lens value. Nothing moves when the process is terminal, when the lens
-      // is unavailable, or when the reader asked for reduced motion, so the
-      // render loop has no work to do in those cases.
-      const wobble = reducedMotion || state.terminal ? 0 : activity * 0.06;
-      const t = frameState.clock.elapsedTime;
-      instance.position.set(
-        base.x + (wobble > 0 ? Math.sin(t * 2.4) * wobble : 0),
-        base.y + 0.7 + (wobble > 0 ? Math.cos(t * 3.1) * wobble * 0.5 : 0),
-        base.z + NODE_Z_OFFSET,
-      );
+      instance.position.set(base.x, base.y + 0.7, base.z + NODE_Z_OFFSET);
       instance.visible = state.present;
+    }
+    const mesh = body.current;
+    if (mesh) {
+      mesh.rotation.y = moving ? Math.sin(t * 0.9) * IDLE_SPIN_AMPLITUDE * (0.35 + activity * 0.65) : 0;
     }
     const mat = material.current;
     if (mat) {
       const target = state.present ? (selected ? 1 : isEngine ? 0.6 : related ? 0.85 : 0.8) : 0;
       mat.opacity = MathUtils.lerp(mat.opacity, target, Math.min(1, delta * 8));
-      mat.emissiveIntensity = MathUtils.lerp(mat.emissiveIntensity, 0.15 + activity * 0.5, Math.min(1, delta * 4));
+      const pulse = moving ? activity * IDLE_PULSE_AMPLITUDE * (0.5 + 0.5 * Math.sin(t * 3)) : 0;
+      mat.emissiveIntensity = MathUtils.lerp(mat.emissiveIntensity, 0.15 + activity * 0.5 + pulse, Math.min(1, delta * 4));
     }
     const ring = ringMaterial.current;
     if (ring) {
@@ -113,7 +142,7 @@ export function ProcessNodeMesh({ state, scale, mode, selected, related, reduced
       }}
       onPointerOut={() => onHover(null, null)}
     >
-      <mesh>
+      <mesh ref={body}>
         <boxGeometry args={[radius * 1.6, radius * 1.6, radius * 1.6]} />
         <meshStandardMaterial
           ref={material}
@@ -234,7 +263,9 @@ export function LifetimeBars({ space, scale, states }: { space: ProcessSpace; sc
         const end = Math.max(start + 0.35, nodeEndZ(node, scale, space.spanMs));
         const length = end - start;
         const base = nodePosition(node, scale);
-        const color = node.role === "caps-engine" ? ENGINE_COLOR : statePalette(state.state).color;
+        // The lifetime bar wears the node's lifecycle colour too, so the whole
+        // node -- body, ring and bar -- agrees about what state it is in.
+        const color = statePalette(state.state).color;
         return (
           <mesh key={`lifetime-${node.key}`} position={[base.x, base.y + 0.15, start + length / 2]}>
             <boxGeometry args={[0.08, 0.08, length]} />

@@ -265,8 +265,10 @@ export default function ProcessSpacePage() {
 
       <p className="text-[10.5px] leading-relaxed text-[var(--fg-3)]">
         The 3D scene is a visualization of evidence, not a source of evidence. Every position, size, colour and activity is a mapping of
-        recorded process state and telemetry that the CAPS engine, the procfs collector, and the canonical event store produced. The browser
-        never reads <code className="font-mono">/proc</code>, and the scene never polls the operating system.
+        recorded process state and telemetry that the CAPS engine, the procfs collector, and the canonical event store produced, and each of those
+        channels is a pure function of the record, so the same execution always draws the same geometry. The slow idle turn of a running node is
+        presentation only: it encodes no quantity, never moves a node's position, and is switched off by <code className="font-mono">prefers-reduced-motion</code>.
+        The browser never reads <code className="font-mono">/proc</code>, and the scene never polls the operating system.
       </p>
     </div>
   );

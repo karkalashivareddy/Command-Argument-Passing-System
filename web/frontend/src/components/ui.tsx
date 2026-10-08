@@ -1,6 +1,6 @@
 import { clsx } from "clsx";
 import { Check, Copy, LoaderCircle } from "lucide-react";
-import { useEffect, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { useId, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 
 /* ------------------------------------------------------------------ */
 /* Button                                                              */
@@ -36,13 +36,66 @@ export function Button({ variant = "secondary", size = "md", className, ...rest 
 export const inputCls =
   "h-9 w-full rounded-[var(--r-sm)] border border-[var(--line-1)] bg-[var(--bg-2)] px-3 text-sm text-[var(--fg-0)] placeholder:text-[var(--fg-3)] transition-colors focus:border-[var(--accent)] focus:outline-none";
 
-export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+/**
+ * The visible caption above a form control group.
+ *
+ * It is kept as a bare `<span>` with a generated id rather than a `<label>`
+ * wrapper because two of the call sites on ExecutePage pass SEVERAL
+ * labelable controls as children: the N argument inputs with their N remove
+ * buttons and the "Add argument" button, and the three redirection inputs. A
+ * `<label>` may contain at most one labelable descendant, so wrapping them gave
+ * every one of those inputs the same accessible name ("Arguments
+ * (argv[1…argc-1])") and left none of them associated with its own visible
+ * `argv[n]` caption. The caption text is unchanged; only the element and the
+ * wiring differ, so nothing looks different on screen.
+ *
+ * Two ways to wire it, both supplied by the caller:
+ *   - `controlId`: the single control owns the caption through `htmlFor`, which
+ *     is the strongest association available.
+ *   - `groupId`: the children are wrapped in `role="group" aria-labelledby`,
+ *     for the call sites that legitimately hold several controls. Those
+ *     controls still carry their own `aria-label` so each one is individually
+ *     identifiable, which is what a screen reader announces per stop.
+ */
+const FIELD_LABEL_CLS = "mb-1.5 block text-[12px] font-medium uppercase tracking-wide text-[var(--fg-2)]";
+
+export function Field({
+  label,
+  hint,
+  children,
+  controlId,
+  groupId,
+}: {
+  label: string;
+  hint?: string;
+  children: ReactNode;
+  /** Set when exactly one control owns this caption. */
+  controlId?: string;
+  /** Set when several controls share this caption and form one labelled group. */
+  groupId?: string;
+}) {
+  const generatedId = useId();
+  const captionId = groupId === undefined ? generatedId : groupId;
   return (
-    <label className="block">
-      <span className="mb-1.5 block text-[12px] font-medium uppercase tracking-wide text-[var(--fg-2)]">{label}</span>
-      {children}
+    <div className="block">
+      {controlId === undefined ? (
+        <span id={captionId} className={FIELD_LABEL_CLS}>
+          {label}
+        </span>
+      ) : (
+        <label htmlFor={controlId} className={FIELD_LABEL_CLS}>
+          {label}
+        </label>
+      )}
+      {groupId === undefined ? (
+        children
+      ) : (
+        <div role="group" aria-labelledby={captionId}>
+          {children}
+        </div>
+      )}
       {hint ? <span className="mt-1 block text-[12px] text-[var(--fg-3)]">{hint}</span> : null}
-    </label>
+    </div>
   );
 }
 
@@ -100,8 +153,14 @@ const toneText: Record<Tone, string> = {
 
 export function StatusDot({ tone, pulse = false, label }: { tone: Tone; pulse?: boolean; label?: string }) {
   return (
+    /*
+     * aria-label on the wrapper plus a rendered `label` text node means a
+     * screen reader announced the same words twice. The dot carries no
+     * information a reader can get from the label, so it is hidden from the
+     * accessibility tree and only the wrapper is named.
+     */
     <span className={clsx("inline-flex items-center gap-1.5", toneText[tone])} aria-label={label ?? tone}>
-      <span className="relative inline-flex h-2 w-2">
+      <span className="relative inline-flex h-2 w-2" aria-hidden="true">
         {pulse ? <span className={clsx("absolute inline-flex h-full w-full animate-ping rounded-full opacity-60", toneDot[tone])} /> : null}
         <span className={clsx("relative inline-flex h-2 w-2 rounded-full", toneDot[tone])} />
       </span>
@@ -231,13 +290,3 @@ export function LiveBadge({ live }: { live: boolean }) {
 /* ------------------------------------------------------------------ */
 /* useInterval for elapsed clocks                                      */
 /* ------------------------------------------------------------------ */
-
-export function useNow(intervalMs = 250, active = true): number {
-  const [now, setNow] = useState(() => performance.now());
-  useEffect(() => {
-    if (!active) return;
-    const t = window.setInterval(() => setNow(performance.now()), intervalMs);
-    return () => window.clearInterval(t);
-  }, [active, intervalMs]);
-  return now;
-}

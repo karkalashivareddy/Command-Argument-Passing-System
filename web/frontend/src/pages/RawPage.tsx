@@ -28,10 +28,16 @@ export default function RawPage() {
       </div>
 
       <div className="flex items-center gap-2 rounded-[var(--r-sm)] border border-[var(--line-1)] bg-[var(--bg-2)] px-3 focus-within:border-[var(--accent)]">
-        <FileCode2 className="h-3.5 w-3.5 text-[var(--fg-3)]" />
+        <FileCode2 className="h-3.5 w-3.5 text-[var(--fg-3)]" aria-hidden="true" />
+        {/*
+          Placeholder-only naming again: the filter input announced nothing
+          useful and lost its hint the first time a character was typed. The
+          aria-label states what it filters and against what.
+        */}
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
+          aria-label="Filter events by type or session id"
           placeholder="Filter by event type or session id…"
           className="h-9 flex-1 bg-transparent font-mono text-[12.5px] text-[var(--fg-0)] placeholder:text-[var(--fg-3)] focus:outline-none"
         />

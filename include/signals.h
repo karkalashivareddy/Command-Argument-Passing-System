@@ -20,20 +20,28 @@
  *     caps normally.
  *
  * Error policy: both functions return 0 on success and -1 on failure.
- * A failure is reported (never swallowed) and the caller decides how to
- * proceed; neither function pretends a failed sigaction() succeeded.
+ * A failure is reported (never swallowed) and the caller REFUSES rather
+ * than proceeding: main() refuses to start, and process.c refuses to
+ * execvp(), because running with an inherited SIG_IGN would hand the
+ * executed program a signal disposition CAPS never promised.  Neither
+ * function pretends a failed sigaction() succeeded, and no caller
+ * degrades past it.
  *
  * Limitations (documented honestly):
  *   - At the prompt, Ctrl+C does nothing (no line-cancellation UI) and
  *     does not abort the current read.
- *   - No process groups, no foreground/background assignment, no
- *     WUNTRACED/WCONTINUED job status machinery.
+ *   - No foreground/background assignment, no `&`, no job control, and no
+ *     WUNTRACED/WCONTINUED job status machinery.  A PIPELINE does get its
+ *     own process group (setpgid in process.c, stage 0 as leader) so a
+ *     signal can reach every stage; that is signal delivery, not job
+ *     control, and there is no interactive process group per command.
  */
 
 /*
  * Ignore SIGINT in the parent.  Returns 0 on success; on failure reports
- * the error via caps_error() and returns -1 (the REPL may continue in a
- * degraded state where Ctrl+C can also kill the parent).
+ * the error via caps_error() and returns -1.  The caller (main) REFUSES
+ * to start on -1: a caps that cannot ignore SIGINT would be killed by
+ * Ctrl+C while a child runs, so it must not run at all.
  */
 int signals_parent_init(void);
 
@@ -41,7 +49,9 @@ int signals_parent_init(void);
  * Restore SIGINT to SIG_DFL in the child, after fork() and before
  * execvp().  Returns 0 on success, -1 on failure.  The failure is NOT
  * reported here (the child must not use stdio after fork()); the caller
- * reports it with write(2) and may continue to exec.
+ * reports it with write(2) and REFUSES to exec, writing the errno to the
+ * status pipe and _exit()ing 126, on both the single-command path and
+ * each pipeline stage.
  */
 int signals_child_reset(void);
 

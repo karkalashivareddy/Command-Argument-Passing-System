@@ -332,9 +332,9 @@ export function readHostProcess(
   pid: number,
   clockTicks: number | null,
   bootId: string | null,
-  previous: ProcessCounters | null,
+  previousIdentities: ReadonlyMap<string, ProcessCounters> | null,
   nowMs: number,
-  previousAtMs: number | null,
+  previousSampleAtMs: number | null,
   options: { includePss: boolean; smaps: SmapsRollup | null; timestamp: string },
 ): HostProcessResult {
   const root = procPath(paths, String(pid));
@@ -359,15 +359,35 @@ export function readHostProcess(
   // is reported as DISAPPEARED and the counters are not differenced.
   let counters: ProcessCounters | null = null;
   let cpuPercent: SystemMetric<number>;
+
+  /*
+   * The previous counters are looked up by this process's FULL identity, here,
+   * rather than by PID at the call site.
+   *
+   * The lookup belongs after the identity is known for two reasons. A PID alone
+   * is reused, so a map entry under `1234@` may belong to a process that no
+   * longer exists; and a map can legitimately hold two entries for one PID, the
+   * old identity and the new one, after a reuse. Only `(pid, startTicks, bootId)`
+   * distinguishes them.
+   *
+   * The missing-lookup case and the start-ticks-mismatch case are reported with
+   * DIFFERENT reasons, because they are different facts: nothing has been seen
+   * for this identity before, versus something was, and it was not this.
+   */
+  const previous =
+    previousIdentities === null
+      ? null
+      : (previousIdentities.get(identityKey(pid, stat.startTicks, bootId)) ?? null);
+
   if (previous === null) {
     cpuPercent = unavailable<number>("%", statPath, options.timestamp, "First sample of this process identity: CPU utilization needs two samples separated by a measured interval");
   } else if (previous.startTicks !== stat.startTicks) {
     cpuPercent = unavailable<number>("%", statPath, options.timestamp, "The PID was reused: start ticks changed between samples, so the previous counters belong to a different process and cannot be differenced against these");
-  } else if (previousAtMs === null || nowMs - previousAtMs <= 0 || clockTicks === null) {
+  } else if (previousSampleAtMs === null || nowMs - previousSampleAtMs <= 0 || clockTicks === null) {
     cpuPercent = unavailable<number>("%", statPath, options.timestamp, "No measurable interval between the two samples, or the kernel clock tick rate is unavailable");
   } else {
     const dTicks = stat.utime + stat.stime - previous.cpuTicks;
-    const intervalMs = nowMs - previousAtMs;
+    const intervalMs = nowMs - previousSampleAtMs;
     cpuPercent =
       dTicks < 0
         ? unavailable<number>("%", statPath, options.timestamp, "The process CPU counter decreased between samples, which does not happen for a single process identity")
@@ -720,14 +740,34 @@ export function discoverProcesses(paths: KernelPaths, options: DiscoverOptions):
     // The identity-only read is what the budget applies to: without a
     // start-ticks read there is no identity, and the row cannot be trusted
     // across samples.
+    /*
+     * `previous` is what turns CPU utilization from UNAVAILABLE into a DERIVED
+     * rate.
+     *
+     * This call used to pass a hardcoded `null` here. Everything needed to make
+     * the metric work was already present -- `options.previous` was threaded
+     * through, `nextCounters` was built and returned as the next sample's
+     * `previous`, and `previousAtMs` was computed -- and none of it reached this
+     * argument. The effect was that `readHostProcess`'s two-sample branch was
+     * unreachable, every host process row reported CPU utilization as
+     * UNAVAILABLE with the reason "first sample of this process identity", and
+     * that reason was factually wrong after the second sample.
+     *
+     * That is worse than a missing metric: the UI faithfully rendered an
+     * UNAVAILABLE badge, so the display looked correct, while a metric the
+     * product documents as available was structurally impossible to obtain. The
+     * map is passed whole and indexed inside, by the identity just read, so a
+     * row whose PID was recycled cannot pick up the previous occupant's
+     * counters.
+     */
     const result = readHostProcess(
       paths,
       pid,
       clockTicks,
       bootId,
-      null,
+      options.previous?.identities ?? null,
       nowMs,
-      previousAtMs,
+      options.previous?.atMs ?? null,
       { includePss: false, smaps: null, timestamp: options.timestamp },
     );
 

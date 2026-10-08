@@ -505,9 +505,13 @@ allowlist name — that is the executable-resolution boundary made visible.
 
 `echo caps pipeline | tr a-z A-Z | wc -c` run as one command line through the
 terminal's lexer. Each stage shows the PID the kernel assigned it, the one
-process group they share (which is what makes a timeout reach all of them), and
-the argv the engine actually passed to `execve` — not a label re-split by the
-browser. Where the engine bounded a long argv, the card says how many elements it
+process group they share, and the argv the engine actually passed to `execve` —
+not a label re-split by the browser. The shared group is deliberate, and it is
+verified rather than assumed: the engine puts the pipeline in its own group with
+stage 0 as leader, and a group signal is delivered only after the terminator has
+confirmed the leader's start ticks and re-read its `pgrp` field from
+`/proc/<pid>/stat`. That verified group signal is what makes a timeout reach
+every stage. Where the engine bounded a long argv, the card says how many elements it
 dropped instead of showing a short vector as if it were the whole one.
 
 ### 3D Process Space
@@ -749,10 +753,14 @@ Full detail, with the reason for each, in
 **[docs/limitations.md](docs/limitations.md)**. The headline boundaries:
 
 * **No shell.** There is no `sh -c`, no glob expansion, no `$VAR`, no command
-  substitution, no `&&`/`||`/`;` chaining, and no heredocs. CAPS has exactly one
-  lexer — the one in the C engine — and the browser and gateway both call it
-  rather than re-implementing it. Two lexers eventually disagree about one quoting
-  case, always in the unsafe direction.
+  substitution, no `&&`/`||`/`;` chaining, and no heredocs. The **execution path**
+  uses exactly one lexer — `parser_tokenize()` in the C engine — and the browser
+  and gateway both call it rather than re-implementing it. Two lexers eventually
+  disagree about one quoting case, always in the unsafe direction. Quoting and
+  backslash escapes *are* honoured by that lexer; what is missing is shell
+  expansion, not tokenisation. A second, legacy whitespace-only split
+  (`parser_parse()`) survives only behind `caps --parse`, which is a debug view of
+  a simpler split and is never what actually runs.
 * **Not every Linux command.** Only an explicit allowlist with per-command
   argument schemas. Unknown commands are refused with a reason.
 * **Pipelines are `|`-only.** No `&&`, no `||`, no `;` chaining, no heredocs.
@@ -779,8 +787,11 @@ Full detail, with the reason for each, in
   multi-tenant model, no RBAC, no per-user isolation. A confined workspace is not
   a privilege boundary: there are no namespaces, seccomp, or cgroups.
 * **`kill`, `pkill`, and `killall` are refused.** They can reach processes CAPS
-  does not own. CAPS signals only what it started, and verifies kernel identity
-  first.
+  does not own. CAPS signals only what it started. The kernel identity is
+  captured at spawn and re-verified before every *delayed* escalation and for
+  every `pidfd` signal; the first signal of a terminate or timeout goes to the
+  PID the gateway itself just forked and has not reaped, which cannot have been
+  recycled. See [SECURITY.md](SECURITY.md).
 * **3D requires WebGL**, with functional 2D and table fallbacks that are less
   dense visually.
 * **No pixel-diff verification.** The browser suite asserts behaviour, not
@@ -841,8 +852,7 @@ Nothing on the planned list is claimed anywhere else in this repository.
 | [docs/runtime-verification.md](docs/runtime-verification.md) | How to verify a running instance by hand |
 | [docs/faculty-demo.md](docs/faculty-demo.md) | A guided demonstration script |
 | [docs/development-phases.md](docs/development-phases.md) | Historical: how the project was built up |
-| [docs/audit/RELEASE_VERIFICATION_2_0_0.md](docs/audit/RELEASE_VERIFICATION_2_0_0.md) | **The authoritative verification record for 2.0.0**, including what was NOT run and why |
-| [docs/audit/](docs/audit/) | Historical 1.1.0 audit and verification reports (labelled as historical) |
+| [docs/audit/](docs/audit/) | **[RELEASE_VERIFICATION_2_0_0.md](docs/audit/RELEASE_VERIFICATION_2_0_0.md) is the authoritative verification record for 2.0.0**, including what was NOT run and why. The sibling files — `FINAL_REPOSITORY_AUDIT.md`, `FINAL_RELEASE_VERIFICATION.md`, `GIT_ATTRIBUTION_CLEANUP.md` — are historical 1.1.0 records, each carrying a banner saying so. |
 
 ## Contributing
 

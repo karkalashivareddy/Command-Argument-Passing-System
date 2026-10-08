@@ -87,15 +87,27 @@ vi.mock("../lib/useSession", () => ({
   useSession: (sessionId: string | undefined, opts?: { live?: boolean }) => useSessionMock(sessionId, opts),
 }));
 
-const apiMock = {
-  getSession: vi.fn(),
-  replay: vi.fn(),
-  execute: vi.fn(),
-  terminate: vi.fn(),
-  exportJson: vi.fn(),
-  exportCsv: vi.fn(),
-  report: vi.fn(),
-};
+/*
+ * `vi.hoisted`, not a plain const.
+ *
+ * This page reaches the keyboard through `useSpaceKeys`, which now reads the
+ * presentation state from `store/ui`, which imports `api/client`. So the module
+ * graph pulls in `api/client` while it is still being built — above the point a
+ * plain `const` would be initialised — and the mock factory below fails with
+ * "Cannot access 'apiMock' before initialization". The hoist lifts the
+ * declaration above the factory, which is what the factory actually needs.
+ */
+const { apiMock } = vi.hoisted(() => ({
+  apiMock: {
+    getSession: vi.fn(),
+    replay: vi.fn(),
+    execute: vi.fn(),
+    terminate: vi.fn(),
+    exportJson: vi.fn(),
+    exportCsv: vi.fn(),
+    report: vi.fn(),
+  },
+}));
 
 vi.mock("../api/client", () => ({
   api: apiMock,

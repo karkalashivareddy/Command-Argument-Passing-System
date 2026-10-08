@@ -85,12 +85,22 @@ export async function buildServer(overrides: BuildServerOverrides = {}) {
     reply.header("x-caps-observatory", `CAPS Process Execution Observatory ${VERSION}`);
     reply.header("Cache-Control", "no-store");
 
-    // Defence in depth: even a loopback bind refuses an obviously non-local
-    // peer.  This guards against a reverse proxy or a port-forward presenting
-    // a remote client as a local one, and it runs on every request rather than
-    // being tied to a particular bind address.
+    // Defence in depth for LOCAL mode only: refuse an obviously non-local peer
+    // even though the bind address is already loopback.  This guards against a
+    // reverse proxy or a port-forward presenting a remote client as a local one,
+    // and it runs on every request rather than being tied to a particular bind
+    // address.
+    //
+    // The check is conditional on bindMode.  In remote mode the operator has
+    // deliberately asked to serve remote clients, so refusing every non-local
+    // peer would make CAPS_BIND_MODE=remote unusable while env.ts, README.md
+    // and SECURITY.md all describe it as working.  Remote mode does not lose
+    // its boundary: config validation refuses to start without
+    // CAPS_AUTH_TOKEN (at least 32 characters), and the bearer check below
+    // then gates every request.  Local mode is unchanged and strictly
+    // loopback-only.
     const ip = req.socket.remoteAddress;
-    if (ip !== undefined && ip !== null && ip.length > 0 && !isLoopbackAddress(ip)) {
+    if (config.bindMode === "local" && ip !== undefined && ip !== null && ip.length > 0 && !isLoopbackAddress(ip)) {
       return reply
         .code(403)
         .send({ error: { code: "FORBIDDEN", message: "The observatory only accepts loopback connections." } });
@@ -184,7 +194,15 @@ function isLoopbackAddress(address: string): boolean {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(a);
 }
 
-/** Length-independent byte comparison; avoids a timing side channel on the token. */
+/**
+ * Constant-work comparison of two UTF-16 code-unit sequences.
+ *
+ * The caller rejects a length mismatch first (`provided.length !== expected.length`),
+ * so this loop runs the same number of iterations for every candidate of the
+ * accepted length and reveals nothing through its length. It compares code
+ * units, not bytes, and does not look like Node's `timingSafeEqual` over Buffers
+ * -- hence the name.
+ */
 function timingSafeEqual(a: string, b: string): boolean {
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);

@@ -91,7 +91,15 @@ export default function SystemControlPage(): React.JSX.Element {
       </Card>
 
       <Card title="Guardrails">
-        <table className="w-full border-collapse text-[11.5px]">
+        {/*
+          Same missing wrapper as the other wide tables: the Notes column holds
+          sentences, so the table compresses rather than scrolls on a narrow
+          viewport and the caveats this page exists to show get squeezed into
+          one word per line. `tabIndex` and `role="region"` make the scroll box
+          keyboard-reachable and announced.
+        */}
+        <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Guardrails table">
+          <table className="w-full border-collapse text-[11.5px]">
           <caption className="sr-only">Configured limits and whether each is enforced</caption>
           <thead>
             <tr>
@@ -122,7 +130,8 @@ export default function SystemControlPage(): React.JSX.Element {
               </tr>
             ))}
           </tbody>
-        </table>
+          </table>
+        </div>
       </Card>
 
       <Card title="Thermal guard">

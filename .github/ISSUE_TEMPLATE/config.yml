@@ -4,7 +4,9 @@ contact_links:
     url: https://github.com/karkalashivareddy/Command-Argument-Passing-System/blob/main/docs/SECURITY.md
     about: >
       Report a vulnerability privately. Do not open a public issue for an
-      unauthenticated-execution or sandbox-escape finding.
+      unauthenticated-execution, workspace-confinement escape, or guardrail-bypass
+      finding. CAPS has no sandbox: it confines paths to the workspace and
+      enforces guardrails, so that is the boundary to test.
   - name: What CAPS observes and does not
     url: https://github.com/karkalashivareddy/Command-Argument-Passing-System/blob/main/docs/observability-model.md
     about: Read this before reporting a "missing metric"; it may be a documented scope limit.

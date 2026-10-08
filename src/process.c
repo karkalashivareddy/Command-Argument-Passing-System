@@ -139,18 +139,21 @@ static int read_exec_error(int fd, int *exec_errno)
  * Elapsed milliseconds between a start sample and now.
  *
  * Duration policy: when either the start sample (start_ok == 0) or the
- * end sample is unavailable, the elapsed time is unknown and reported
- * as 0.  A real measurement is always >= 0 because the monotonic clock
- * cannot run backwards; the clamp is defensive only.
+ * end sample is unavailable, the elapsed time is UNKNOWN and reported as
+ * -1, which the monitor renders as JSON null.  It is deliberately not 0:
+ * a program that finished in under a millisecond measures 0, so 0 is a
+ * real reading and cannot double as "not measured".  A real measurement
+ * is always >= 0 because the monotonic clock cannot run backwards; the
+ * clamp is defensive only.
  */
 static long long elapsed_ms(long long start_ms, int start_ok)
 {
     long long now;
 
     if (!start_ok || monotonic_ms(&now) != 0)
-        return 0;
+        return -1;
     if (now < start_ms)
-        return 0;
+        return -1;
     return now - start_ms;
 }
 

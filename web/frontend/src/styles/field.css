@@ -1,0 +1,250 @@
+/* ============================================================
+   The CAPS Observatory ambient background.
+
+   WHAT THIS IS FOR
+   ----------------
+   The scene behind every page is not decoration. It is the thing that makes the
+   interface read as an instrument: a fixed, very low-contrast technical field
+   that the data sits on top of. Three layers, each doing one job:
+
+     1. a graphite wash, so the page never reads as flat black
+     2. a faint engineering grid, which gives the eye a sense of scale
+     3. two soft radial pools in the telemetry colours, positioned off-centre
+
+   The pools matter more than they look. A single flat background makes every
+   panel boundary ambiguous, because there is no luminance gradient for the eye
+   to read an edge against. Two very soft, very dim pools restore a top-to-bottom
+   and left-to-right gradient without adding any visible "spotlight".
+
+   WHY IT IS SO QUIET
+   ------------------
+   Every value here is deliberately near the threshold of perception. This is not
+   an oversight and it must not be "improved". The failure mode for an ambient
+   background is not ugliness, it is competition: once the field is visible enough
+   to notice, it is competing with a 11px provenance badge for attention. The
+   whole value of this layer is that you only notice it when it is absent.
+
+   Reduced motion: the pools do not move at all. There is no animation here by
+   design -- see AmbientField.tsx for why motion was considered and rejected.
+   ============================================================ */
+
+.caps-field {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  /* Two radial pools plus a faint wash. Pools are placed off-centre and at
+     different sizes so the gradient has a direction without a visible edge. */
+  background:
+    radial-gradient(
+      1100px 620px at 12% -8%,
+      color-mix(in srgb, var(--accent) 7%, transparent),
+      transparent 62%
+    ),
+    radial-gradient(
+      900px 700px at 96% 4%,
+      color-mix(in srgb, var(--violet) 6%, transparent),
+      transparent 58%
+    ),
+    radial-gradient(
+      1400px 900px at 50% 118%,
+      color-mix(in srgb, var(--bg-4) 55%, transparent),
+      transparent 70%
+    );
+}
+
+/*
+   The grid.
+
+   Two overlaid line patterns at different pitches, so the field reads as an
+   engineering drawing surface rather than as graph paper. 64px is the coarse
+   pitch and 16px the fine one; a single pitch would look like a spreadsheet.
+
+   `background-position` is offset by half the pitch so the fine grid sits at the
+   intersections of the coarse one rather than straddling them, which is what
+   stops the moiré that otherwise makes this kind of texture look dirty at
+   non-retina densities.
+*/
+.caps-field::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(to right, var(--line-0) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--line-0) 1px, transparent 1px),
+    linear-gradient(to right, var(--line-0) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--line-0) 1px, transparent 1px);
+  background-size: 64px 64px, 64px 64px, 16px 16px, 16px 16px;
+  background-position: 0 0, 0 0, 32px 32px, 32px 32px;
+  opacity: 0.55;
+  /*
+     The grid fades out toward the bottom. A uniform grid to the bottom edge reads
+     as wallpaper; a gradient reads as a floor that recedes, which is the whole
+     intent of having it.
+  */
+  -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.9), rgba(0, 0, 0, 0.18) 62%, transparent 92%);
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.9), rgba(0, 0, 0, 0.18) 62%, transparent 92%);
+}
+
+/*
+   A single hairline across the top edge, in the telemetry colour.
+
+   This is the one element that reads as "instrument" rather than "page", and it
+   is what gives the top of the viewport a defined beginning. It is a gradient
+   that fades at both ends, so it does not terminate in a visible corner.
+*/
+.caps-field::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in srgb, var(--accent) 30%, transparent) 22%,
+    color-mix(in srgb, var(--violet) 22%, transparent) 68%,
+    transparent
+  );
+}
+
+/* Light mode: the pools have to invert or they read as dirt. */
+@media (prefers-color-scheme: light) {
+  .caps-field {
+    background:
+      radial-gradient(1100px 620px at 12% -8%, color-mix(in srgb, var(--accent) 5%, transparent), transparent 62%),
+      radial-gradient(900px 700px at 96% 4%, color-mix(in srgb, var(--violet) 4%, transparent), transparent 58%),
+      radial-gradient(1400px 900px at 50% 118%, color-mix(in srgb, #ffffff 70%, transparent), transparent 70%);
+  }
+  .caps-field::before {
+    opacity: 0.7;
+  }
+  .caps-field::after {
+    background: linear-gradient(
+      to right,
+      transparent,
+      color-mix(in srgb, var(--accent) 40%, transparent) 22%,
+      color-mix(in srgb, var(--violet) 30%, transparent) 68%,
+      transparent
+    );
+  }
+}
+
+/* ============================================================
+   GLASS UTILITIES
+
+   Four ranks, matching the four glass tokens. These are utilities rather than
+   component classes because a glass SURFACE is a property of a region, and the
+   same region is sometimes a panel and sometimes an inspector.
+
+   Text is never made transparent by these classes. Blur is applied to the surface
+   only; anything containing text should sit on an opaque colour token for the
+   text itself. That is the single rule that keeps a glass interface readable.
+   ============================================================ */
+
+.glass-panel {
+  background: var(--glass-panel-bg);
+  -webkit-backdrop-filter: var(--glass-blur-md);
+  backdrop-filter: var(--glass-blur-md);
+  box-shadow: var(--glass-edge), var(--shadow-floating);
+}
+
+.glass-inspector {
+  background: var(--glass-inspector-bg);
+  -webkit-backdrop-filter: var(--glass-blur-lg);
+  backdrop-filter: var(--glass-blur-lg);
+  box-shadow: var(--glass-edge-strong), var(--shadow-overlay);
+}
+
+.glass-overlay {
+  background: var(--glass-overlay-bg);
+  -webkit-backdrop-filter: var(--glass-blur-lg);
+  backdrop-filter: var(--glass-blur-lg);
+  box-shadow: var(--glass-edge-strong), var(--shadow-overlay);
+}
+
+/*
+   A backdrop-filter cannot be composited on a surface with no content behind it,
+   and in some browsers it forces a containing block that breaks `position:
+   fixed` descendants. Falling back to the opaque surface keeps the panel readable
+   rather than transparent-and-unusable.
+*/
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass-panel {
+    background: var(--bg-1);
+  }
+  .glass-inspector,
+  .glass-overlay {
+    background: var(--bg-2);
+  }
+}
+
+/* ============================================================
+   MOTION UTILITIES
+
+   Motion is used to communicate state, so each class here maps to a state change
+   rather than to an arbitrary flourish. They are CSS animations rather than JS
+   because they must not trigger a React render.
+
+   The global prefers-reduced-motion rule in index.css already neutralises all of
+   these; these classes add `animation-fill-mode` and reduced-motion-specific
+   end states so the post-animation resting state is correct either way.
+   ============================================================ */
+
+/* An event has just arrived. A single quick opacity lift, no movement: a moving
+   element draws the eye to its position rather than to its appearance. */
+@keyframes caps-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.caps-arrive {
+  animation: caps-arrive var(--motion-quick) var(--ease-standard) both;
+}
+
+/* A process node is active and telemetry is flowing. Opacity only: a pulsing
+   SCALE would imply the node's size is changing, and node size encodes a metric. */
+@keyframes caps-activity {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+.caps-activity {
+  animation: caps-activity 1.8s var(--ease-in-out) infinite;
+}
+
+/* A lifecycle stage has not yet been reached. */
+.caps-pending {
+  opacity: 0.42;
+}
+
+/* A lifecycle stage is the current one. */
+.caps-current {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+    0 0 16px -4px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+/* A lifecycle stage completed. */
+.caps-done {
+  color: var(--fg-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .caps-activity {
+    animation: none;
+  }
+  .caps-arrive {
+    animation: none;
+  }
+}

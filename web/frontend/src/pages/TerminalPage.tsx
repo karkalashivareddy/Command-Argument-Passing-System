@@ -21,6 +21,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import {
   catalogApi,
@@ -35,6 +36,7 @@ import {
   describeStdin,
   describeStdout,
   filterCommands,
+  firstToken,
   formatArgv,
   groupByCategory,
   localLimitWarnings,
@@ -61,12 +63,28 @@ type ValidationState =
 
 type Mode = "text" | "structured";
 
+/** Tab order matches visual order; arrow keys follow it and wrap. */
+const MODES: readonly Mode[] = ["text", "structured"];
+
 export interface TerminalPageProps {
-  /** Called with the accepted session id, so the app can follow the execution. */
+  /**
+   * Called with the accepted session id, so the app can follow the execution.
+   *
+   * This prop used to be declared and then never provided: `App.tsx` rendered
+   * `<TerminalPage />` with no props, so the callback was always undefined and
+   * the session id the gateway had just allocated was thrown away. Pressing Run
+   * on the terminal started a real execution and then did nothing at all -- no
+   * navigation, no link, no confirmation. The only route from `/terminal` to a
+   * flight recorder had to be re-typed by hand.
+   *
+   * It is now supplied and the default navigates, so the route cannot silently
+   * regress to "runs a command and shows nothing".
+   */
   onExecuted?: (accepted: TerminalExecuteAccepted) => void;
 }
 
-export default function TerminalPage({ onExecuted }: TerminalPageProps): React.JSX.Element {
+export default function TerminalPage({ onExecuted }: TerminalPageProps = {}): React.JSX.Element {
+  const navigate = useNavigate();
   const [mode, setMode] = useState<Mode>("text");
   const [line, setLine] = useState<string>("seq 1 20 | grep 1 | wc -l");
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
@@ -75,6 +93,24 @@ export default function TerminalPage({ onExecuted }: TerminalPageProps): React.J
   const [state, setState] = useState<ValidationState>({ kind: "unvalidated" });
   const [executing, setExecuting] = useState(false);
   const [commandIndex, setCommandIndex] = useState(0);
+  const tabRefs = useRef<Partial<Record<Mode, HTMLButtonElement | null>>>({});
+
+  /**
+   * Arrow keys move between the mode tabs and select as they move, which is the
+   * automatic-activation variant of the tabs pattern: the panel below is a
+   * rendering of the same line the reader is editing, so showing the panel for
+   * the tab the arrow landed on is the useful behaviour, and it means the panel
+   * is never out of step with `aria-selected`.
+   */
+  const onTabKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    const delta = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+    if (delta === 0) return;
+    e.preventDefault();
+    const at = MODES.indexOf(mode);
+    const next = MODES[(at + delta + MODES.length) % MODES.length]!;
+    setMode(next);
+    tabRefs.current[next]?.focus();
+  }, [mode]);
 
   // Validation is requested per keystroke and superseded by whichever response
   // arrives last. The AbortController is what makes that safe: without it, a
@@ -149,7 +185,11 @@ export default function TerminalPage({ onExecuted }: TerminalPageProps): React.J
     setExecuting(true);
     try {
       const accepted = await catalogApi.execute(line.trim());
-      onExecuted?.(accepted);
+      // Follow the execution. Defaulting here rather than in App.tsx means the
+      // route behaves correctly however it is mounted, including in a test that
+      // renders the component alone.
+      if (onExecuted) onExecuted(accepted);
+      else navigate(`/execution/${accepted.sessionId}`);
     } catch (err) {
       setState({
         kind: "invalid",
@@ -160,21 +200,34 @@ export default function TerminalPage({ onExecuted }: TerminalPageProps): React.J
     } finally {
       setExecuting(false);
     }
-  }, [state, executing, line, onExecuted]);
+  }, [state, executing, line, onExecuted, navigate]);
 
   const available = useMemo(() => (catalog?.commands ?? []).filter((c) => c.availability === "AVAILABLE"), [catalog]);
-  const matched = useMemo(() => filterCommands(available, line.trim().split(/\s+/)[0] ?? ""), [available, line]);
+  const matched = useMemo(() => filterCommands(available, firstToken(line) ?? ""), [available, line]);
   const warnings = useMemo(() => localLimitWarnings(line, grammar), [line, grammar]);
   const groups = useMemo(() => groupByCategory(available), [available]);
   const resolvedLine = state.kind === "valid" ? renderResolvedLine(state.validation) : null;
   const differs = state.kind === "valid" ? resolutionDiffers(line, state.validation) : false;
   const canRun = state.kind === "valid" && !executing;
 
-  const insertCommand = useCallback(
+  /*
+   * Replace argv[0] only. The rest of the line is left byte-for-byte alone.
+   *
+   * This used to be `line.trim().split(/\s+/)`, assign into index 0, and
+   * `join(" ")`. That round-trip rewrites the entire command: `seq '1  20' |
+   * grep x` came back as `seq '1 20' | grep x`, so a quoted argument that had
+   * contained two spaces was silently split into two argv elements. Nothing told
+   * the user, and the validity hint compared against the already-mangled line,
+   * so the corruption was invisible from every surface on the page.
+   *
+   * Only the leading token is replaced, which is the whole intent of clicking a
+   * command in the catalog: keep the arguments, swap the program.
+   */
+const insertCommand = useCallback(
     (name: string) => {
-      const parts = line.trim().split(/\s+/);
-      parts[0] = name;
-      setLine(parts.join(" "));
+      const trimmed = line.trimStart();
+      const rest = trimmed.replace(/^\S+/, "");
+      setLine(`${name}${rest}`);
     },
     [line],
   );
@@ -182,29 +235,47 @@ export default function TerminalPage({ onExecuted }: TerminalPageProps): React.J
   return (
     <section aria-label="Terminal" className="caps-terminal">
       <header className="caps-terminal__bar">
-        <div role="tablist" aria-label="Terminal mode" className="caps-terminal__modes">
-          <button
-            role="tab"
-            aria-selected={mode === "text"}
-            type="button"
-            onClick={() => setMode("text")}
-          >
-            Text
-          </button>
-          <button
-            role="tab"
-            aria-selected={mode === "structured"}
-            type="button"
-            onClick={() => setMode("structured")}
-          >
-            Structured
-          </button>
+        {/*
+          Roving tabindex, per the tabs pattern: exactly one tab stop for the
+          whole tablist, the selected tab, and arrow keys to move between them.
+          With plain tabbable buttons a reader tabbed through both tabs before
+          reaching the command line, and the two tabs pointed at nothing: there
+          was no tabpanel, so selecting one announced a change with no panel to
+          change. Arrow-key navigation and the panel below are added together.
+        */}
+        <div role="tablist" aria-label="Terminal mode" className="caps-terminal__modes" onKeyDown={onTabKeyDown}>
+          {MODES.map((m) => (
+            <button
+              key={m}
+              role="tab"
+              id={`terminal-tab-${m}`}
+              aria-selected={mode === m}
+              aria-controls="terminal-mode-panel"
+              tabIndex={mode === m ? 0 : -1}
+              type="button"
+              onClick={() => setMode(m)}
+              ref={(element) => {
+                if (mode === m) tabRefs.current[m] = element;
+              }}
+            >
+              {m === "text" ? "Text" : "Structured"}
+            </button>
+          ))}
         </div>
         <span className="caps-terminal__status" role="status">
           {describeValidationState(state)}
         </span>
       </header>
 
+      {/*
+        One panel shared by both tabs: both modes edit the same command line and
+        render the same verdict, they differ only in how the pipeline is drawn.
+        `aria-labelledby` follows the selected tab so the panel is announced as
+        the content of the tab that is actually open. The panel is not focusable
+        because the command line inside it is the first thing a reader wants, and
+        making the wrapper a tab stop would add a stop that does nothing.
+      */}
+      <div id="terminal-mode-panel" role="tabpanel" aria-labelledby={`terminal-tab-${mode}`}>
       <label className="caps-terminal__input">
         <span>Command line</span>
         <input
@@ -254,6 +325,7 @@ export default function TerminalPage({ onExecuted }: TerminalPageProps): React.J
       <button type="button" disabled={!canRun} onClick={() => void execute()}>
         {executing ? "Starting…" : "Run"}
       </button>
+      </div>
 
       {grammar !== null && (
         <details className="caps-terminal__grammar">

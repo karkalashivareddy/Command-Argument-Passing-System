@@ -18,25 +18,30 @@ A small, deliberate model — **not** job control:
 | SIGTERM, SIGQUIT, SIGSEGV, ... | default dispositions (a SIGTERM still terminates caps) |
 | SIGCHLD | default; caps reaps synchronously with `waitpid()`, so no SIGCHLD handler is needed |
 
-### Setup failures are reported, not ignored
+### Setup failures are fatal, not degraded
 
 `signals_parent_init()` and `signals_child_reset()` both return `int`
-(0 on success, -1 if `sigaction()` fails):
+(0 on success, -1 if `sigaction()` fails), and both callers **refuse to
+carry on**. The policy is fail-closed:
 
-- **Parent setup fails:** `signals_parent_init()` prints
-  `caps: sigaction(SIGINT, SIG_IGN): <strerror(errno)>` — the actual
-  syscall failure, reported once by the function that owns the syscall —
-  and `main` keeps running. The REPL remains usable; only the Ctrl+C
-  protection is degraded, and the user is told so. `main` deliberately
-  does not print a second, redundant warning for the same failure.
-- **Child reset fails:** the child prints
-  `caps: warning: failed to reset SIGINT in child; the executed program
-  may ignore Ctrl+C` (via `write(2)`, before `exec`), then proceeds to
-  `execvp()`. The launched program may therefore ignore Ctrl+C, which
-  is exactly the condition being warned about.
+- **Parent setup fails:** `signals_parent_init()` reports the actual
+  syscall failure (`caps: sigaction(SIGINT, SIG_IGN): <strerror(errno)>`)
+  and `main` prints `cannot initialise the signal model; refusing to
+  start` and returns `EXIT_FAILURE` (`src/main.c`). If SIGINT cannot be
+  ignored, Ctrl+C would also kill caps while a child runs, and the
+  guarantee "the REPL survives Ctrl+C" would be false while the process
+  behaved as though it were true.
+- **Child reset fails:** the child reports it with `write(2)` before any
+  stdio, writes the errno to the status pipe, and `_exit(126)`s
+  **without calling `execvp()`** (`src/process.c`, on both the
+  single-command path and each pipeline stage). POSIX `exec` preserves
+  `SIG_IGN`, so exec'ing with the reset undone would hand the program a
+  disposition CAPS never promised — it would survive Ctrl+C, and a
+  pipeline producer would take `EPIPE` instead of dying of `SIGPIPE`.
 
-Reporting the degradation is preferable to silently pretending signal
-handling succeeded.
+The refusal travels on the status pipe like any other launch failure, so
+the parent classifies it rather than guessing. Running a program whose
+signal semantics are wrong would be worse than not running it.
 
 ---
 
@@ -124,7 +129,12 @@ program's behavior; caps would rather observe and report it.
 - At the prompt, Ctrl+C does **nothing** — the parent ignores SIGINT,
   and there is no line-cancellation UI (a full interactive `readline`
   would be needed).
-- No process groups: all commands run in caps's own process group.
+- One process group per **pipeline**, not per interactive command.
+  `process_exec_pipeline()` calls `setpgid()` so the stages are one
+  addressable unit with stage 0 as the group leader, and `pgid` is
+  reported on `PROCESS_STARTED` / `PROCESS_EXITED` as evidence. A
+  single command has no group of its own. That exists so a signal can
+  reach every stage; it is signal delivery, not job control.
 - No foreground/background jobs.
 - No `SIGTSTP` (Ctrl+Z) stop/resume support.
 - No `WUNTRACED`/`WCONTINUED` job-status reporting.

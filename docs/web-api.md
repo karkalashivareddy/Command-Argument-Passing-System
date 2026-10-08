@@ -78,6 +78,48 @@ repository-relative.
   "workspaceAvailable": true,
   "allowlist": ["echo","printf","sleep","true","false","pwd","cat","uname","status_probe","caps_cpu_burn","…"],
   "limits": { "maxConcurrent": 4, "defaultTimeoutMs": 30000, "maxTimeoutMs": 120000, "maxOutputBytes": 65536 },
+  "guardrails": {
+    "wallTime": {
+      "configuredBytesOrMs": 30000,
+      "unit": "ms",
+      "enforced": true,
+      "mechanism": "the gateway's own timer; on expiry it escalates SIGTERM then SIGKILL. The engine has no timeout of its own"
+    },
+    "wallTimeCeiling": { "configuredBytesOrMs": 120000, "unit": "ms", "enforced": true },
+    "stdout": {
+      "configuredBytesOrMs": 65536,
+      "unit": "bytes",
+      "enforced": true,
+      "mechanism": "the gateway bounds the retained stdout buffer and records the truncation. The child is NOT stopped for producing output, and does not need to be: both pipes are drained continuously, so a full pipe cannot block the child"
+    },
+    "stderr": {
+      "configuredBytesOrMs": 65536,
+      "unit": "bytes",
+      "enforced": true,
+      "mechanism": "bounded separately from stdout, so a loud stderr cannot consume the stdout budget. The gateway drains both pipes continuously, so an unbounded stderr fills no pipe and cannot deadlock a healthy child"
+    },
+    "cpuTime": {
+      "configuredBytesOrMs": 0,
+      "unit": "ms of kernel-reported CPU time",
+      "enforced": false,
+      "mechanism": "not configured; CPU time is observed and recorded but not limited",
+      "caveat": "This is CPU time, not wall-clock time. A process sleeping on I/O consumes none. The kernel's limit is whole seconds, so a millisecond budget is rounded UP to the next second and the real ceiling is never tighter than the configured one"
+    },
+    "addressSpace": {
+      "configuredBytesOrMs": 0,
+      "unit": "bytes of virtual address space (RLIMIT_AS)",
+      "enforced": false,
+      "mechanism": "not configured",
+      "caveat": "RLIMIT_AS caps VIRTUAL ADDRESS SPACE, not physical memory. It bears no simple relation to RSS or to the machine's RAM…"
+    },
+    "concurrency": {
+      "configuredBytesOrMs": 4,
+      "unit": "simultaneous executions",
+      "enforced": true,
+      "mechanism": "a request beyond the limit is refused with 429 rather than queued indefinitely"
+    },
+    "thermal": { "enabled": false, "availability": "DISABLED", "reason": "…", "action": "WARN", "scope": "CAPS-owned workloads only; never an unrelated host process", "restrictions": [ … ] }
+  },
   "security": {
     "bindMode": "local",
     "loopbackOnly": true,
@@ -85,8 +127,18 @@ repository-relative.
     "executableResolution": "absolute verified path; PATH is never consulted for an allowlisted command",
     "redirectionHardening": "O_NOFOLLOW plus a regular-file check at open time"
   },
-  "redirection": { "supported": true, "modes": ["in","out","append"], "stderr": false },
-  "signals": { "supported": ["SIGINT","SIGTERM","SIGKILL","SIGQUIT","SIGTSTP"], "identityVerified": true },
+  "redirection": {
+    "supported": true,
+    "modes": ["in","out","append"],
+    "stderr": true,
+    "stderrByRoute": { "/api/sessions": false, "/api/terminal/execute": true },
+    "stderrNote": "stderr redirection is a terminal-route feature. POST /api/sessions accepts only in/out/append and rejects a stderr slot with 400. Both routes validate the target against the workspace policy and the engine opens it with O_NOFOLLOW."
+  },
+  "signals": {
+    "supported": ["SIGINT","SIGTERM","SIGKILL","SIGQUIT","SIGTSTP"],
+    "identityVerified": true,
+    "identityVerificationScope": "verified before every DELAYED escalation, and for every signal delivered through pidfd. The first signal of a terminate or a timeout is delivered by kill(2) to the PID the gateway spawned, without a re-read of /proc first; that PID is the gateway's own unreaped child at that moment, so it cannot have been recycled. …"
+  },
   "telemetry": {
     "enabled": true,
     "intervalMs": 500,
@@ -98,9 +150,45 @@ repository-relative.
     "counterResetRule": "A cumulative counter that decreases between two samples is reported as UNAVAILABLE, never as zero…",
     "notCollected": ["Syscall tracing","eBPF","cgroup accounting","Network I/O","File descriptor counts"]
   },
+  "processIdentity": {
+    "model": "pidfd: a kernel handle bound to one specific process",
+    "confidence": "VERIFIED",
+    "reason": "pidfd_open(2) and pidfd_send_signal(2) are available",
+    "kernel": "…",
+    "terminationMechanism": "pidfd",
+    "invariant": "CAPS signals only processes it started. Every DELAYED escalation, and every pidfd signal, checks that the kernel still reports the identity it recorded before delivering. A PID on its own is never sufficient, because PIDs are reused. …"
+  },
+  "observability": {
+    "timeline": { "enabled": true, "axis": "seconds-relative-to-first-event" },
+    "annotations": true,
+    "peaks": true,
+    "replaySync": true,
+    "sequenceIntegrity": true,
+    "export": { "formats": ["json","csv"] },
+    "report": true,
+    "comparison": true,
+    "commandProfiles": true
+  },
+  "bind": { "mode": "local", "host": "127.0.0.1", "port": 3000 },
   "workloads": { "count": 5, "available": 5, "profiles": [ … ], "limits": { … } }
 }
 ```
+
+`guardrails` publishes every limit as three separable things: `configuredBytesOrMs`,
+`enforced`, and a `mechanism`. They are allowed to disagree, and the
+disagreement is the point — a configured limit the gateway cannot apply must not
+look enforced. `enforced` is `false` wherever the configured value is `0`, which
+means "unlimited", not "zero". See [`guardrails.md`](guardrails.md).
+
+`processIdentity` is a **real probe**, not a declaration: it is the answer to
+"what does a signal sent by CAPS actually guarantee?", and the guarantee differs
+by host. `confidence` is `VERIFIED` (`pidfd`), `UNVERIFIED` (start-ticks
+validation), or `UNAVAILABLE` — and in the last case CAPS **will not signal**.
+
+`redirection.stderr` is `true` because the product supports `2>` and `2>>`. It
+used to publish `stderr: false`, which was true only of `/api/sessions`, whose
+schema accepts just `in`/`out`/`append`; `stderrByRoute` states the per-route
+truth and `stderrNote` names the asymmetry. A single flag cannot describe it.
 
 `telemetry.observedMetrics` is the procfs-read subset. A rate is **not** in
 it: a rate is computed from two samples, and the previous single
@@ -144,7 +232,8 @@ Errors:
 | `COMMAND_UNAVAILABLE` | 503 | allowlisted, but the binary is missing or unverified |
 | `TIMEOUT_TOO_SHORT` | 400 | a workload's own budget exceeds the transport timeout |
 | `REDIRECTION_REJECTED` | 422 | path policy refused the target |
-| `FILE_ARGUMENT_REJECTED` | 422 | a `cat` argument is outside the workspace |
+| `ARGUMENT_REJECTED` | 422 | a per-command argument schema or the workspace file policy refused an argument; the message names the rule |
+| `WORKLOAD_ARGUMENT_REJECTED` | 400 | a workload's own arguments are not in its declared range |
 | `CONCURRENCY_LIMIT_REACHED` | 429 | the concurrency limit is reached |
 | `PERSISTENCE_FAILED` | 500 | the session could not be recorded, so it was **not started** |
 
@@ -339,3 +428,46 @@ limitations section naming what this report cannot tell you.
 | --- | --- |
 | `GET /api/playground/examples` | curated, runnable examples |
 | `POST /api/retention/sweep` | run the retention sweep now; reports what it removed, and says so plainly when retention is disabled |
+
+## Host system (`/api/system/*`)
+
+The whole-**host** observer, which is a different subject from `/api/processes`
+(that one reports CAPS-owned executions). Every figure here is read from
+`/proc` or `/sys` and carries its own provenance; an absent source is
+`UNAVAILABLE` with a reason, never zero. See
+[`host-telemetry.md`](host-telemetry.md) and
+[`observability-model.md`](observability-model.md).
+
+| Endpoint | Returns |
+| --- | --- |
+| `GET /api/system/capabilities` | `subsystems[]` — each id, label, kernel source, `available`, and what it does and does not measure; `notImplemented[]` with a reason per item (measured hardware frequency, per-process network, thermal control, syscall tracing, eBPF); the sampling `cadence`; and the host `stream` limits |
+| `GET /api/system/snapshot` | the current whole-host snapshot: CPU aggregate and per-core, memory, load, PSI pressure, thermal, frequency, disk, network, and collector health. **503 `NO_SNAPSHOT`** when the collector has not produced one yet |
+| `GET /api/system/processes` | the host process inventory. Query `limit`, `live`, `withPss`, `state`. Also returns `pssSupported` (probed once at startup) and `pssNote`; PSS is omitted from rows that did not carry it so an absent PSS cannot be read as zero |
+| `GET /api/system/processes/:identity` | one process **by identity**, not by PID. `:identity` must match `<pid>@<startTicks>#<bootId>`; a bare PID is a **400**, because a PID alone is not an identity — it is reused. **404 `PROCESS_NOT_FOUND`** when no live process currently holds it, which means either it exited or its PID was taken by a different process. Re-reads procfs at request time and settles ownership and the parent link against the same context the list route uses, so one identity cannot answer differently in two views |
+| `GET /api/system/thermal` | thermal zones and hwmon devices with their own `type` and `label`, plus `absentReason`. Nothing is written to sysfs |
+| `GET /api/system/frequency` | cpufreq policy and per-frequency data, plus `absentReason`. Policy and governor figures only; no hardware frequency is measured |
+| `GET /api/system/analytics` | time-window aggregates over persisted host samples: per metric, `mean`, `percentiles`, and `series`, each reporting how many samples carried a value and how many did not. Also the retention policy in force, what a sweep deletes, and what it never deletes |
+| `GET /api/system/health` | collector health, identity (`bootId`, sample counts), current stream subscriber count, storage stats, `pssSupported`, and the cadence |
+| `GET /api/system/stream` | the host telemetry SSE stream. Subscribe-then-read with delivery paused, so no event published during the backlog read is lost; `Last-Event-ID` resumes. **503 `STREAM_LIMIT_REACHED`** past the permitted client count |
+| `POST /api/system/retention/sweep` | run the **host** sweep now. Body `{ "olderThanHours": 24 }`; returns the cutoff, what was removed, and the storage stats afterwards |
+
+## Catalog
+
+Every allowlisted command with its **probed** state and its live argument
+schema. This is the source a client should read to know what a command accepts
+rather than hard-coding a second list.
+
+| Endpoint | Returns |
+| --- | --- |
+| `GET /api/catalog` | `summary`, `trustedDirectories` (where a command may be resolved from, in order), every `command` entry, the published `grammar` (`supported[]` and `notSupported[]`, each with a reason, plus the parser limits: 16 stages, 4096 arguments per stage, 20000 token bytes, 65536 line bytes), and `refusedByPolicy` |
+| `GET /api/catalog/:name` | one command's probed entry: resolved path, availability, and its argument schema. **404** for an unknown name |
+| `GET /api/catalog/:name/help` | the generated help for one command, including why an argument is refused |
+| `GET /api/catalog/help` | generated help for every command |
+| `GET /api/catalog/categories` | the commands grouped by category |
+
+## Terminal validation
+
+| Endpoint | Returns |
+| --- | --- |
+| `POST /api/terminal/validate` | parses and policy-checks a command line **without running it**: `valid`, `stageCount`, and per stage the `index`, `command`, `argv`, `resolvedExecutable` with its `resolutionNote`, `redirections`, `stdinSource`, `stdoutDest`, plus the effective `limits`. Refusals keep the execute route's codes: **400 `TERMINAL_SYNTAX`**, **403 `TERMINAL_POLICY`** with `stageIndex` and a `hint` for a well-known-but-forbidden command. This is the same validation `POST /api/terminal/execute` runs first, so what it accepts is what execution will accept |
+| `GET /api/terminal/grammar` | the published grammar on its own, for an editor or autocomplete |

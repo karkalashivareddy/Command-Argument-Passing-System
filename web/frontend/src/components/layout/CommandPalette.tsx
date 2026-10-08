@@ -63,6 +63,7 @@ export function CommandPalette() {
   const [q, setQ] = useState("");
   const [idx, setIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   /**
    * 3D commands resolve against the URL the reader is already on, so they work
@@ -87,12 +88,27 @@ export function CommandPalette() {
     return all.filter((a) => `${a.label} ${a.hint} ${a.category}`.toLowerCase().includes(needle));
   }, [q, spaceActions]);
 
+  /**
+   * Focus goes to the search input on open and comes back to whatever opened the
+   * palette on close.
+   *
+   * Without the restore, closing the palette dropped focus onto <body>: the next
+   * Tab restarted from the top of the document, so a keyboard reader who opened
+   * the palette with Ctrl-K lost their place on a page with a long sidebar. The
+   * trigger is captured on the open transition, before focus moves.
+   */
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+
   useEffect(() => {
-    if (open) {
-      setQ("");
-      setIdx(0);
-      window.setTimeout(() => inputRef.current?.focus(), 30);
-    }
+    if (!open) return;
+    returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setQ("");
+    setIdx(0);
+    window.setTimeout(() => inputRef.current?.focus(), 30);
+    return () => {
+      returnFocusRef.current?.focus();
+      returnFocusRef.current = null;
+    };
   }, [open]);
 
   function run(action: Action) {
@@ -107,10 +123,39 @@ export function CommandPalette() {
     }
   }
 
+  /**
+   * Keyboard handling for the whole overlay: Escape closes, arrows move the
+   * highlight, Enter runs, and Tab is trapped inside the dialog.
+   *
+   * The trap is written by hand rather than pulled in as a dependency because it
+   * is thirty lines: Tab past the last focusable element wraps to the first, and
+   * Shift+Tab past the first wraps to the last. Without it, Tab from the last
+   * result button moved focus to the page behind the overlay while the palette
+   * stayed on screen, and the next keystrokes went to a control the reader could
+   * not see.
+   */
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
+      if (e.key === "Tab") {
+        const panel = panelRef.current;
+        if (panel === null) return;
+        const focusable = panel.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])',
+        );
+        if (focusable.length === 0) return;
+        const first = focusable[0]!;
+        const last = focusable[focusable.length - 1]!;
+        const active = document.activeElement;
+        if (e.shiftKey && (active === first || !panel.contains(active))) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && (active === last || !panel.contains(active))) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setIdx((i) => Math.min(i + 1, actions.length - 1));
@@ -138,6 +183,10 @@ export function CommandPalette() {
         >
           <div className="absolute inset-0 bg-black/50" onClick={() => setOpen(false)} />
           <motion.div
+            ref={panelRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Command palette"
             className="relative w-[min(560px,92vw)] overflow-hidden rounded-[var(--r-lg)] border border-[var(--line-1)] bg-[var(--bg-1)] shadow-[var(--shadow-pop)]"
             initial={{ scale: 0.98, y: -6, opacity: 0 }}
             animate={{ scale: 1, y: 0, opacity: 1 }}

@@ -1,5 +1,22 @@
 # CAPS Observatory — Dashboard Information Architecture
 
+> **HISTORICAL — superseded design record, not current truth.**
+> This file is the information architecture as it was drafted before the
+> implementation settled. It is kept because the reasoning behind the final
+> layout is still worth reading, and because it makes no technical claim that
+> contradicts the code: the route names it lists were all built.
+>
+> For what the product actually is, read [`../README.md`](../README.md),
+> [`web-architecture.md`](web-architecture.md), and
+> [`web-api.md`](web-api.md), which describe the shipped 2.0.0 gateway. Where
+> this document and those disagree about a detail, those are correct.
+>
+> Two sibling drafts that were referenced by nothing and that did contain
+> actively false technical claims — `web-product-plan.md` and
+> `visualization-architecture.md` — were deleted rather than kept. One named
+> four event types the gateway never had; the other denied pipelines,
+> quoting, and CPU/memory telemetry, all of which ship.
+
 ## 1. Route structure
 
 | Route | Page | Purpose |

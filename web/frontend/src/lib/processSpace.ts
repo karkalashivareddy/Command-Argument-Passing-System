@@ -1,4 +1,4 @@
-import type { CanonicalEvent, ProcessVisualState, TelemetryMetric } from "../types/observability";
+import type { CanonicalEvent, ProcessVisualState, RawMetric, TelemetryMetric } from "../types/observability";
 import { buildVisualState, collectSamples, visualStatePeaks, type TelemetrySample } from "./telemetry";
 import { nodeKeyFor, nodeKeyForRole, type ProcessIdentity } from "./evidenceCorrelation";
 
@@ -750,19 +750,8 @@ export function spaceAt(space: ProcessSpace, cursorMs: number | null): SpaceNode
  * The first recorded sample at or after the cursor: the "next" replay step.
  * Replay moves between recorded moments only; it never invents a time.
  */
-export function nextSampleMs(space: ProcessSpace, cursorMs: number | null): number | null {
-  for (const atMs of space.sampleTimesMs) if (cursorMs === null || atMs > cursorMs) return atMs;
-  return null;
-}
 
 /** The latest recorded sample at or before the cursor: the "previous" step. */
-export function previousSampleMs(space: ProcessSpace, cursorMs: number | null): number | null {
-  for (let i = space.sampleTimesMs.length - 1; i >= 0; i -= 1) {
-    const atMs = space.sampleTimesMs[i]!;
-    if (cursorMs === null || atMs <= cursorMs) return atMs;
-  }
-  return null;
-}
 
 // ---------------------------------------------------------------------------
 // Visual mapping — bounded, documented, deterministic
@@ -844,11 +833,11 @@ export const LENS_SPECS: Record<MetricMode, LensSpec> = {
     id: "io",
     label: "I/O",
     metric: "io",
-    unit: "bytes per second",
+    unit: "characters/s or bytes/s (per counter)",
     mapping:
       "radius = clamp(RMIN + span * max(rchar, wchar, blockRead, blockWrite) / peakOfThoseSameCounters, RMIN, RMAX); the ring shows the same value",
     caveat:
-      "I/O rates are DERIVED. The lens shows the largest of the four recorded rate counters, not a single 'I/O' figure: character counters include page-cache hits and are not disk throughput.",
+      "I/O rates are DERIVED. The lens shows the largest of the four recorded rate counters, not a single 'I/O' figure: character counters include page-cache hits and are NOT disk throughput, and the tooltip names which of the four the displayed value came from.",
   },
   faults: {
     id: "faults",
@@ -885,8 +874,17 @@ export function lensValue(state: SpaceNodeState, mode: MetricMode): number | nul
   }
 }
 
-/** The raw observed value behind a lens, for tooltips and the evidence panel. */
-export function lensRawValue(state: SpaceNodeState, mode: MetricMode): number | null {
+/**
+ * The recorded metric behind a lens, with the provenance that must be shown
+ * beside it.
+ *
+ * Returning the whole `RawMetric` rather than a bare number is the point. This
+ * value feeds the tooltip, the node table and the inspector, and every one of
+ * those must be able to say OBSERVED or DERIVED or UNAVAILABLE about the number
+ * it is displaying. When this returned `number | null` the provenance was gone,
+ * so the only thing the UI could print for a DERIVED rate was the number.
+ */
+export function lensRawMetric(state: SpaceNodeState, mode: MetricMode): RawMetric | null {
   const visual = state.visual;
   if (visual === null) return null;
   switch (LENS_SPECS[mode].metric) {
@@ -895,9 +893,30 @@ export function lensRawValue(state: SpaceNodeState, mode: MetricMode): number | 
     case "cpu":
       return visual.raw.cpuPercent;
     case "io": {
-      const values = [visual.raw.rcharBytesPerSec, visual.raw.wcharBytesPerSec, visual.raw.readBytesPerSec, visual.raw.writeBytesPerSec];
-      const observed = values.filter((value): value is number => value !== null);
-      return observed.length === 0 ? null : Math.max(...observed);
+      /*
+       * The largest of four recorded counters, and the lens says which one.
+       *
+       * Note the unit caveat, which this switch used to lose: `rchar`/`wchar`
+       * count CHARACTERS including page cache and are not storage traffic, while
+       * `read_bytes`/`write_bytes` count storage bytes. Taking the max of both
+       * and labelling it "bytes per second" states a physical quantity that no
+       * single counter measured. The returned metric therefore carries the note
+       * of whichever counter actually won, so the tooltip can name it instead of
+       * asserting a unit the data does not support.
+       */
+      const candidates = [
+        visual.raw.rcharBytesPerSec,
+        visual.raw.wcharBytesPerSec,
+        visual.raw.readBytesPerSec,
+        visual.raw.writeBytesPerSec,
+      ].filter((m): m is RawMetric => m.value !== null);
+      if (candidates.length === 0) {
+        return { value: null, provenance: "UNAVAILABLE", reason: "no I/O rate counter was recorded for this sample" };
+      }
+      const winner = candidates.reduce((best, m) => ((m.value ?? 0) > (best.value ?? 0) ? m : best));
+      return winner.unitNote === undefined
+        ? winner
+        : { ...winner, unitNote: `lens shows the largest of four counters; this one ${winner.unitNote}` };
     }
     case "faults": {
       // The lens is documented as a per-second rate, so it reads the derived
@@ -905,9 +924,21 @@ export function lensRawValue(state: SpaceNodeState, mode: MetricMode): number | 
       // report a growing total as if it were an activity level.
       const minor = visual.raw.minorFaultsPerSec;
       const major = visual.raw.majorFaultsPerSec;
-      return minor === null && major === null ? null : Math.max(minor ?? 0, major ?? 0);
+      if (minor.value === null && major.value === null) {
+        return {
+          value: null,
+          provenance: "UNAVAILABLE",
+          reason: minor.reason ?? major.reason ?? "no per-second fault rate was recorded for this sample",
+        };
+      }
+      return (minor.value ?? 0) >= (major.value ?? 0) ? minor : major;
     }
   }
+}
+
+/** Just the number, for layout maths that cannot render a label. */
+export function lensRawValue(state: SpaceNodeState, mode: MetricMode): number | null {
+  return lensRawMetric(state, mode)?.value ?? null;
 }
 
 /**
@@ -919,11 +950,11 @@ export function lensRawValue(state: SpaceNodeState, mode: MetricMode): number | 
 export function radiusForMode(state: SpaceNodeState, mode: MetricMode): number {
   if (state.node.role === "caps-engine") return RADIUS_MIN;
   if (mode === "cpu") {
-    const cpu = state.visual?.raw.cpuPercent ?? null;
+    const cpu = state.visual?.raw.cpuPercent.value ?? null;
     if (cpu === null) return RADIUS_MIN;
     return Math.min(RADIUS_MAX, Math.max(RADIUS_MIN, RADIUS_MIN + Math.min(1, cpu / 100) * (RADIUS_MAX - RADIUS_MIN)));
   }
-  if (mode === "memory" || mode === "normal") return nodeRadius(state.visual?.raw.rssBytes ?? null);
+  if (mode === "memory" || mode === "normal") return nodeRadius(state.visual?.raw.rssBytes.value ?? null);
   const value = lensValue(state, mode);
   if (value === null) return RADIUS_MIN;
   return Math.min(RADIUS_MAX, Math.max(RADIUS_MIN, RADIUS_MIN + value * (RADIUS_MAX - RADIUS_MIN)));
@@ -940,54 +971,81 @@ export function lensIntensity(state: SpaceNodeState, mode: MetricMode): number {
 
 /** CPU intensity, kept for the default encoding where the ring always means CPU. */
 export function cpuIntensity(state: SpaceNodeState): number {
-  const cpu = state.visual?.raw.cpuPercent ?? null;
+  const cpu = state.visual?.raw.cpuPercent.value ?? null;
   if (cpu === null || state.terminal) return 0;
   return Math.min(1, Math.max(0, cpu / 100));
 }
 
 /** True when the current lens has no observation for this node. */
-export function lensUnavailable(state: SpaceNodeState, mode: MetricMode): boolean {
-  return lensValue(state, mode) === null;
-}
 
 /**
  * The node a process identity refers to, through the start-time guard rather
  * than through a bare PID comparison.
  */
-export function nodeForIdentity(space: ProcessSpace, identity: ProcessIdentity | null): SpaceNode | null {
-  if (identity === null) return null;
-  const key = nodeKeyFor(identity);
-  if (key === null) return null;
-  const node = space.byKey.get(key);
-  if (node === undefined || node.identity === null) return null;
-  const a = node.identity;
-  const sameSession = a.sessionId === identity.sessionId;
-  const samePid = a.pid === identity.pid;
-  const startOk = a.processStartTime === null || identity.processStartTime === null || a.processStartTime === identity.processStartTime;
-  return sameSession && samePid && startOk ? node : null;
-}
 
 export interface StatePalette {
   color: string;
   label: string;
+  /**
+   * What the state means, in one clause, for the legend.
+   *
+   * It lives beside the colour rather than in the legend component so that the
+   * meaning and the colour it explains cannot be edited independently and drift.
+   */
+  meaning: string;
 }
 
+/*
+ * THE LIFECYCLE PALETTE.
+ *
+ * Colour encodes a PROCESS STATE, never decoration, so every entry names the
+ * state it stands for and nothing else in the scene competes with it:
+ *
+ *   cyan    running        -- telemetry is flowing, this is the live case
+ *   violet  starting       -- between fork() and its first recorded act: a
+ *                             transition, which is exactly what violet means
+ *                             everywhere else in this product
+ *   emerald completed     -- reaped, exit 0
+ *   amber   timed out / signalled -- the run did not finish on its own terms
+ *   red     failed         -- an execution error, a wait failure, a launch failure
+ *   grey    pending / waiting -- the record cannot place this process in a
+ *                             running state yet. Grey is reserved for "the record
+ *                             does not say", never for "nothing to see".
+ *
+ * `STARTING` was previously the blue reserved for "links / neutral info". That is
+ * not a lifecycle meaning at all, and a process between fork() and exec is
+ * literally an execution transition, so it takes violet.
+ */
 const STATE_PALETTE: Record<SpaceLifecycleState, StatePalette> = {
-  PENDING: { color: "#5b6673", label: "PENDING" },
-  STARTING: { color: "#4c8bf5", label: "STARTING" },
-  RUNNING: { color: "#22c3ee", label: "RUNNING" },
-  WAITING: { color: "#8b96a3", label: "WAITING" },
-  COMPLETED: { color: "#3ecf8e", label: "COMPLETED" },
-  FAILED: { color: "#f0554d", label: "FAILED" },
-  SIGNALED: { color: "#f5a623", label: "SIGNALED" },
-  TIMED_OUT: { color: "#f5a623", label: "TIMED_OUT" },
-  CANCELLED: { color: "#8b7cf6", label: "CANCELLED" },
+  PENDING: { color: "#5b6673", label: "PENDING", meaning: "the record has not placed this process in a state yet" },
+  STARTING: { color: "#8b7cf6", label: "STARTING", meaning: "forked, before its first recorded act: an execution transition" },
+  RUNNING: { color: "#22c3ee", label: "RUNNING", meaning: "observed executing, with procfs telemetry" },
+  WAITING: { color: "#8b96a3", label: "WAITING", meaning: "started but not observed running at this cursor" },
+  COMPLETED: { color: "#3ecf8e", label: "COMPLETED", meaning: "reaped by waitpid() with exit code 0" },
+  FAILED: { color: "#f0554d", label: "FAILED", meaning: "exec, wait or launch error recorded against it" },
+  SIGNALED: { color: "#f5a623", label: "SIGNALED", meaning: "terminated by a signal other than its own timeout" },
+  TIMED_OUT: { color: "#f5a623", label: "TIMED_OUT", meaning: "the gateway's wall-clock limit expired and it was signalled" },
+  CANCELLED: { color: "#8b96a3", label: "CANCELLED", meaning: "a terminate was requested; not a program failure" },
 };
 
 export function statePalette(state: SpaceLifecycleState): StatePalette {
   return STATE_PALETTE[state];
 }
 
+/**
+ * Every state the model can produce, with its colour and meaning.
+ *
+ * Generated from `STATE_PALETTE` rather than written in the legend component, so
+ * the legend cannot omit a state the model produces or invent one it does not.
+ */
+export function spaceStateLegend(): Array<{ state: SpaceLifecycleState; label: string; color: string; meaning: string }> {
+  return (Object.keys(STATE_PALETTE) as SpaceLifecycleState[]).map((state) => ({
+    state,
+    label: STATE_PALETTE[state].label,
+    color: STATE_PALETTE[state].color,
+    meaning: STATE_PALETTE[state].meaning,
+  }));
+}
 export const MARKER_COLORS: Record<SpaceMarker["tone"], string> = {
   cyan: "#22c3ee",
   violet: "#8b7cf6",
@@ -1034,8 +1092,4 @@ export const NODE_Z_OFFSET = 0.9;
 export function nodeEndZ(node: SpaceNode, scale: number, spanMs: number): number {
   if (node.endedAtMs !== null) return node.endedAtMs * scale;
   return Math.max(spanMs, node.createdAtMs ?? 0) * scale;
-}
-
-export function cursorPosition(cursorMs: number | null, scale: number): number {
-  return cursorMs === null ? 0 : cursorMs * scale;
 }

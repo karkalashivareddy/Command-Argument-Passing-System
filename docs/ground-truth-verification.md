@@ -5,8 +5,10 @@ to come from. Captured on the verification host with the real C engine built and
 a real gateway running.
 
 - **Result: 59 checks passed, 0 failed.**
-- Re-run with `node scripts/…` — see [testing.md](testing.md) for the suite
-  commands, and [host-telemetry.md](host-telemetry.md) for what each figure means.
+- Re-run the suite: from `web/backend`,
+  `npx vitest run src/telemetry/system/groundtruth.test.ts`. See
+  [testing.md](testing.md) for the suite commands, and
+  [host-telemetry.md](host-telemetry.md) for what each figure means.
 
 ## Method
 

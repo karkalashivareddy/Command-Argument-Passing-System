@@ -122,6 +122,25 @@ export interface ArgumentSchema {
    */
   readonly leadingPatternPositionals?: number;
   /**
+   * When the leading positional is an EXECUTED PROGRAM rather than data, name
+   * its language so the program can be checked for the constructs that break
+   * out of the workspace/no-shell model.
+   *
+   * This is a different threat from `leadingPatternPositionals`. A pattern is
+   * inert text the engine can look at. A program is code: `awk 'BEGIN{...}'`
+   * can call a shell, read a file the path policy never approved, or write one.
+   * Marking the operand is what lets the validator distinguish `awk '{print $1
+   * > "/tmp/x"}'` (refused) from `awk '{print $1}'` (accepted) -- an awk
+   * comparison, `$1 > 5`, is the same character as a redirection, so this
+   * cannot be decided by the path policy or by a pattern match.
+   *
+   * Only `awk` and `sed` are modelled, and only because they are the only
+   * allowlisted commands whose first positional is code. Adding a
+   * Turing-complete tool to the catalog must add a case here, or the tool will
+   * inherit the exemption with nothing behind it.
+   */
+  readonly programOperand?: "awk" | "sed";
+  /**
    * A POSIX numeric short form: `-<digits>`, meaning the same as the named
    * count flag. `head -1` is `head -n 1`; `tail -20` is `tail -n 20`.
    *
@@ -628,7 +647,12 @@ const DEFINITIONS: readonly CommandDefinition[] = [
       maxArgumentBytes: 1024,
       positionalArePaths: true,
       leadingPatternPositionals: 1,
-      detail: "A script followed by workspace file names. In-place editing (-i) is deliberately NOT accepted: it would let a command rewrite a file rather than merely read one, which no other catalog entry can do.",
+      programOperand: "sed",
+      detail:
+        "A script followed by workspace file names. In-place editing (-i) is deliberately NOT accepted: " +
+        "it would let a command rewrite a file rather than merely read one, which no other catalog entry can do. " +
+        "The script itself is checked too: `w`, `W` and `r` name a file that the workspace policy never sees, " +
+        "and GNU sed's `e` runs a shell, so all three are refused. A pure substitution such as 's/a/A/' is accepted.",
     },
     timeoutMs: 15_000,
     maxOutputBytes: 256 * 1024,
@@ -649,7 +673,13 @@ const DEFINITIONS: readonly CommandDefinition[] = [
       maxArgumentBytes: 2048,
       positionalArePaths: true,
       leadingPatternPositionals: 1,
-      detail: "A program followed by workspace file names. The program is bounded in length and cannot name a file the path policy would refuse, because getline and redirection inside it operate relative to the child's working directory, which is the workspace.",
+      programOperand: "awk",
+      detail:
+        "A program followed by workspace file names. The program is code, not a pattern, so it is checked " +
+        "separately: `system()` is a shell, `getline` reads a file the path policy never approved, and a " +
+        "redirect or pipe attached to `print`/`printf` writes one outside the workspace. All are refused, " +
+        "which is why an awk comparison such as '{s += ($1 > 5)}' stays legal while '{print > \"/tmp/x\"}' does not. " +
+        "A program that only reads its declared inputs and writes stdout, such as '{s+=$1} END {print s}', is accepted.",
     },
     timeoutMs: 15_000,
     maxOutputBytes: 256 * 1024,
