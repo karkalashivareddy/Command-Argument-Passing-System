@@ -79,7 +79,7 @@ export function ProcessSpace({
   const [webgl] = useState(detectWebGL);
   const [failure, setFailure] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
-  const [preset, setPreset] = useState<CameraPreset>(mode === "topology" ? "tree" : "timeline");
+  const [preset, setPreset] = useState<CameraPreset>(mode === "topology" ? "orbit" : "timeline");
   /*
    * ONE camera request, not two counters.
    *
@@ -127,7 +127,7 @@ export function ProcessSpace({
   // The topology/timeline switch is a camera and emphasis change, not a
   // different dataset: both modes read the same evidence.
   useEffect(() => {
-    setPreset(mode === "topology" ? "tree" : "timeline");
+    setPreset(mode === "topology" ? "orbit" : "timeline");
     requestCamera("frame");
   }, [mode, requestCamera]);
 

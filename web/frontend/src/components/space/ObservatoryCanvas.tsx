@@ -79,7 +79,7 @@ export default function ObservatoryCanvas({
   return (
     <div ref={canvasHost} className="h-full w-full" data-testid="observatory-canvas-host">
       <Canvas
-        dpr={[1, 2]}
+        dpr={[1, 1.5]}
         gl={{ antialias: true, alpha: true, powerPreference: "high-performance", failIfMajorPerformanceCaveat: false }}
         camera={{ position: [13, 10, 21], fov: 45, near: 0.1, far: 400 }}
         onCreated={({ gl }) => {
@@ -94,10 +94,11 @@ export default function ObservatoryCanvas({
         <fog attach="fog" args={["#080e1b", 52, 165]} />
 
         {/* Subtle lighting: ambient for legibility, one directional key. */}
-        <ambientLight intensity={0.72} color="#9cb9ff" />
-        <directionalLight position={[12, 18, 10]} intensity={1.15} color="#b9ddff" />
-        <pointLight position={[-12, 8, -8]} intensity={22} distance={90} color="#397dff" />
-        <pointLight position={[12, 7, 18]} intensity={14} distance={80} color="#8e6aff" />
+        <hemisphereLight args={["#91b8ff", "#07101f", 0.46]} />
+        <ambientLight intensity={0.48} color="#b5c9ef" />
+        <directionalLight position={[12, 18, 10]} intensity={0.9} color="#d2eaff" />
+        <pointLight position={[-12, 8, -8]} intensity={8} distance={90} color="#397dff" />
+        <pointLight position={[12, 7, 18]} intensity={5} distance={80} color="#8e6aff" />
 
         <Suspense fallback={null}>
           <ExecutionGrid space={space} scale={scale} />

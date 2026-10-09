@@ -1,10 +1,11 @@
 ﻿# Screenshots
 
-Current product screenshots. The current set was recaptured on 2026-10-09 from
-the production frontend build against the real Linux gateway and first-party
-bounded workloads. See [the capture script](../../web/frontend/scripts/capture-screenshots.mjs)
-for the procedure and [the design system](../design-system.md) for the
-light-preference acceptance check.
+Current product screenshots are in
+[`motion-finish-2026-10-09/`](motion-finish-2026-10-09/). They were captured on
+2026-10-09 from the production frontend build against the real Linux gateway and
+first-party bounded workloads. See [the capture script](../../web/frontend/scripts/capture-screenshots.mjs)
+for the procedure and [the design system](../design-system.md) for motion and
+reduced-motion behavior.
 
 The overview and Execute page before the visual correction are preserved in
 [`baseline-2026-10-09`](baseline-2026-10-09/). The baseline and desktop captures
@@ -31,4 +32,9 @@ See docs/demo/FACULTY_DEMO_RUNBOOK.md for when to use the screenshots.
 16-redirection.png — 16 redirection
 17-architecture.png — 17 architecture
 18-settings.png — 18 settings
+08b-process-space-selected.png — selected observed process
+08c-process-space-timeline.png — Process Space timeline camera
+08d-process-space-top.png — Process Space top camera
+08e-process-space-table.png — accessible process table alternative
+08f-process-space-event-cursor.png — selected recorded event and shared cursor
 19-responsive.png — 19 responsive

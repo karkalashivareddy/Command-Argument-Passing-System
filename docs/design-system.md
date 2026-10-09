@@ -43,11 +43,21 @@ font stack. Fonts remain local and do not require an external request.
 
 ## Motion and accessibility
 
-Motion uses the shared `--motion-*` and `--ease-*` tokens. Route arrival,
-navigation, command palette, and evidence selection transitions remain short.
-Motion communicates state and never supplies the only indication of it. The
-global reduced-motion rule suppresses CSS transitions and animation, and the 3D
-renderer switches to demand mode when reduced motion is requested.
+Motion uses the shared `--motion-*` and `--ease-*` tokens. The persistent shell
+keeps the ambient field mounted while a pathname change crossfades and lifts the
+incoming workspace by a few pixels. Query-only changes do not restart the
+transition. The shell's own scroll container drives a thin progress line; history
+navigation restores the saved position for that entry, while a new workspace
+starts at the top. Major cards and sections below the initial viewport reveal
+once as they enter the main scroll region. The sidebar active marker and button
+press state use short, stateful feedback rather than broad `transition: all`
+rules.
+
+Motion communicates state and never supplies the only indication of it.
+Reduced-motion preferences remove route displacement and CSS animation, skip
+the spring on the progress line, and keep immediate scroll behavior. The 3D
+renderer switches to demand mode; node positions and evidence remain available
+without idle movement.
 
 Keyboard focus uses a high-contrast cyan outline and ring. The sidebar remains
 available on desktop and becomes a focus-managed dialog on small screens. The
@@ -55,6 +65,29 @@ available on desktop and becomes a focus-managed dialog on small screens. The
 alternatives. Color contrast and mobile layouts should be checked in the actual
 browser at the 390 px acceptance width; automated checks alone do not establish
 formal WCAG conformance.
+
+## Process Space visual semantics
+
+The 3D surface uses a dark technical ground plane, restrained blue and violet
+lighting, and a record-framed camera. The CAPS engine has a cylindrical core;
+observed child processes use rounded geometry. Node lifecycle colour continues
+to come from recorded lifecycle evidence. Selection and verified ancestry use
+violet outlines, and the engine's cyan floor ring identifies its role without
+changing its lifecycle colour. Resource lenses affect the existing observed
+resource encoding only. Labels remain HTML, and process/event selection remains
+available in the accessible list and table.
+
+X, Y, and Z remain deterministic process lane, verified process depth, and
+recorded execution time. Camera movement, lighting, and geometry do not add
+processes or events. The renderer caps device pixel ratio at 1.5 for a more
+predictable laptop workload and retains the WebGL failure and 2D/table fallback.
+
+## Browser icon
+
+The Vite public asset `web/frontend/public/caps-mark.svg` is referenced from the
+site root as `/caps-mark.svg`, so the same URL is valid in development and the
+production build. Keep the favicon's dark tile and cyan/blue/violet terminal
+mark aligned with the CAPS shell identity; do not use a framework default.
 
 ## Shell and responsive layout
 

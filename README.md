@@ -392,6 +392,19 @@ Z = execution time               (milliseconds since the record's first event)
 * **Fallbacks** — WebGL unavailable falls back to a 2D canvas; the 2D canvas
   falls back to an accessible table. The fallback is a real surface, not an
   error page.
+* **Scene reading** — the CAPS engine uses a cylindrical core; observed child
+  processes use rounded forms. Lifecycle colour remains tied to recorded state,
+  while selection and verified relationships use a separate violet accent.
+  Camera presets frame the record from its observed bounds, and the resource
+  lens continues to control only the recorded resource encoding.
+
+The application shell keeps the ambient field mounted through navigation.
+Workspace changes use a short opacity and depth transition; query-only changes
+do not replay it. Major below-the-fold sections reveal as they enter the main
+scroll region. The scroll-progress line follows that same container, and
+returning through browser history restores the saved workspace position.
+Reduced-motion preferences disable the route displacement and section reveals,
+and use immediate scroll restoration.
 
 The 2D and 3D views consume the *same* correlation function, and a test asserts
 that one record produces the same selected event, identity, node key, cursor
@@ -489,27 +502,31 @@ recording. The mobile captures use 390×844 with reduced motion enabled.
 
 | Before | Redesigned overview |
 | --- | --- |
-| ![Overview before redesign](docs/screenshots/baseline-2026-10-09/overview-desktop.png) | ![Redesigned CAPS overview](docs/screenshots/redesign-2026-10-09/01-overview.png) |
+| ![Overview before redesign](docs/screenshots/baseline-2026-10-09/overview-desktop.png) | ![CAPS Observatory overview](docs/screenshots/motion-finish-2026-10-09/01-overview.png) |
 
 ### Workspaces
 
 | Surface | Capture |
 | --- | --- |
-| Terminal | ![Terminal workspace](docs/screenshots/redesign-2026-10-09/02-terminal.png) |
-| Execution workbench | ![Execution workbench](docs/screenshots/redesign-2026-10-09/03-execute.png) |
-| Flight recorder | ![Flight recorder](docs/screenshots/redesign-2026-10-09/04-flight-recorder.png) |
-| Live process evidence | ![Live execution telemetry](docs/screenshots/redesign-2026-10-09/06-live-execution.png) |
-| Process Space | ![3D process topology from recorded pipeline evidence](docs/screenshots/redesign-2026-10-09/08-process-space-3d.png) |
-| History | ![Execution history](docs/screenshots/redesign-2026-10-09/20-history.png) |
-| Live observatory | ![Live event stream](docs/screenshots/redesign-2026-10-09/21-live-observatory.png) |
-| Analytics | ![Execution analytics](docs/screenshots/redesign-2026-10-09/13-analytics.png) |
-| Mobile overview | ![390 by 844 mobile overview](docs/screenshots/redesign-2026-10-09/19-responsive.png) |
-| Mobile navigation | ![Mobile navigation drawer](docs/screenshots/redesign-2026-10-09/22-mobile-navigation.png) |
+| Terminal | ![Terminal workspace](docs/screenshots/motion-finish-2026-10-09/02-terminal.png) |
+| Execution workbench | ![Execution workbench](docs/screenshots/motion-finish-2026-10-09/03-execute.png) |
+| Flight recorder | ![Flight recorder](docs/screenshots/motion-finish-2026-10-09/04-flight-recorder.png) |
+| Live process evidence | ![Live execution telemetry](docs/screenshots/motion-finish-2026-10-09/06-live-execution.png) |
+| Process Space | ![3D process topology from recorded pipeline evidence](docs/screenshots/motion-finish-2026-10-09/08-process-space-3d.png) |
+| Selected process | ![Selected observed process](docs/screenshots/motion-finish-2026-10-09/08b-process-space-selected.png) |
+| Timeline camera | ![Process Space timeline camera](docs/screenshots/motion-finish-2026-10-09/08c-process-space-timeline.png) |
+| Selected event and cursor | ![Selected canonical event in Process Space](docs/screenshots/motion-finish-2026-10-09/08f-process-space-event-cursor.png) |
+| Accessible process table | ![Process Space table alternative](docs/screenshots/motion-finish-2026-10-09/08e-process-space-table.png) |
+| History | ![Execution history](docs/screenshots/motion-finish-2026-10-09/20-history.png) |
+| Live observatory | ![Live event stream](docs/screenshots/motion-finish-2026-10-09/21-live-observatory.png) |
+| Analytics | ![Execution analytics](docs/screenshots/motion-finish-2026-10-09/13-analytics.png) |
+| Mobile overview | ![390 by 844 mobile overview](docs/screenshots/motion-finish-2026-10-09/19-responsive.png) |
+| Mobile navigation | ![Mobile navigation drawer](docs/screenshots/motion-finish-2026-10-09/22-mobile-navigation.png) |
 
-The capture directory also contains the argument inspector, process explorer,
+The capture directory also contains the top camera preset, argument inspector, process explorer,
 system, compare, signals, redirection, architecture, settings, demo, playground,
 raw-event, and about routes. The full set is retained at
-[`docs/screenshots/redesign-2026-10-09/`](docs/screenshots/redesign-2026-10-09/).
+[`docs/screenshots/motion-finish-2026-10-09/`](docs/screenshots/motion-finish-2026-10-09/).
 
 
 1. Open **Execute** (`E`). Run `echo Hello CAPS`.

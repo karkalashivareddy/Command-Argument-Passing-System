@@ -24,7 +24,7 @@ const FRONTEND = process.env.CAPS_SHOT_FRONTEND ?? "http://127.0.0.1:4174";
 // repository knows about and no document links to. The screenshots were correct
 // and completely undiscoverable.
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
-const OUT = process.env.CAPS_SHOT_OUT ?? join(REPO_ROOT, "docs", "screenshots");
+const OUT = process.env.CAPS_SHOT_OUT ?? join(REPO_ROOT, "docs", "screenshots", "motion-finish-2026-10-09");
 const VIEWPORT = { width: 1440, height: 1000 };
 
 mkdirSync(OUT, { recursive: true });
@@ -265,6 +265,11 @@ const main = async () => {
   };
 
   await go("/", "body");
+  const iconResponse = await page.request.get(`${FRONTEND}/caps-mark.svg`);
+  if (!iconResponse.ok() || !(iconResponse.headers()["content-type"] ?? "").includes("image/svg+xml")) {
+    throw new Error(`CAPS favicon did not resolve as SVG: HTTP ${iconResponse.status()}`);
+  }
+  log("CAPS SVG favicon resolves from the production site root");
   const theme = await page.evaluate(() => ({
     scheme: getComputedStyle(document.documentElement).colorScheme,
     background: getComputedStyle(document.body).backgroundColor,
@@ -296,8 +301,25 @@ const main = async () => {
   await page.mouse.move(0, 0);
   await shot(page, "01-overview.png", "overview: recorded executions, analytics, readiness");
 
-  await go("/terminal", "body");
+  await page.getByRole("link", { name: /Terminal/ }).click();
+  await page.waitForURL("**/terminal");
+  await page.waitForTimeout(1100);
+  const routeStage = await page.locator(".caps-route-stage").evaluate((stage) => getComputedStyle(stage).opacity);
+  if (Number(routeStage) < 0.99) throw new Error(`terminal route transition did not settle: opacity ${routeStage}`);
+  const routeOverflow = await page.locator("main").evaluate((main) => main.scrollWidth > main.clientWidth);
+  if (routeOverflow) throw new Error("route transition introduced horizontal overflow");
+  await page.waitForFunction(() => document.body.innerText.includes("Valid —"), undefined, { timeout: 10_000 });
   await shot(page, "02-terminal.png", "terminal: a real command line, lexed by the engine, validated before it runs");
+
+  await page.locator("main").evaluate((main) => { main.scrollTop = 240; });
+  await page.getByRole("link", { name: /Execute/ }).click();
+  await page.waitForURL("**/execute");
+  await page.goBack();
+  await page.waitForURL("**/terminal");
+  const backScroll = await page.locator("main").evaluate((main) => main.scrollTop);
+  if (backScroll < 200) throw new Error(`browser Back did not restore the terminal scroll position: ${backScroll}`);
+  await page.locator("main").evaluate((main) => { main.scrollTop = 0; });
+  log("browser Back restores the previous workspace scroll position");
 
   await go("/execute", "body");
   await shot(page, "03-execute.png", "execute: the structured request the gateway validates");
@@ -335,6 +357,45 @@ const main = async () => {
   await go(`/execution/${pipeline.id}/3d`, "body");
   await page.waitForTimeout(2500); // allow the real pipeline's process nodes and links to settle
   await shot(page, "08-process-space-3d.png", "3D Process Space: three real pipeline stages from the recorded event history");
+
+  const processGroup = page.getByRole("group", { name: /Observed processes/ });
+  await processGroup.getByRole("button").last().click();
+  await page.waitForTimeout(500);
+  await page.locator("main").evaluate((main) => { main.scrollTop = 0; });
+  await page.waitForTimeout(200);
+  await shot(page, "08b-process-space-selected.png", "selected observed child with shared process focus");
+  const routeStageHandle = await page.locator(".caps-route-stage").evaluateHandle((element) => element);
+  await page.getByRole("group", { name: "Mode" }).getByRole("button", { name: "Timeline" }).click();
+  const routeStagePreserved = await page.locator(".caps-route-stage").evaluate((element, previous) => element === previous, routeStageHandle);
+  if (!routeStagePreserved) throw new Error("a query-only mode change restarted the workspace route transition");
+  await page.waitForTimeout(500);
+  await page.locator("main").evaluate((main) => { main.scrollTop = 0; });
+  await page.waitForTimeout(200);
+  await shot(page, "08c-process-space-timeline.png", "timeline camera and recorded process lifetimes");
+  await page.getByRole("button", { name: "Top", exact: true }).click();
+  await page.waitForTimeout(500);
+  await page.locator("main").evaluate((main) => { main.scrollTop = 0; });
+  await page.waitForTimeout(200);
+  await shot(page, "08d-process-space-top.png", "top camera preset");
+  await page.getByRole("group", { name: "View" }).getByRole("button", { name: "Table" }).click();
+  await shot(page, "08e-process-space-table.png", "accessible process table fallback");
+
+  // Select a canonical event in the 2D record, then return through the SPA link
+  // so the shared session-scoped cursor and event selection reach the 3D view.
+  await page.goto(`${FRONTEND}/execution/${pipeline.id}`, { waitUntil: "networkidle" });
+  await page.waitForTimeout(800);
+  await page.getByRole("button", { name: /Select event #/ }).first().click();
+  await page.getByRole("link", { name: /3D process space/ }).click();
+  await page.waitForURL(new RegExp(`/execution/${pipeline.id}/3d$`));
+  await page.getByText("Process space (3D)", { exact: true }).waitFor({ state: "visible", timeout: 10_000 });
+  await page.locator('[data-testid="observatory-canvas-host"] canvas').waitFor({ state: "visible", timeout: 10_000 });
+  await page.waitForTimeout(1200);
+  if (await page.getByRole("region", { name: "Selected evidence" }).count() === 0) {
+    throw new Error("selecting a recorded event in 2D did not reach the shared 3D evidence inspector");
+  }
+  await page.locator("main").evaluate((main) => { main.scrollTop = 0; });
+  await page.waitForTimeout(200);
+  await shot(page, "08f-process-space-event-cursor.png", "selected canonical event and shared investigation cursor");
 
   await go(`/execution/${short.id}?replay=1`, "body");
   await shot(page, "09-replay.png", "replay: reconstruction from persisted events, not re-execution");

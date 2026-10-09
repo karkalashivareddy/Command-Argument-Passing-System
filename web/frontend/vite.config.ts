@@ -47,7 +47,7 @@ export default defineConfig(({ mode }) => ({
     proxy: { "/api": apiProxy(mode) },
   },
   build: {
-    // The 3D route is lazy-loaded; the 993 KiB chunk is only fetched when a
+    // The 3D route is lazy-loaded; its ~994 KiB chunk is only fetched when a
     // reader opens Process Space. Keep a warning on that route-specific budget
     // without treating the shared chart chunk as the same issue.
     chunkSizeWarningLimit: 900,

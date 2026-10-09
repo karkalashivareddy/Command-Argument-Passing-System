@@ -32,7 +32,7 @@ export interface CameraPresetSpec {
  */
 export const CAMERA_PRESETS: Record<CameraPreset, CameraPresetSpec> = {
   orbit: { direction: [13, 10, 21], zoom: 1, label: "Orbit", meaning: "lane, depth and time together" },
-  tree: { direction: [0.02, 0.2, 30], zoom: 0.8, label: "Process tree", meaning: "looking down the time axis" },
+  tree: { direction: [0.02, 0.2, 30], zoom: 1, label: "Process tree", meaning: "looking down the time axis" },
   timeline: { direction: [9, 6, 26], zoom: 1, label: "Timeline", meaning: "time running into the screen" },
   top: { direction: [0.02, 26, 14], zoom: 1, label: "Top", meaning: "looking down on lanes and time" },
   side: { direction: [28, 3, 0.02], zoom: 1, label: "Side", meaning: "looking along the lanes" },
@@ -60,6 +60,8 @@ export interface CameraRequest {
 export interface SceneBounds {
   center: Vector3;
   radius: number;
+  min: Vector3;
+  max: Vector3;
 }
 
 /**
@@ -72,7 +74,11 @@ export interface SceneBounds {
  */
 export function sceneBounds(space: ProcessSpace, scale: number): SceneBounds {
   const axis = sceneDepth(space, scale);
-  if (space.nodes.length === 0) return { center: new Vector3(0, 0, axis * 0.5), radius: axis * 0.6 + 4 };
+  if (space.nodes.length === 0) {
+    const min = new Vector3(-3, -1, 0);
+    const max = new Vector3(3, 2, axis);
+    return { center: new Vector3(0, 0.5, axis * 0.5), radius: axis * 0.6 + 4, min, max };
+  }
 
   const min = new Vector3(Infinity, Infinity, Infinity);
   const max = new Vector3(-Infinity, -Infinity, -Infinity);
@@ -92,7 +98,7 @@ export function sceneBounds(space: ProcessSpace, scale: number): SceneBounds {
   min.y -= 0.9;
   max.z = Math.max(max.z, axis);
   const center = new Vector3().addVectors(min, max).multiplyScalar(0.5);
-  return { center, radius: Math.max(4, min.distanceTo(max) * 0.5) };
+  return { center, radius: Math.max(4, min.distanceTo(max) * 0.5), min, max };
 }
 
 /**
@@ -107,6 +113,24 @@ export function fitDistanceFor(radius: number, fovDegrees: number, aspect: numbe
   const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * Math.max(aspect, 0.4));
   const narrowest = Math.min(vertical, horizontal);
   return MathUtils.clamp(radius / Math.sin(narrowest / 2), 8, 130);
+}
+
+/** Fit the scene in the camera's actual screen plane, including depth clearance. */
+export function fitBoundsDistance(bounds: SceneBounds, direction: Vector3, fovDegrees: number, aspect: number): number {
+  const vertical = MathUtils.degToRad(MathUtils.clamp(fovDegrees, 20, 80));
+  const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * Math.max(aspect, 0.4));
+  const forward = direction.clone().normalize();
+  const worldUp = new Vector3(0, 1, 0);
+  const right = new Vector3().crossVectors(forward, worldUp);
+  if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
+  else right.normalize();
+  const up = new Vector3().crossVectors(right, forward).normalize();
+  const half = new Vector3().subVectors(bounds.max, bounds.min).multiplyScalar(0.5);
+  const projectedRight = Math.abs(right.x) * half.x + Math.abs(right.y) * half.y + Math.abs(right.z) * half.z;
+  const projectedUp = Math.abs(up.x) * half.x + Math.abs(up.y) * half.y + Math.abs(up.z) * half.z;
+  const projectedDepth = Math.abs(forward.x) * half.x + Math.abs(forward.y) * half.y + Math.abs(forward.z) * half.z;
+  const screenDistance = Math.max(projectedRight / Math.tan(horizontal / 2), projectedUp / Math.tan(vertical / 2));
+  return MathUtils.clamp(projectedDepth + screenDistance * 1.12 + 3, 8, 130);
 }
 
 interface CameraRigProps {
@@ -171,7 +195,7 @@ export function CameraRig({ space, preset, request, followCursor, cursorMs, sele
     direction.normalize();
     const perspective = camera as PerspectiveCamera;
     const aspect = typeof perspective.aspect === "number" && perspective.aspect > 0 ? perspective.aspect : 1.6;
-    const distance = fitDistanceFor(bounds.radius, perspective.fov ?? 45, aspect) * spec.zoom;
+    const distance = fitBoundsDistance(bounds, direction, perspective.fov ?? 45, aspect) * spec.zoom;
     goal.current = {
       target: bounds.center.clone(),
       position: bounds.center.clone().addScaledVector(direction, distance),
@@ -235,7 +259,15 @@ export function ExecutionGrid({ space, scale }: { space: ProcessSpace; scale: nu
 
   return (
     <group>
-      <gridHelper args={[size, divisions, "#42618b", "#1a2a43"]} position={[width * 0.15, -0.03, axis * 0.5]} />
+      <mesh position={[width * 0.15, -0.12, axis * 0.5]} rotation={[-Math.PI / 2, 0, 0]}>
+        <planeGeometry args={[size, size]} />
+        <meshBasicMaterial color="#0b1425" transparent opacity={0.46} depthWrite={false} />
+      </mesh>
+      <gridHelper args={[size, divisions, "#42618b", "#203451"]} position={[width * 0.15, -0.03, axis * 0.5]} />
+      <mesh position={[width * 0.15, 0.002, axis * 0.5]}>
+        <boxGeometry args={[0.035, 0.025, axis]} />
+        <meshBasicMaterial color="#294867" transparent opacity={0.6} />
+      </mesh>
       {ticks.map((tick) => (
         <mesh key={`tick-${tick}`} position={[width * 0.15, 0.004, tick * scale]} rotation={[-Math.PI / 2, 0, 0]}>
           <planeGeometry args={[tick === 0 ? 0.5 : 0.3, 0.024]} />

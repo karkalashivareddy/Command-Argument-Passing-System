@@ -1,5 +1,6 @@
 import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
+import { RoundedBox } from "@react-three/drei";
 import type { Group, Mesh, MeshStandardMaterial } from "three";
 import { MathUtils, QuadraticBezierCurve3, Vector3 } from "three";
 
@@ -82,6 +83,18 @@ export function ProcessNodeMesh({ state, scale, mode, selected, related, reduced
   // an absence without lying about a lifecycle.
   const color = palette.color;
   const execOffset = node.execAtMs !== null && node.createdAtMs !== null ? (node.execAtMs - node.createdAtMs) * scale : null;
+  const bodyMaterial = (
+    <meshStandardMaterial
+      ref={material}
+      color={color}
+      emissive={color}
+      emissiveIntensity={0.1}
+      transparent
+      opacity={0}
+      roughness={0.38}
+      metalness={0.14}
+    />
+  );
 
   useFrame((frameState, delta) => {
     const t = frameState.clock.elapsedTime;
@@ -142,19 +155,28 @@ export function ProcessNodeMesh({ state, scale, mode, selected, related, reduced
       }}
       onPointerOut={() => onHover(null, null)}
     >
-      <mesh ref={body}>
-        <boxGeometry args={[radius * 1.6, radius * 1.6, radius * 1.6]} />
-        <meshStandardMaterial
-          ref={material}
-          color={color}
-          emissive={color}
-          emissiveIntensity={0.15}
-          transparent
-          opacity={0}
-          roughness={0.55}
-          metalness={0.25}
-        />
-      </mesh>
+      {isEngine ? (
+        <mesh ref={body}>
+          <cylinderGeometry args={[radius * 0.92, radius * 0.92, radius * 1.45, 12, 1]} />
+          {bodyMaterial}
+        </mesh>
+      ) : (
+        <RoundedBox
+          ref={body}
+          args={[radius * 1.65, radius * 1.65, radius * 1.65]}
+          radius={Math.min(0.2, radius * 0.2)}
+          smoothness={3}
+        >
+          {bodyMaterial}
+        </RoundedBox>
+      )}
+
+      {isEngine ? (
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.7, 0]}>
+          <ringGeometry args={[radius * 1.02, radius * 1.14, 48]} />
+          <meshBasicMaterial color="#67dcff" transparent opacity={state.present ? 0.72 : 0} side={2} />
+        </mesh>
+      ) : null}
 
       {/* Activity ring: intensity only, no bloom. */}
       {!isEngine ? (
@@ -168,10 +190,13 @@ export function ProcessNodeMesh({ state, scale, mode, selected, related, reduced
           change of the data colour and never a glow. */}
       {selected ? (
         <>
-          <mesh>
-            <boxGeometry args={[radius * 1.95, radius * 1.95, radius * 1.95]} />
+          <RoundedBox
+            args={[radius * 1.95, radius * 1.95, radius * 1.95]}
+            radius={Math.min(0.24, radius * 0.22)}
+            smoothness={3}
+          >
             <meshBasicMaterial color="#a38bff" wireframe transparent opacity={0.75} />
-          </mesh>
+          </RoundedBox>
           <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.72, 0]}>
             <ringGeometry args={[radius * 1.02, radius * 1.16, 40]} />
             <meshBasicMaterial color="#a38bff" transparent opacity={0.9} side={2} />
