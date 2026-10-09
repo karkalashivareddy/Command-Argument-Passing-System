@@ -2,6 +2,10 @@
 set -eu
 
 gate=${1:-scripts/check-action-pins.sh}
+case "$gate" in
+    /*) ;;
+    *) gate="$(pwd)/$gate" ;;
+esac
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 mkdir -p "$tmp/workflows"
@@ -16,7 +20,7 @@ jobs:
       - name: Setup
         uses: actions/setup-node@abcdef0123456789abcdef0123456789abcdef01 # v7
 EOF
-"$gate" "$tmp/workflows" >/dev/null
+sh "$gate" "$tmp/workflows" >/dev/null
 
 cat > "$tmp/workflows/unpinned.yml" <<'EOF'
 jobs:
@@ -24,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 EOF
-if "$gate" "$tmp/workflows" >/dev/null 2>&1; then
+if sh "$gate" "$tmp/workflows" >/dev/null 2>&1; then
     echo "action pin test: accepted a mutable tag" >&2
     exit 1
 fi
@@ -36,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567
 EOF
-if "$gate" "$tmp/workflows" >/dev/null 2>&1; then
+if sh "$gate" "$tmp/workflows" >/dev/null 2>&1; then
     echo "action pin test: accepted a pin without a Dependabot version comment" >&2
     exit 1
 fi

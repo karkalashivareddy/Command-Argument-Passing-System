@@ -144,21 +144,24 @@ documentation:
   on automatic security-update PRs requires the `admin:repo_hook` OAuth scope,
   which has not been granted to the automation used here.
 
-### npm lockfile audit (2026-10-06)
+### npm lockfile audit (2026-10-09)
 
 The Vitest advisory affecting the previous 3.x lockfiles is addressed by
 upgrading both packages to Vitest 5.0.3. A fresh `npm audit --json` reported no
-backend vulnerabilities. The frontend audit reported two **moderate** React
-Router advisories through `react-router-dom` 6.x; npm identifies the fix in
-`react-router-dom` 7.18.x, which is a major-version migration. No high or
-critical frontend advisory remained after the compatible dependency update.
+backend vulnerabilities. The frontend audit had two **moderate** React Router
+advisories through `react-router-dom` 6.x: [GHSA-wrjc-x8rr-h8h6](https://github.com/advisories/GHSA-wrjc-x8rr-h8h6)
+and [GHSA-337j-9hxr-rhxg](https://github.com/advisories/GHSA-337j-9hxr-rhxg).
+Both are patched in React Router 7.18.0. CAPS now uses `react-router-dom`
+7.18.4. The update was reviewed against the official v7 migration guidance and
+the app's `BrowserRouter`/`Routes` declarative-mode usage, then verified with a
+clean install, typecheck, production build, and the full frontend suite. The
+SSR-hydration advisory explicitly does not affect Declarative Mode; the update
+also removes the vulnerable range for the backslash-navigation advisory.
 
-The remaining React Router findings are reported rather than suppressed.
-CAPS uses React Router in a client-side SPA, but upgrading its major version
-still needs a compatibility review. CI runs `npm audit --audit-level=high`
-for both packages, so high and critical findings fail the build; the local
-audit above also records moderate findings that this CI threshold does not fail
-on.
+`npm audit` reported zero vulnerabilities for both lockfiles after the update.
+CI continues to run `npm audit --audit-level=high` for both packages, so high
+and critical findings fail the build. Audit counts are point-in-time results,
+not a permanent property of the repository.
 
 Reproduce with `npm audit --audit-level=high` and `npm audit` in
 `web/backend` and `web/frontend`. Counts are a point-in-time snapshot of the

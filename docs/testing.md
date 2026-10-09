@@ -162,7 +162,10 @@ the mock.
 independently from `/proc`, and asserts **provenance and availability**, not just
 numbers. It covers CPU delta arithmetic, memory, load-versus-utilisation, each PSI
 file independently, RSS versus PSS, process versus device I/O, thermal and
-cpufreq absence, and process identity agreement.
+cpufreq absence, and process identity agreement. Live disk counters can advance
+between independent reads, so this suite checks stable device identity and counter
+semantics. `disk.test.ts` uses fixed `/proc/diskstats` fixtures to verify exact
+field mapping, malformed-row handling, and unsafe counter rejection.
 
 ---
 
