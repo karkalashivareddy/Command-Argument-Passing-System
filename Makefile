@@ -71,14 +71,16 @@ WL_TESTS := tests/workloads/test_workloads.sh
 #
 # These are kept out of $(TESTS) because that loop passes the engine binary to
 # each case, which a gate over git metadata or version strings neither needs nor
-# accepts.  check-version.test.sh resolves its own gate from its own location;
-# the extra argument is harmless and keeps one loop for both.
+# accepts. Each fixture test receives the gate it exercises, while the
+# version self-test resolves its gate from its own location.
 GATE_TESTS := tests/scripts/test_attribution.sh \
+              tests/scripts/test_action_pins.sh \
               scripts/check-version.test.sh
 
 # Every repository gate, in the order CI runs them.  These are the gates that
 # need no engine binary and no fixture: they inspect git metadata, version
-# strings, documentation links, committed hygiene, lockfiles, and file endings.
+# strings, documentation links, committed hygiene, lockfiles, action pins, and
+# file endings.
 #
 # The last three used to be CI-only steps invoked by hand from the workflow, so
 # `make test-scripts` did not actually run every gate the documentation claims
@@ -89,6 +91,7 @@ GATES := scripts/check-attribution.sh \
          scripts/check-docs.sh \
          scripts/check-lockfiles.sh \
          scripts/check-repository-hygiene.sh \
+         scripts/check-action-pins.sh \
          scripts/check-trailing-newline.sh
 
 
@@ -238,7 +241,11 @@ test-scripts:
 	done; \
 	for t in $(GATE_TESTS); do \
 		echo "== $$t =="; \
-		sh $$t scripts/check-attribution.sh; \
+		case "$$t" in \
+			tests/scripts/test_attribution.sh) sh $$t scripts/check-attribution.sh;; \
+			tests/scripts/test_action_pins.sh) sh $$t scripts/check-action-pins.sh;; \
+			*) sh $$t;; \
+		esac; \
 	done; \
 	echo "ALL SCRIPT TESTS PASSED"
 

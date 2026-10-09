@@ -121,6 +121,7 @@ documentation:
 | Fail-closed signal model | `src/main.c`, `src/process.c` | `tests/test_lifecycle.sh` |
 | No secrets in child env or logs | `web/backend/src/execution/runner.ts`, `web/backend/src/utils/logger.ts` | `scripts/check-repository-hygiene.sh` |
 | No committed secrets or local paths | `scripts/check-repository-hygiene.sh` | CI `repository-hygiene` job |
+| Workflow actions are immutable, version-commented refs | `.github/workflows/ci.yml` | `scripts/check-action-pins.sh`, `tests/scripts/test_action_pins.sh` |
 
 ## GitHub security configuration
 
@@ -133,6 +134,7 @@ documentation:
 | Dependency graph | enabled | Both npm lockfiles are committed and checked in CI. |
 | Dependabot alerts | enabled | Alert counts change as lockfiles and advisories change; the lockfile audit below is the reproducible status. |
 | CodeQL (C/C++, JavaScript/TypeScript) | enabled, buildless | Runs on every push to `main`. |
+| Workflow action refs | pinned to verified full commit SHAs | Reduces risk from a mutable upstream action tag; Dependabot remains configured to propose reviewed updates. |
 | Ruleset `main-destructive-update-guard` | active on the default branch | Blocks **branch deletion** and **force pushes**. It deliberately does *not* require reviews or status checks: this is a single-owner project, and a required-review rule would lock the owner out of their own repository. |
 
 ### Still manual

@@ -217,6 +217,8 @@ make test-scripts
 | Gate | Checks |
 | --- | --- |
 | `check-attribution.sh` | no AI author, committer, or co-author in the history |
+| `check-action-pins.sh` | workflow actions use full commit SHAs with version comments |
+| `test_action_pins.sh` | the action pin gate rejects mutable tags and missing version comments |
 | `check-version.sh` | one authoritative version, projected everywhere |
 | `check-version.test.sh` | the version gate **fails when it should** |
 | `check-lockfiles.sh` | lockfiles agree with their manifests |
