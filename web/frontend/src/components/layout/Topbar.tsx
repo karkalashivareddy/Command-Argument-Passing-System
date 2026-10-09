@@ -69,7 +69,7 @@ export function Topbar({ onToggleSidebar, onOpenPalette, onOpenPresentation }: {
   );
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-[var(--line-0)] bg-[var(--bg-1)]/80 px-4 backdrop-blur-[var(--glass-blur-md)]">
+    <header className="caps-topbar flex h-14 shrink-0 items-center gap-3 border-b border-[var(--line-0)] bg-[var(--bg-1)]/80 px-4 backdrop-blur-[var(--glass-blur-md)]">
       <button
         onClick={onToggleSidebar}
         className="rounded-[var(--r-sm)] p-1.5 text-[var(--fg-2)] transition-colors duration-[var(--motion-quick)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]"

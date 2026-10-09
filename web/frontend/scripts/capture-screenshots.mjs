@@ -269,7 +269,7 @@ const main = async () => {
     scheme: getComputedStyle(document.documentElement).colorScheme,
     background: getComputedStyle(document.body).backgroundColor,
   }));
-  if (theme.scheme !== "dark" || theme.background !== "rgb(7, 9, 13)") {
+  if (theme.scheme !== "dark" || theme.background !== "rgb(6, 10, 19)") {
     throw new Error(`observatory theme changed under a light OS preference: ${JSON.stringify(theme)}`);
   }
   log(`dark theme remains stable with light OS preference (${theme.background})`);
@@ -302,6 +302,22 @@ const main = async () => {
   await go("/execute", "body");
   await shot(page, "03-execute.png", "execute: the structured request the gateway validates");
 
+  // Exercise the browser-to-engine path with a literal argument containing
+  // spaces, then check the canonical session record kept the cell intact.
+  const uiArg = "CAPS browser argument with spaces";
+  await page.getByLabel("Program").fill("echo");
+  await page.getByRole("textbox", { name: "Argument argv[1]" }).fill(uiArg);
+  await page.getByRole("textbox", { name: "Argument argv[2]" }).fill("boundary-check");
+  await page.getByRole("button", { name: /EXECUTE/ }).click();
+  await page.waitForURL(/\/execution\/[^/]+$/, { timeout: 10000 });
+  const uiSessionId = new URL(page.url()).pathname.split("/").at(-1);
+  if (!uiSessionId) throw new Error("structured UI execution navigated without a session id");
+  const uiSession = await waitForEnd(uiSessionId);
+  if (uiSession.status !== "COMPLETED" || uiSession.exitCode !== 0 || !uiSession.args.includes(uiArg)) {
+    throw new Error(`structured UI execution did not preserve its argument: ${JSON.stringify({ status: uiSession.status, exitCode: uiSession.exitCode, args: uiSession.args })}`);
+  }
+  log(`structured Execute UI -> ${uiSession.status}, exit ${uiSession.exitCode}; space-containing argv cell preserved`);
+
   await go(`/execution/${short.id}`, "body");
   await shot(page, "04-flight-recorder.png", "flight recorder: the canonical event timeline");
 
@@ -316,15 +332,24 @@ const main = async () => {
     await shot(page, "07-workload-telemetry.png", "controlled workload: CPU, memory and I/O on one PID");
   }
 
-  await go(`/execution/${short.id}/3d`, "body");
-  await page.waitForTimeout(2500); // let the 3D scene build its first frame
-  await shot(page, "08-process-space-3d.png", "3D Process Space: lane / depth / time, rendered from the same evidence");
+  await go(`/execution/${pipeline.id}/3d`, "body");
+  await page.waitForTimeout(2500); // allow the real pipeline's process nodes and links to settle
+  await shot(page, "08-process-space-3d.png", "3D Process Space: three real pipeline stages from the recorded event history");
 
   await go(`/execution/${short.id}?replay=1`, "body");
   await shot(page, "09-replay.png", "replay: reconstruction from persisted events, not re-execution");
 
+  await go(`/arguments/${short.id}`, "body");
+  await shot(page, "23-arguments.png", "argument inspector: the recorded argv vector");
+
   await go("/processes", "body");
   await shot(page, "10-processes.png", "processes: observed process identities and their state");
+
+  await go("/history", "body");
+  await shot(page, "20-history.png", "history: searchable persisted execution sessions");
+
+  await go("/live", "body");
+  await shot(page, "21-live-observatory.png", "live observatory: current event stream and session state");
 
   await go("/processes/explorer", "body");
   await shot(page, "11-process-explorer.png", "process explorer: the host tree with CAPS-owned work distinguished", "Host processes");
@@ -349,6 +374,18 @@ const main = async () => {
 
   await go("/settings", "body");
   await shot(page, "18-settings.png", "settings: engine probe, limits, readiness, retention");
+
+  await go("/demo", "body");
+  await shot(page, "24-demo.png", "demo workspace: bounded first-party experiments");
+
+  await go("/playground", "body");
+  await shot(page, "25-playground.png", "playground: bounded workload controls");
+
+  await go("/raw", "body");
+  await shot(page, "26-raw-events.png", "raw event stream: canonical evidence view");
+
+  await go("/about", "body");
+  await shot(page, "27-about.png", "about: product boundaries and implementation stack");
 
   // Narrow viewport: the layouts must degrade, not overflow.
   const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, colorScheme: "light", reducedMotion: "reduce" });
@@ -375,6 +412,9 @@ const main = async () => {
   await mpage.getByRole("button", { name: "Toggle sidebar" }).click();
   const drawer = mpage.getByRole("dialog", { name: "Navigation" });
   await drawer.waitFor({ state: "visible", timeout: 1500 });
+  await mpage.waitForTimeout(300); // capture the settled drawer, not its entrance frame
+  await mpage.screenshot({ path: join(OUT, "22-mobile-navigation.png"), animations: "disabled" });
+  log("22-mobile-navigation.png  mobile navigation drawer");
   await mpage.keyboard.press("Escape");
   await drawer.waitFor({ state: "hidden", timeout: 1500 });
   log("mobile navigation opens as a dialog and closes with Escape");

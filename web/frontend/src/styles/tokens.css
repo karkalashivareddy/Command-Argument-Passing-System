@@ -6,23 +6,23 @@
 :root {
   color-scheme: dark;
   /* ---- surfaces (dark-first, near-black graphite) ---- */
-  --bg-0: #07090d;
-  --bg-1: #0c1016;
-  --bg-2: #11161d;
-  --bg-3: #171d25;
-  --bg-4: #202731;
-  --bg-5: #2a323e;
+  --bg-0: #060a13;
+  --bg-1: #0a1020;
+  --bg-2: #0d1628;
+  --bg-3: #121e34;
+  --bg-4: #192945;
+  --bg-5: #243957;
 
   /* ---- borders ---- */
-  --line-0: #1b232d;
-  --line-1: #242e3a;
-  --line-2: #33404f;
+  --line-0: rgba(133, 166, 218, 0.12);
+  --line-1: rgba(133, 166, 218, 0.2);
+  --line-2: rgba(133, 166, 218, 0.34);
 
   /* ---- text ---- */
-  --fg-0: #eef2f7;
-  --fg-1: #c2cbd6;
-  --fg-2: #8b96a3;
-  --fg-3: #748190;
+  --fg-0: #f2f6ff;
+  --fg-1: #c5d1e6;
+  --fg-2: #91a2bf;
+  --fg-3: #7183a1;
   --fg-inverse: #07090d;
 
   /*
@@ -39,15 +39,15 @@
    * always "one step quieter than --fg-3", and 48 call sites all meant the same
    * thing.
    */
-  --fg-4: #7d8997;
+  --fg-4: #637592;
 
   /* ---- semantic (state, not decoration) ---- */
-  --accent: #22c3ee; /* cyan — active info */
-  --violet: #8b7cf6; /* violet — execution / transition */
-  --green: #3ecf8e; /* green — successful completion */
-  --amber: #f5a623; /* amber — warning / signal */
-  --red: #f0554d; /* red — failure / termination */
-  --blue: #4c8bf5; /* blue — links / neutral info */
+  --accent: #43dcff; /* cyan — observed, live evidence */
+  --violet: #a38bff; /* violet — derived analysis */
+  --green: #75f0bd; /* mint — successful completion */
+  --amber: #ffc76b; /* amber — warning / signal */
+  --red: #ff727c; /* red — failure / termination */
+  --blue: #548dff; /* electric blue — navigation / actions */
 
   /*
    * Aliases, not new colours.
@@ -63,11 +63,11 @@
   --warn: var(--amber);
 
   /* ---- accent surface tints (subtle) ---- */
-  --accent-soft: rgba(34, 195, 238, 0.1);
-  --violet-soft: rgba(139, 124, 246, 0.1);
-  --green-soft: rgba(62, 207, 142, 0.1);
-  --amber-soft: rgba(245, 166, 35, 0.1);
-  --red-soft: rgba(240, 85, 77, 0.1);
+  --accent-soft: rgba(67, 220, 255, 0.12);
+  --violet-soft: rgba(163, 139, 255, 0.13);
+  --green-soft: rgba(117, 240, 189, 0.12);
+  --amber-soft: rgba(255, 199, 107, 0.12);
+  --red-soft: rgba(255, 114, 124, 0.12);
 
   /* ---- typography ---- */
   --font-ui: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -93,12 +93,12 @@
   --r-xs: 3px;
   --r-sm: 6px;
   --r-md: 10px;
-  --r-lg: 14px;
-  --r-xl: 20px;
+  --r-lg: 18px;
+  --r-xl: 26px;
 
   /* ---- shadows (subtle depth, no glow) ---- */
-  --shadow-panel: 0 1px 0 0 rgba(255, 255, 255, 0.03), 0 4px 16px -8px rgba(0, 0, 0, 0.6);
-  --shadow-pop: 0 8px 32px -8px rgba(0, 0, 0, 0.8);
+  --shadow-panel: 0 1px 0 0 rgba(255, 255, 255, 0.045), 0 18px 48px -26px rgba(0, 0, 0, 0.9);
+  --shadow-pop: 0 18px 56px -18px rgba(0, 0, 0, 0.8);
 
   /* ---- motion ---- */
   --dur-fast: 120ms;
@@ -131,9 +131,9 @@
      is soft, nothing is in front of anything, and text contrast collapses with it.
      These values keep text fully opaque and blur only the surface behind them.
      ============================================================ */
-  --glass-panel-bg: rgba(12, 16, 22, 0.72);
-  --glass-inspector-bg: rgba(15, 22, 31, 0.86);
-  --glass-overlay-bg: rgba(8, 12, 18, 0.9);
+  --glass-panel-bg: rgba(11, 18, 34, 0.78);
+  --glass-inspector-bg: rgba(12, 21, 40, 0.9);
+  --glass-overlay-bg: rgba(6, 10, 19, 0.94);
   --glass-blur-sm: blur(8px) saturate(1.1);
   --glass-blur-md: blur(16px) saturate(1.15);
   --glass-blur-lg: blur(28px) saturate(1.2);
@@ -148,9 +148,9 @@
      raised sits on the page, floating is a panel that has been lifted,
      overlay is transient and casts the deepest shadow.
      ============================================================ */
-  --shadow-raised: 0 1px 0 0 rgba(255, 255, 255, 0.025), 0 1px 2px -1px rgba(0, 0, 0, 0.5);
-  --shadow-floating: 0 1px 0 0 rgba(255, 255, 255, 0.04), 0 8px 24px -10px rgba(0, 0, 0, 0.7);
-  --shadow-overlay: 0 1px 0 0 rgba(255, 255, 255, 0.05), 0 24px 64px -16px rgba(0, 0, 0, 0.85);
+  --shadow-raised: 0 1px 0 0 rgba(255, 255, 255, 0.04), 0 4px 16px -8px rgba(0, 0, 0, 0.7);
+  --shadow-floating: 0 1px 0 0 rgba(190, 216, 255, 0.07), 0 18px 48px -22px rgba(0, 0, 0, 0.85);
+  --shadow-overlay: 0 1px 0 0 rgba(190, 216, 255, 0.09), 0 28px 90px -28px rgba(0, 0, 0, 0.94);
 
   /* ============================================================
      MOTION
@@ -184,7 +184,7 @@
      or sans for a PID destroys the distinction the reader relies on to tell an
      observation from an interpretation, which is this product's whole premise.
      ============================================================ */
-  --text-display: 1.75rem;   /* page hero */
+  --text-display: clamp(2.25rem, 4vw, 3.65rem);   /* page hero */
   --text-title: 1.125rem;    /* page identity */
   --text-section: 0.9375rem; /* subsystem / card title */
   --text-body: 0.8125rem;    /* explanation */

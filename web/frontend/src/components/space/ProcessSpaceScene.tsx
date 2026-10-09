@@ -170,17 +170,17 @@ export function ProcessNodeMesh({ state, scale, mode, selected, related, reduced
         <>
           <mesh>
             <boxGeometry args={[radius * 1.95, radius * 1.95, radius * 1.95]} />
-            <meshBasicMaterial color="#8b7cf6" wireframe transparent opacity={0.75} />
+            <meshBasicMaterial color="#a38bff" wireframe transparent opacity={0.75} />
           </mesh>
           <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.72, 0]}>
             <ringGeometry args={[radius * 1.02, radius * 1.16, 40]} />
-            <meshBasicMaterial color="#8b7cf6" transparent opacity={0.9} side={2} />
+            <meshBasicMaterial color="#a38bff" transparent opacity={0.9} side={2} />
           </mesh>
         </>
       ) : related ? (
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.72, 0]}>
           <ringGeometry args={[radius * 1.0, radius * 1.1, 32]} />
-          <meshBasicMaterial color="#8b7cf6" transparent opacity={0.45} side={2} />
+          <meshBasicMaterial color="#a38bff" transparent opacity={0.45} side={2} />
         </mesh>
       ) : null}
 
@@ -235,12 +235,12 @@ function ExecTransition({
         }}
       >
         <torusGeometry args={[1.05, 0.03, 8, 36]} />
-        <meshBasicMaterial color="#8b7cf6" transparent opacity={selectedEvent ? 1 : selected ? 0.95 : 0.55} />
+        <meshBasicMaterial color="#a38bff" transparent opacity={selectedEvent ? 1 : selected ? 0.95 : 0.55} />
       </mesh>
       {selected || selectedEvent ? (
         <mesh rotation={[-Math.PI / 2, 0, 0]}>
           <ringGeometry args={[1.12, 1.24, 32]} />
-          <meshBasicMaterial color="#8b7cf6" transparent opacity={0.8} side={2} />
+          <meshBasicMaterial color="#a38bff" transparent opacity={0.8} side={2} />
         </mesh>
       ) : null}
       <mesh visible={false}>
@@ -339,8 +339,8 @@ function VerifiedEdge({ edge, space, scale, visible, emphasis }: { edge: SpaceEd
       <mesh>
         <tubeGeometry args={[curve, 20, emphasised ? 0.04 : 0.026, 6, false]} />
         <meshStandardMaterial
-          color={emphasised ? "#8b7cf6" : "#4c8bf5"}
-          emissive={emphasised ? "#8b7cf6" : "#4c8bf5"}
+          color={emphasised ? "#a38bff" : "#548dff"}
+          emissive={emphasised ? "#a38bff" : "#548dff"}
           emissiveIntensity={emphasised ? 0.25 : 0.2}
           transparent
           opacity={(visible ? 0.7 : 0.08) * emphasis}
@@ -349,7 +349,7 @@ function VerifiedEdge({ edge, space, scale, visible, emphasis }: { edge: SpaceEd
       </mesh>
       <mesh position={head}>
         <sphereGeometry args={[emphasised ? 0.075 : 0.055, 12, 12]} />
-        <meshBasicMaterial color={emphasised ? "#8b7cf6" : "#4c8bf5"} transparent opacity={(visible ? 0.9 : 0.12) * emphasis} />
+        <meshBasicMaterial color={emphasised ? "#a38bff" : "#548dff"} transparent opacity={(visible ? 0.9 : 0.12) * emphasis} />
       </mesh>
     </group>
   );

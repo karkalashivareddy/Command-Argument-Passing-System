@@ -123,7 +123,7 @@ export function Sidebar({ collapsed, onNavigate }: { collapsed: boolean; onNavig
   return (
     <aside
       className={clsx(
-        "flex h-full shrink-0 flex-col border-r border-[var(--line-0)] bg-[var(--bg-1)]/80 backdrop-blur-[var(--glass-blur-md)] transition-[width] duration-[var(--motion-base)] [transition-timing-function:var(--ease-standard)]",
+        "caps-sidebar flex h-full shrink-0 flex-col border-r border-[var(--line-0)] bg-[var(--bg-1)]/80 backdrop-blur-[var(--glass-blur-md)] transition-[width] duration-[var(--motion-base)] [transition-timing-function:var(--ease-standard)]",
         collapsed ? "w-16" : "w-[15.5rem]",
       )}
     >

@@ -92,7 +92,7 @@ export default function OverviewPage() {
 
   useEffect(() => {
     let stop = false;
-    (async () => {
+    const refresh = async () => {
       const [s, a, p] = await Promise.allSettled([
         api.listSessions({ limit: 6 }),
         api.analytics(),
@@ -110,9 +110,14 @@ export default function OverviewPage() {
       else failed.processes = why(p);
       setLoadError(failed);
       setBooted(true);
-    })();
+    };
+    void refresh();
+    // Keep the summary fresh while this workspace is open. Live process counts
+    // and recent session states come from the gateway, not a local counter.
+    const timer = window.setInterval(() => void refresh(), 10_000);
     return () => {
       stop = true;
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -177,50 +182,84 @@ export default function OverviewPage() {
   };
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6 px-6 py-6">
+    <div className="overview-page mx-auto max-w-6xl space-y-6 px-6 py-6">
       {/* Operational hero — the actual story of the product, not a banner */}
-      <section className="caps-card-surface caps-workspace-hero overflow-hidden rounded-[var(--r-lg)] border border-[var(--line-1)]">
-        <div className="border-b border-[var(--line-0)] px-6 py-5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-3)]">CAPS Process Execution Observatory</p>
-              <h1 className="mt-1 text-xl font-semibold tracking-tight text-[var(--fg-0)]">See what a command becomes.</h1>
+      <section className="overview-hero caps-card-surface caps-workspace-hero overflow-hidden rounded-[var(--r-lg)] border border-[var(--line-1)]">
+        <div className="overview-hero-main border-b border-[var(--line-0)] px-6 py-5">
+          <div className="overview-copy">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="overview-kicker font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-3)]">
+                  CAPS / PROCESS EXECUTION OBSERVATORY
+                </p>
+                <h1 className="overview-title mt-1 font-semibold tracking-tight text-[var(--fg-0)]">
+                  See what a command becomes.
+                </h1>
+              </div>
+              <StatusDot
+                tone={engineState === "online" ? "success" : engineState === "offline" ? "danger" : "neutral"}
+                pulse={engineState === "online"}
+                label={engineState === "online" ? "ENGINE ONLINE" : engineState === "offline" ? "ENGINE OFFLINE" : "CHECKING ENGINE"}
+              />
             </div>
-            <StatusDot
-              tone={engineState === "online" ? "success" : engineState === "offline" ? "danger" : "neutral"}
-              pulse={engineState === "online"}
-              label={engineState === "online" ? "ENGINE ONLINE" : engineState === "offline" ? "ENGINE OFFLINE" : "CHECKING ENGINE"}
-            />
-          </div>
-          <p className="mt-1.5 max-w-2xl text-[13px] leading-relaxed text-[var(--fg-2)]">
-            CAPS records the argument vector, child PID, termination signal, and wait status reported by its POSIX
-            monitor. The recorder distinguishes direct events from stages the current event protocol cannot observe.
-          </p>
+            <p className="mt-1.5 max-w-2xl text-[13px] leading-relaxed text-[var(--fg-2)]">
+              CAPS records the argument vector, child PID, termination signal, and wait status reported by its POSIX
+              monitor. The recorder distinguishes direct events from stages the current event protocol cannot observe.
+            </p>
 
-          <form
-            className="mt-4 max-w-3xl"
-            onSubmit={(e) => {
-              e.preventDefault();
-              quickRun();
-            }}
-          >
-            <StructuredCommand
-              program={program}
-              args={args}
-              onProgramChange={setProgram}
-              onArgsChange={setArgs}
-              onGoToTerminal={() => navigate("/terminal")}
-              engineOnline={engineState === "online"}
-            />
-            <div className="mt-3 flex items-center gap-2">
-              <Button type="submit" variant="primary" disabled={engineState !== "online" || program.trim().length === 0}>
-                EXECUTE <ArrowRight className="h-3.5 w-3.5" />
-              </Button>
-              <span className="text-[11px] text-[var(--fg-3)]">
-                Opens Execute with this argv prefilled. Nothing runs until you press Run.
+            <form
+              className="overview-launch mt-4 max-w-3xl"
+              onSubmit={(e) => {
+                e.preventDefault();
+                quickRun();
+              }}
+            >
+              <StructuredCommand
+                program={program}
+                args={args}
+                onProgramChange={setProgram}
+                onArgsChange={setArgs}
+                onGoToTerminal={() => navigate("/terminal")}
+                engineOnline={engineState === "online"}
+              />
+              <div className="mt-3 flex items-center gap-2">
+                <Button type="submit" variant="primary" disabled={engineState !== "online" || program.trim().length === 0}>
+                  EXECUTE <ArrowRight className="h-3.5 w-3.5" />
+                </Button>
+                <span className="text-[11px] text-[var(--fg-3)]">
+                  Opens Execute with this argv prefilled. Nothing runs until you press Run.
+                </span>
+              </div>
+            </form>
+          </div>
+
+          <aside className="overview-console" aria-label="Live observatory status">
+            <div className="overview-console-heading">
+              <span className="overview-console-mark" aria-hidden="true">
+                <RadioTower className="h-4 w-4" />
               </span>
+              <div>
+                <span className="overview-console-kicker">OBSERVATORY LINK</span>
+                <strong>
+                  {connected ? "Live signal established" : connection === "reconnecting" ? "Reconnecting to stream" : "Awaiting event stream"}
+                </strong>
+              </div>
             </div>
-          </form>
+            <div className="overview-console-grid">
+              <div>
+                <span>ENGINE</span>
+                <strong className={engineState === "online" ? "is-live" : ""}>
+                  {engineState === "online" ? "READY" : engineState === "offline" ? "OFFLINE" : "CHECKING"}
+                </strong>
+              </div>
+              <div><span>EVENTS IN VIEW</span><strong>{events.length}</strong></div>
+              <div><span>RUNNING PROCESSES</span><strong>{running === null ? "UNKNOWN" : running}</strong></div>
+              <div><span>WORKSPACE</span><strong className="font-mono">{capabilities?.workspace ?? "UNAVAILABLE"}</strong></div>
+            </div>
+            <Link to="/live" className="overview-console-link">
+              Open live observatory <ArrowRight className="h-3.5 w-3.5" />
+            </Link>
+          </aside>
         </div>
 
         {/*
@@ -232,7 +271,7 @@ export default function OverviewPage() {
           next step. With nothing running it stays dim and says so, because
           animating it would draw a process into existence that never happened.
         */}
-        <div className="border-t border-[var(--line-0)] px-6 py-3.5">
+        <div className="overview-lifecycle border-t border-[var(--line-0)] px-6 py-3.5">
           <div className="mb-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
             <span className="text-[9.5px] font-semibold uppercase tracking-[var(--tracking-micro)] text-[var(--fg-4)]">
               Lifecycle
@@ -272,7 +311,7 @@ export default function OverviewPage() {
         recorder. The mean is still available on the Analytics page, where it sits
         beside the distribution it summarises.
       */}
-      <section className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+      <section className="overview-metrics grid grid-cols-2 gap-3 lg:grid-cols-5">
         <StatOrPlaceholder label="Executions" value={analytics ? String(analytics.totalExecutions) : loadError.analytics !== undefined ? "unavailable" : booted ? "none yet" : "…"} />
         <StatOrPlaceholder label="Running now" value={running === null ? "unavailable" : String(running)} />
         <StatOrPlaceholder label="P50" value={analytics?.p50Ms != null ? fmtDuration(analytics.p50Ms) : unavailableOr(booted, loadError.analytics)} detail="median" />
@@ -280,7 +319,7 @@ export default function OverviewPage() {
         <StatOrPlaceholder label="Failed" value={analytics ? String(analytics.failed) : unavailableOr(booted, loadError.analytics)} />
       </section>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      <div className="overview-evidence grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* Recent executions — real persisted sessions */}
         <section className="lg:col-span-2">
           <Card

@@ -90,12 +90,14 @@ export default function ObservatoryCanvas({
         onPointerMissed={() => onSelect(null)}
         frameloop={reducedMotion ? "demand" : "always"}
       >
-        <color attach="background" args={["#07090d"]} />
-        <fog attach="fog" args={["#07090d", 45, 150]} />
+        <color attach="background" args={["#080e1b"]} />
+        <fog attach="fog" args={["#080e1b", 52, 165]} />
 
         {/* Subtle lighting: ambient for legibility, one directional key. */}
-        <ambientLight intensity={0.55} />
-        <directionalLight position={[12, 18, 10]} intensity={0.7} />
+        <ambientLight intensity={0.72} color="#9cb9ff" />
+        <directionalLight position={[12, 18, 10]} intensity={1.15} color="#b9ddff" />
+        <pointLight position={[-12, 8, -8]} intensity={22} distance={90} color="#397dff" />
+        <pointLight position={[12, 7, 18]} intensity={14} distance={80} color="#8e6aff" />
 
         <Suspense fallback={null}>
           <ExecutionGrid space={space} scale={scale} />

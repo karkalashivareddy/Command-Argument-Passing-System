@@ -481,92 +481,35 @@ curl -s http://127.0.0.1:3000/api/ready | jq '.ready, .checks'
 
 ## Screenshots
 
-All of these are real captures of the running application, taken against the
-real gateway and the real C engine by
-`web/frontend/scripts/capture-screenshots.mjs`. Nothing is painted, mocked, or
-cropped to hide a state. The current screenshots were recaptured on 2026-10-09
-from the production frontend at 1440x1000; the responsive capture is 390x844
-with reduced motion. They show the dark observatory palette, layered workspace
-surface, and live Linux v2.0.0 gateway evidence. Candidate backend changes are
-not loaded by that separate long-running gateway; see the
-[CAPS 3.0 verification record](docs/audit/CAPS_3_RELEASE_VERIFICATION.md).
+The before and after images use the same 1440×1000 desktop viewport. The new
+captures come from the production frontend and the running Linux gateway using
+[`capture-screenshots.mjs`](web/frontend/scripts/capture-screenshots.mjs).
+Commands and events shown are real; the 3D image uses the three-stage pipeline
+recording. The mobile captures use 390×844 with reduced motion enabled.
 
-| Before: light OS preference leaked into the product | After: graphite identity stays stable |
+| Before | Redesigned overview |
 | --- | --- |
-| ![Overview before the visual correction](docs/screenshots/baseline-2026-10-09/overview-desktop.png) | ![Overview after the visual correction](docs/screenshots/01-overview.png) |
+| ![Overview before redesign](docs/screenshots/baseline-2026-10-09/overview-desktop.png) | ![Redesigned CAPS overview](docs/screenshots/redesign-2026-10-09/01-overview.png) |
 
-### Flight recorder — a real `sleep` execution, with live procfs telemetry
+### Workspaces
 
-![Live execution: procfs samples, a contiguous event stream, and the terminal lifecycle](docs/screenshots/06-live-execution.png)
-
-This is the evidence model rendered. The header shows `CAPS ONLINE`; the sample
-panel reports persisted `process.snapshot` events with their provenance
-(`OBSERVED` for the procfs fields, `DERIVED` for the time range) and says
-`UNAVAILABLE` with a reason wherever the kernel published no valid sample; the
-event stream declares itself *contiguous · no gaps*; and the stream ends with
-`process.exited` → `session.summary` → `execution.completed`. The recorded
-command label is the **absolute resolved path** of the executed binary, not the
-allowlist name — that is the executable-resolution boundary made visible.
-
-### Pipeline evidence — three real stages, three real PIDs
-
-![Pipeline evidence: per-stage pid, pgid, and the argv the engine handed to execve](docs/screenshots/05-pipeline-evidence.png)
-
-`echo caps pipeline | tr a-z A-Z | wc -c` run as one command line through the
-terminal's lexer. Each stage shows the PID the kernel assigned it, the one
-process group they share, and the argv the engine actually passed to `execve` —
-not a label re-split by the browser. The shared group is deliberate, and it is
-verified rather than assumed: the engine puts the pipeline in its own group with
-stage 0 as leader, and a group signal is delivered only after the terminator has
-confirmed the leader's start ticks and re-read its `pgrp` field from
-`/proc/<pid>/stat`. That verified group signal is what makes a timeout reach
-every stage. Where the engine bounded a long argv, the card says how many elements it
-dropped instead of showing a short vector as if it were the whole one.
-
-### 3D Process Space
-
-![3D Process Space: process tree view, resource lens selector, and the 3D/Table view switch](docs/screenshots/08-process-space-3d.png)
-
-The same evidence, placed spatially: `X` a deterministic process lane, `Y`
-process depth, `Z` execution time. Note the honest empty state — *NO PROCESS
-SELECTED* — rather than a node invented to fill the frame.
-
-### A real workload, with real telemetry
-
-![Controlled workload: CPU, memory and I/O on one PID](docs/screenshots/07-workload-telemetry.png)
-
-### Replay — reconstruction, not re-execution
-
-![Replay of a persisted execution](docs/screenshots/09-replay.png)
-
-### Host explorer — CAPS-owned work separated from everything else
-
-![Process explorer: the host's real processes with ownership stated](docs/screenshots/11-process-explorer.png)
-
-Every row carries its own provenance. A `—` in the PSS or I/O columns is a
-statement that the kernel published no usable sample for that process, with the
-reason on hover — never a zero. The Owner column separates the processes this
-gateway started, and therefore verified identity for and can signal, from the host
-processes it only watches.
-
-### System control center — what this host can and cannot do
-
-![System control: pidfd identity confidence, guardrails, thermal availability](docs/screenshots/12-system-control.png)
-
-| Surface | What it shows |
+| Surface | Capture |
 | --- | --- |
-| ![Overview](docs/screenshots/01-overview.png) | Overview: recorded executions, live stream, readiness |
-| ![Terminal](docs/screenshots/02-terminal.png) | Terminal: a command line lexed by the engine before it runs |
-| ![Execute](docs/screenshots/03-execute.png) | Execute: the structured request the gateway validates |
-| ![Flight recorder](docs/screenshots/04-flight-recorder.png) | Flight recorder: the canonical event timeline |
-| ![Analytics](docs/screenshots/13-analytics.png) | Analytics: aggregates over the persisted event store |
-| ![Compare](docs/screenshots/14-compare.png) | Compare: two real executions side by side |
-| ![Processes](docs/screenshots/10-processes.png) | Processes: observed identities and their state |
-| ![Signals](docs/screenshots/15-signals.png) | Signals: the fail-closed `SIGINT` model |
-| ![Redirection](docs/screenshots/16-redirection.png) | Redirection: descriptor lifecycle and `O_NOFOLLOW` |
-| ![Architecture](docs/screenshots/17-architecture.png) | Architecture: the pipeline as the app presents it |
-| ![Settings](docs/screenshots/18-settings.png) | Settings: engine probe, limits, readiness, retention |
-| ![Responsive](docs/screenshots/19-responsive.png) | Narrow viewport: the layout degrades rather than overflowing |
+| Terminal | ![Terminal workspace](docs/screenshots/redesign-2026-10-09/02-terminal.png) |
+| Execution workbench | ![Execution workbench](docs/screenshots/redesign-2026-10-09/03-execute.png) |
+| Flight recorder | ![Flight recorder](docs/screenshots/redesign-2026-10-09/04-flight-recorder.png) |
+| Live process evidence | ![Live execution telemetry](docs/screenshots/redesign-2026-10-09/06-live-execution.png) |
+| Process Space | ![3D process topology from recorded pipeline evidence](docs/screenshots/redesign-2026-10-09/08-process-space-3d.png) |
+| History | ![Execution history](docs/screenshots/redesign-2026-10-09/20-history.png) |
+| Live observatory | ![Live event stream](docs/screenshots/redesign-2026-10-09/21-live-observatory.png) |
+| Analytics | ![Execution analytics](docs/screenshots/redesign-2026-10-09/13-analytics.png) |
+| Mobile overview | ![390 by 844 mobile overview](docs/screenshots/redesign-2026-10-09/19-responsive.png) |
+| Mobile navigation | ![Mobile navigation drawer](docs/screenshots/redesign-2026-10-09/22-mobile-navigation.png) |
+
+The capture directory also contains the argument inspector, process explorer,
+system, compare, signals, redirection, architecture, settings, demo, playground,
+raw-event, and about routes. The full set is retained at
+[`docs/screenshots/redesign-2026-10-09/`](docs/screenshots/redesign-2026-10-09/).
 
 
 1. Open **Execute** (`E`). Run `echo Hello CAPS`.

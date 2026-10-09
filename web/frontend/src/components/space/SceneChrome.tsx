@@ -32,7 +32,7 @@ export interface CameraPresetSpec {
  */
 export const CAMERA_PRESETS: Record<CameraPreset, CameraPresetSpec> = {
   orbit: { direction: [13, 10, 21], zoom: 1, label: "Orbit", meaning: "lane, depth and time together" },
-  tree: { direction: [0.02, 0.2, 30], zoom: 1, label: "Process tree", meaning: "looking down the time axis" },
+  tree: { direction: [0.02, 0.2, 30], zoom: 0.8, label: "Process tree", meaning: "looking down the time axis" },
   timeline: { direction: [9, 6, 26], zoom: 1, label: "Timeline", meaning: "time running into the screen" },
   top: { direction: [0.02, 26, 14], zoom: 1, label: "Top", meaning: "looking down on lanes and time" },
   side: { direction: [28, 3, 0.02], zoom: 1, label: "Side", meaning: "looking along the lanes" },
@@ -235,11 +235,11 @@ export function ExecutionGrid({ space, scale }: { space: ProcessSpace; scale: nu
 
   return (
     <group>
-      <gridHelper args={[size, divisions, "#1b232d", "#12181f"]} position={[width * 0.15, -0.03, axis * 0.5]} />
+      <gridHelper args={[size, divisions, "#42618b", "#1a2a43"]} position={[width * 0.15, -0.03, axis * 0.5]} />
       {ticks.map((tick) => (
         <mesh key={`tick-${tick}`} position={[width * 0.15, 0.004, tick * scale]} rotation={[-Math.PI / 2, 0, 0]}>
           <planeGeometry args={[tick === 0 ? 0.5 : 0.3, 0.024]} />
-          <meshBasicMaterial color={tick === 0 ? "#5b6673" : "#2b3542"} />
+          <meshBasicMaterial color={tick === 0 ? "#7bdaf3" : "#344c6c"} />
         </mesh>
       ))}
     </group>
@@ -271,11 +271,11 @@ export function CursorPlane({ cursorMs, scale, active, width, depth }: CursorPla
     <group position={[0, 0, z]}>
       <mesh position={[width * 0.15, 0.01, depth * 0.4]} rotation={[-Math.PI / 2, 0, 0]}>
         <planeGeometry args={[width, depth]} />
-        <meshBasicMaterial ref={material} color="#8b7cf6" transparent opacity={0.1} depthWrite={false} />
+        <meshBasicMaterial ref={material} color="#a38bff" transparent opacity={0.1} depthWrite={false} />
       </mesh>
       <mesh position={[width * 0.15 - width / 2 - 0.15, 0, 0]}>
         <boxGeometry args={[0.04, 0.04, depth * 0.8]} />
-        <meshBasicMaterial color="#8b7cf6" transparent opacity={0.8} />
+        <meshBasicMaterial color="#a38bff" transparent opacity={0.8} />
       </mesh>
     </group>
   );
@@ -295,7 +295,7 @@ export function SelectionRing({ space, nodeKey, scale, reducedMotion }: { space:
   return (
     <mesh ref={ring} position={[position.x, -0.02, position.z]} rotation={[-Math.PI / 2, 0, 0]}>
       <ringGeometry args={[1.45, 1.7, 48]} />
-      <meshBasicMaterial color="#8b7cf6" transparent opacity={0.8} side={2} />
+      <meshBasicMaterial color="#a38bff" transparent opacity={0.8} side={2} />
     </mesh>
   );
 }

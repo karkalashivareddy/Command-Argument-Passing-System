@@ -1,7 +1,7 @@
-import { AnimatePresence, motion } from "motion/react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { CheckCircle2, Info, XCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation } from "react-router-dom";
 
 import { useUi } from "../../store/ui";
 import { useShortcuts } from "../../lib/shortcuts";
@@ -25,6 +25,8 @@ export function AppShell() {
   const [mobileNav, setMobileNav] = useState(false);
   const drawerRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
+  const location = useLocation();
+  const reducedMotion = useReducedMotion() ?? false;
 
   useShortcuts();
 
@@ -87,14 +89,14 @@ export function AppShell() {
   }, [toast, clearToast]);
 
   return (
-    <div className="relative flex h-full overflow-hidden">
+    <div className="caps-app-shell relative flex h-full overflow-hidden">
       {/*
         One ambient field for the whole application, mounted here rather than per
         page so it never remounts on navigation and never flashes.
       */}
       <AmbientField />
 
-      <div className="relative z-[1] flex h-full w-full">
+      <div className="caps-app-frame relative z-[1] flex h-full w-full">
         <div className="hidden md:block">
           <Sidebar collapsed={collapsed} />
         </div>
@@ -106,7 +108,7 @@ export function AppShell() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              transition={{ duration: 0.2 }}
+              transition={{ duration: reducedMotion ? 0 : 0.2 }}
             >
               <div className="absolute inset-0 bg-black/50" onClick={() => setMobileNav(false)} />
               <motion.div
@@ -116,10 +118,10 @@ export function AppShell() {
                 aria-label="Navigation"
                 tabIndex={-1}
                 className="absolute inset-y-0 left-0 focus:outline-none"
-                initial={{ x: -280 }}
+                initial={{ x: reducedMotion ? 0 : -280 }}
                 animate={{ x: 0 }}
-                exit={{ x: -280 }}
-                transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                exit={{ x: reducedMotion ? 0 : -280 }}
+                transition={{ duration: reducedMotion ? 0 : 0.22, ease: [0.16, 1, 0.3, 1] }}
               >
                 <Sidebar collapsed={false} onNavigate={() => setMobileNav(false)} />
               </motion.div>
@@ -133,8 +135,19 @@ export function AppShell() {
             onOpenPalette={() => openPalette(!paletteOpen)}
             onOpenPresentation={() => openPresentation(!presentationOpen)}
           />
-          <main className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain [scroll-behavior:smooth]">
-            <Outlet />
+          <main className="caps-main min-h-0 flex-1 overflow-y-auto overscroll-y-contain [scroll-behavior:smooth]">
+            <AnimatePresence mode="wait" initial={false}>
+              <motion.div
+                key={location.pathname}
+                className="caps-route-stage"
+                initial={{ opacity: 0, y: 7 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -3 }}
+                transition={{ duration: reducedMotion ? 0 : 0.2, ease: [0.16, 1, 0.3, 1] }}
+              >
+                <Outlet />
+              </motion.div>
+            </AnimatePresence>
           </main>
         </div>
       </div>
@@ -162,7 +175,7 @@ export function AppShell() {
             initial={{ opacity: 0, y: 12, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 12, scale: 0.98 }}
-            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            transition={{ duration: reducedMotion ? 0 : 0.22, ease: [0.16, 1, 0.3, 1] }}
           >
             {/*
               Glass, because a toast is the one element that floats above a page
