@@ -25,7 +25,7 @@ const FRONTEND = process.env.CAPS_SHOT_FRONTEND ?? "http://127.0.0.1:4174";
 // and completely undiscoverable.
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const OUT = process.env.CAPS_SHOT_OUT ?? join(REPO_ROOT, "docs", "screenshots");
-const VIEWPORT = { width: 1600, height: 1000 };
+const VIEWPORT = { width: 1440, height: 1000 };
 
 mkdirSync(OUT, { recursive: true });
 
@@ -235,7 +235,9 @@ const main = async () => {
 
   // ---- 2. drive the browser -----------------------------------------------
   const browser = await chromium.launch();
-  const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1 });
+  // Emulate a light OS preference deliberately: the product has one dark
+  // observatory palette, and host theme must not silently replace it.
+  const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1, colorScheme: "light" });
   const page = await context.newPage();
   const consoleErrors = [];
   page.on("pageerror", (e) => consoleErrors.push(String(e).slice(0, 200)));
@@ -263,6 +265,35 @@ const main = async () => {
   };
 
   await go("/", "body");
+  const theme = await page.evaluate(() => ({
+    scheme: getComputedStyle(document.documentElement).colorScheme,
+    background: getComputedStyle(document.body).backgroundColor,
+  }));
+  if (theme.scheme !== "dark" || theme.background !== "rgb(7, 9, 13)") {
+    throw new Error(`observatory theme changed under a light OS preference: ${JSON.stringify(theme)}`);
+  }
+  log(`dark theme remains stable with light OS preference (${theme.background})`);
+  await page.keyboard.press("Control+k");
+  const palette = page.getByRole("dialog", { name: "Command palette" });
+  await palette.waitFor({ state: "visible", timeout: 1500 });
+  await page.keyboard.press("Escape");
+  await palette.waitFor({ state: "hidden", timeout: 1500 });
+  log("Ctrl+K opens the command palette; Escape closes it");
+  const primaryAction = page.getByRole("button", { name: /EXECUTE/ }).first();
+  await primaryAction.hover();
+  await page.waitForTimeout(220);
+  const hoverFeedback = await primaryAction.evaluate((button) => {
+    const style = getComputedStyle(button);
+    return { transform: style.transform, translate: style.translate, transition: style.transitionProperty };
+  });
+  if (
+    (hoverFeedback.transform === "none" && hoverFeedback.translate === "none") ||
+    !hoverFeedback.transition.includes("transform")
+  ) {
+    throw new Error(`primary action has no tactile hover feedback: ${JSON.stringify(hoverFeedback)}`);
+  }
+  log("primary action provides transformed, eased hover feedback");
+  await page.mouse.move(0, 0);
   await shot(page, "01-overview.png", "overview: recorded executions, analytics, readiness");
 
   await go("/terminal", "body");
@@ -320,12 +351,33 @@ const main = async () => {
   await shot(page, "18-settings.png", "settings: engine probe, limits, readiness, retention");
 
   // Narrow viewport: the layouts must degrade, not overflow.
-  const mobile = await browser.newContext({ viewport: { width: 430, height: 932 }, deviceScaleFactor: 1 });
+  const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, colorScheme: "light", reducedMotion: "reduce" });
   const mpage = await mobile.newPage();
   await mpage.goto(`${FRONTEND}/`, { waitUntil: "networkidle" });
   await mpage.waitForTimeout(1200);
+  const reducedMotion = await mpage.evaluate(() => ({
+    enabled: matchMedia("(prefers-reduced-motion: reduce)").matches,
+    scroll: getComputedStyle(document.querySelector("main")).scrollBehavior,
+    duration: getComputedStyle(document.querySelector("button")).transitionDuration,
+  }));
+  if (!reducedMotion.enabled || reducedMotion.scroll !== "auto" || Number.parseFloat(reducedMotion.duration) > 0.00001) {
+    throw new Error(`reduced-motion preferences were not respected: ${JSON.stringify(reducedMotion)}`);
+  }
+  log("reduced-motion preference disables smooth scrolling and UI transitions");
+  const lifecycleLabels = await mpage
+    .locator('[aria-label="Command lifecycle"] [role="listitem"] span:first-child')
+    .evaluateAll((items) => items.map((item) => ({ label: item.textContent?.trim(), width: item.clientWidth, content: item.scrollWidth })));
+  if (lifecycleLabels.length !== 7 || lifecycleLabels.some((item) => item.content > item.width)) {
+    throw new Error(`mobile lifecycle labels are clipped: ${JSON.stringify(lifecycleLabels)}`);
+  }
   await mpage.screenshot({ path: join(OUT, "19-responsive.png"), animations: "disabled" });
   log("19-responsive.png         narrow viewport layout");
+  await mpage.getByRole("button", { name: "Toggle sidebar" }).click();
+  const drawer = mpage.getByRole("dialog", { name: "Navigation" });
+  await drawer.waitFor({ state: "visible", timeout: 1500 });
+  await mpage.keyboard.press("Escape");
+  await drawer.waitFor({ state: "hidden", timeout: 1500 });
+  log("mobile navigation opens as a dialog and closes with Escape");
 
   // ---- 3. clean up the deliberately long-running session --------------------
   await fetch(`${GATEWAY}/api/sessions/${long.sessionId}/terminate`, {

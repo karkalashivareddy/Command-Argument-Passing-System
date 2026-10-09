@@ -133,7 +133,7 @@ export function AppShell() {
             onOpenPalette={() => openPalette(!paletteOpen)}
             onOpenPresentation={() => openPresentation(!presentationOpen)}
           />
-          <main className="min-h-0 flex-1 overflow-y-auto">
+          <main className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain [scroll-behavior:smooth]">
             <Outlet />
           </main>
         </div>

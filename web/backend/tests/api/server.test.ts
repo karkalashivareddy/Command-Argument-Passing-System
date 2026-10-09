@@ -251,7 +251,7 @@ describeFx("CAPS gateway API (real engine)", () => {
   it("reports deterministic exit codes through the fixed status probe", async () => {
     const post = await app.inject({ method: "POST", url: "/api/sessions", payload: { command: "status_probe", args: ["exit", "7"] } });
     const sess = await waitFor(app, post.json().sessionId as string);
-    expect(sess.status).toBe("COMPLETED"); // ran to completion with non-zero status
+    expect(sess.status).toBe("FAILED"); // a real process ran but returned a non-zero exit code
     expect(sess.isSuccess).toBe(false);
     expect(sess.exitCode).toBe(7);
     expect(sess.signal).toBeNull();
@@ -262,7 +262,7 @@ describeFx("CAPS gateway API (real engine)", () => {
     expect(post.statusCode).toBe(202);
     const sid = post.json().sessionId as string;
     const sess = await waitFor(app, sid);
-    expect(sess.status).toBe("COMPLETED");
+    expect(sess.status).toBe("FAILED");
     expect(sess.exitCode).toBe(127);
 
     const replay = await app.inject({ method: "GET", url: `/api/sessions/${sid}/replay` });
@@ -272,6 +272,8 @@ describeFx("CAPS gateway API (real engine)", () => {
     expect(events.some((event) => event.type === "process.exec_error")).toBe(false);
     expect(events.find((event) => event.type === "process.exited")?.payload.exitCode).toBe(127);
     expect(events.map((event) => event.sequence)).toEqual(events.map((_, i) => i));
+    expect(events.at(-1)?.type).toBe("execution.failed");
+    expect(replay.json().integrity.valid).toBe(true);
 
     const stream = await app.inject({ method: "GET", url: `/api/sessions/${sid}/events` });
     expect(stream.statusCode).toBe(200);
@@ -289,12 +291,20 @@ describeFx("CAPS gateway API (real engine)", () => {
     expect(new Set(resumedIds).size).toBe(resumedIds.length);
   });
 
-  it("marks false as a completed but unsuccessful execution (exit 1)", async () => {
+  it("marks false as a failed process with a real non-zero exit (not an exec failure)", async () => {
     const post = await app.inject({ method: "POST", url: "/api/sessions", payload: { command: "false" } });
     const sess = await waitFor(app, post.json().sessionId as string);
     expect(sess.exitCode).toBe(1);
-    expect(sess.status).toBe("COMPLETED");
+    expect(sess.status).toBe("FAILED");
     expect(sess.isSuccess).toBe(false);
+    expect(sess.signal).toBeNull();
+
+    const replay = await app.inject({ method: "GET", url: `/api/sessions/${sess.id}/replay` });
+    const events = replay.json().events as Array<{ type: string; payload: Record<string, unknown> }>;
+    expect(events.some((event) => event.type === "process.exec_error")).toBe(false);
+    expect(events.find((event) => event.type === "process.exited")?.payload.exitCode).toBe(1);
+    expect(events.at(-1)?.type).toBe("execution.failed");
+    expect(replay.json().integrity.valid).toBe(true);
   });
 
   it("executes real redirection and records it", async () => {

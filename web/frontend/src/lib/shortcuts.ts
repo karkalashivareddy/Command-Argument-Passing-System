@@ -6,7 +6,7 @@ import { useUi } from "../store/ui";
 /**
  * Global keyboard shortcuts. E→Execute, L→Live, H→History, A→Analytics,
  * P→Processes, G→Playground, D→Presentation, ?→help modal, Ctrl/Cmd+K→palette
- * (handled by Topbar). Only fires when not typing in an input/textarea/select.
+ * Single-letter routes only fire when not typing in an input/textarea/select.
  *
  * WHY THE PRESENTATION SHORTCUT IS HANDLED HERE AND NOT IN THE OVERLAY
  * ---------------------------------------------------------------------
@@ -21,7 +21,12 @@ export function useShortcuts(openHelp?: () => void): void {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) return; // palette
+      if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        const { paletteOpen, openPalette } = useUi.getState();
+        openPalette(!paletteOpen);
+        return;
+      }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const target = e.target as HTMLElement | null;
       if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;

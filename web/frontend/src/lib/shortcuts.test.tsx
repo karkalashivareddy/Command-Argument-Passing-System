@@ -117,10 +117,12 @@ describe("global shortcuts", () => {
     input.remove();
   });
 
-  it("leaves Ctrl/Cmd+K to the palette", () => {
+  it("toggles the command palette with Ctrl/Cmd+K", () => {
     const { navigateMock: nav, press } = setup();
     press("k", { ctrlKey: true });
+    expect(useUi.getState().paletteOpen).toBe(true);
     press("k", { metaKey: true });
+    expect(useUi.getState().paletteOpen).toBe(false);
     expect(nav).not.toHaveBeenCalled();
     expect(useUi.getState().presentation.open).toBe(false);
   });

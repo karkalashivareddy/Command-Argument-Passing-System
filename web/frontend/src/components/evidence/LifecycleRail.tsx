@@ -149,7 +149,11 @@ export function LifecycleRail({ events, compact = false, className }: LifecycleR
           */
           const current = !done && satisfied.has(LIFECYCLE_STAGES[index - 1]?.id ?? "");
           return (
-            <div key={stage.id} className="flex min-w-0 flex-1 items-center" role="listitem">
+            <div
+              key={stage.id}
+              className="flex min-w-[3.75rem] shrink-0 items-center sm:min-w-0 sm:flex-1 sm:shrink"
+              role="listitem"
+            >
               <div
                 title={stage.detail}
                 className={clsx(

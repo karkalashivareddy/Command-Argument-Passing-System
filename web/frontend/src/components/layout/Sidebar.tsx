@@ -197,11 +197,11 @@ export function Sidebar({ collapsed, onNavigate }: { collapsed: boolean; onNavig
                          * who cannot distinguish the hues.
                          */
                         "group relative flex items-center rounded-r-md text-[13px] font-medium leading-tight transition-colors duration-[var(--motion-quick)] [transition-timing-function:var(--ease-standard)]",
-                        "py-1.5 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]",
+                        "py-1.5 transition-[background-color,color,transform] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]",
                         collapsed ? "mx-2 justify-center px-0" : "gap-3 px-4",
                         isActive
                           ? "bg-[var(--accent-soft)] text-[var(--fg-0)] before:absolute before:inset-y-0.5 before:left-0 before:w-[2px] before:rounded-full before:bg-[var(--accent)]"
-                          : "text-[var(--fg-2)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]",
+                          : "text-[var(--fg-2)] hover:translate-x-0.5 hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]",
                       )
                     }
                   >

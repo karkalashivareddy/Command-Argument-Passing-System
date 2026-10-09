@@ -148,6 +148,12 @@ one terminal event type per terminal session status:
 | `TIMED_OUT` | `execution.timeout` |
 | `CANCELLED` | `execution.cancelled` |
 
+A target that starts and exits with a non-zero code is a failed execution: its
+session status is `FAILED`, `exitCode` preserves the actual code, and the
+terminal event is `execution.failed`. `process.exited` with that code proves the
+program ran; it is distinct from `process.exec_error`, where `execvp()` never
+started the target. `COMPLETED` is reserved for exit code 0.
+
 **`SESSION_SUMMARY` is not a success claim.** It means the monitor reached the
 end of its input, and CAPS emits it after a failed `execvp()` exactly as it
 does after a successful run. The summary therefore also carries

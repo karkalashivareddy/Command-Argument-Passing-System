@@ -484,7 +484,16 @@ curl -s http://127.0.0.1:3000/api/ready | jq '.ready, .checks'
 All of these are real captures of the running application, taken against the
 real gateway and the real C engine by
 `web/frontend/scripts/capture-screenshots.mjs`. Nothing is painted, mocked, or
-cropped to hide a state.
+cropped to hide a state. The current screenshots were recaptured on 2026-10-09
+from the production frontend at 1440x1000; the responsive capture is 390x844
+with reduced motion. They show the dark observatory palette, layered workspace
+surface, and live Linux v2.0.0 gateway evidence. Candidate backend changes are
+not loaded by that separate long-running gateway; see the
+[CAPS 3.0 verification record](docs/audit/CAPS_3_RELEASE_VERIFICATION.md).
+
+| Before: light OS preference leaked into the product | After: graphite identity stays stable |
+| --- | --- |
+| ![Overview before the visual correction](docs/screenshots/baseline-2026-10-09/overview-desktop.png) | ![Overview after the visual correction](docs/screenshots/01-overview.png) |
 
 ### Flight recorder — a real `sleep` execution, with live procfs telemetry
 
@@ -617,7 +626,7 @@ caps_fork_tree 8 2     # fork activity of ONE tracked process (see the lab secti
 
 Each is bounded and self-cleaning. `caps_io_burn` creates and removes its own
 private workspace on every exit path, including signal delivery.
-## Verification
+## Verification (v2.0.0 historical baseline)
 
 Every number above is from an actual run on WSL2 Ubuntu with gcc and Node 22.14.
 The complete run, including the release blockers that were found and fixed and
@@ -663,6 +672,10 @@ what was **not** run and why, is in
 CI runs all of the above on every pull request, plus a browser smoke suite
 against the production build and a CodeQL scan of the C and TypeScript.
 See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+The current CAPS 3.0 candidate verification, including this host's Linux and
+browser limitations, is recorded separately in
+[docs/audit/CAPS_3_RELEASE_VERIFICATION.md](docs/audit/CAPS_3_RELEASE_VERIFICATION.md).
 
 > **There is no visual-regression (pixel-diff) suite.** The repository has no
 > visual-diff infrastructure and this milestone did not invent one: a
@@ -847,6 +860,7 @@ Nothing on the planned list is claimed anywhere else in this repository.
 | [docs/realtime-visualization.md](docs/realtime-visualization.md) | The shared cursor and cross-view synchronization |
 | [docs/workload-lab.md](docs/workload-lab.md) | Each workload, its bounds, and what it demonstrates |
 | [docs/testing.md](docs/testing.md) | Every verification command, and what runs where |
+| [docs/design-system.md](docs/design-system.md) | Palette, typography, layered surfaces, motion, and responsive behavior |
 | [docs/ground-truth-verification.md](docs/ground-truth-verification.md) | **Every figure compared against the raw kernel file it claims to come from** |
 | [docs/cross-view-trace.md](docs/cross-view-trace.md) | **A recorded trace of one execution through every surface** |
 | [docs/runtime-verification.md](docs/runtime-verification.md) | How to verify a running instance by hand |

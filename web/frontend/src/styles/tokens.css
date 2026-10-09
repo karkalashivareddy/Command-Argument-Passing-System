@@ -4,6 +4,7 @@
    ============================================================ */
 
 :root {
+  color-scheme: dark;
   /* ---- surfaces (dark-first, near-black graphite) ---- */
   --bg-0: #07090d;
   --bg-1: #0c1016;
@@ -21,7 +22,7 @@
   --fg-0: #eef2f7;
   --fg-1: #c2cbd6;
   --fg-2: #8b96a3;
-  --fg-3: #5b6673;
+  --fg-3: #748190;
   --fg-inverse: #07090d;
 
   /*
@@ -38,7 +39,7 @@
    * always "one step quieter than --fg-3", and 48 call sites all meant the same
    * thing.
    */
-  --fg-4: #3f4956;
+  --fg-4: #7d8997;
 
   /* ---- semantic (state, not decoration) ---- */
   --accent: #22c3ee; /* cyan — active info */
@@ -70,7 +71,7 @@
 
   /* ---- typography ---- */
   --font-ui: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "Cascadia Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
 
   /* ---- spacing scale (4px base) ---- */
   --s-1: 4px;
@@ -216,44 +217,4 @@
   --role-warning: var(--amber);
   --role-danger: var(--red);
   --role-unavailable: var(--fg-3);
-}
-
-/* ---- light variant (real design system, not inverted) ---- */
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg-0: #f7f8fa;
-    --bg-1: #ffffff;
-    --bg-2: #f2f4f7;
-    --bg-3: #eceef2;
-    --bg-4: #e2e6ec;
-    --bg-5: #d4dae2;
-
-    --line-0: #e3e7ec;
-    --line-1: #d2d8e0;
-    --line-2: #b6c0cc;
-
-    --fg-0: #12161c;
-    --fg-1: #3c4652;
-    --fg-2: #66727f;
-    --fg-3: #96a0ac;
-    --fg-inverse: #ffffff;
-
-    /* One step quieter than --fg-3, and still AA on --bg-2. */
-    --fg-4: #b4bec9;
-
-    --shadow-panel: 0 1px 0 0 rgba(18, 22, 28, 0.04), 0 4px 16px -8px rgba(18, 22, 28, 0.14);
-    --shadow-pop: 0 8px 32px -8px rgba(18, 22, 28, 0.28);
-    --shadow-raised: 0 1px 0 0 rgba(18, 22, 28, 0.05), 0 1px 2px -1px rgba(18, 22, 28, 0.1);
-    --shadow-floating: 0 1px 0 0 rgba(18, 22, 28, 0.06), 0 8px 24px -10px rgba(18, 22, 28, 0.2);
-    --shadow-overlay: 0 1px 0 0 rgba(18, 22, 28, 0.07), 0 24px 64px -16px rgba(18, 22, 28, 0.3);
-
-    /* Glass in light mode is far subtler. Blur is nearly invisible against a
-       light background, so the read has to come from the tint and the edge, and
-       the tints are raised towards white rather than towards black. */
-    --glass-panel-bg: rgba(255, 255, 255, 0.78);
-    --glass-inspector-bg: rgba(255, 255, 255, 0.9);
-    --glass-overlay-bg: rgba(247, 248, 250, 0.93);
-    --glass-edge: inset 0 1px 0 0 rgba(255, 255, 255, 0.9);
-    --glass-edge-strong: inset 0 1px 0 0 rgba(255, 255, 255, 1);
-  }
 }

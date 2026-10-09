@@ -1,3 +1,18 @@
+## Unreleased - Observatory product rebuild
+
+- Keep the graphite observatory palette in light-preference environments, raise
+  the dimmest text token for readability, and use local system font fallbacks
+  instead of requesting fonts from Google.
+- Make the documented Ctrl/Cmd+K command-palette shortcut functional and cover
+  it with a regression test.
+- Classify a real non-zero process exit as `FAILED` while preserving its exit
+  code, so the terminal event and replay integrity agree with the outcome.
+- Preserve lifecycle stage labels at mobile widths with a scrollable rail.
+- Give shared panels a restrained layered surface, add tactile button and input
+  feedback, and contain workspace scrolling while honoring reduced motion.
+- Refresh the real application screenshots from the production build and the
+  controlled Linux workloads.
+
 ## 2.0.0 - Process identity, host observability, and the CAPS terminal
 
 ### Process identity

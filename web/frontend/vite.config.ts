@@ -47,9 +47,9 @@ export default defineConfig(({ mode }) => ({
     proxy: { "/api": apiProxy(mode) },
   },
   build: {
-    // The 3D observatory is a large dependency tree. It is already code-split by
-    // route; this only stops the build output from being buried under a
-    // warning that has already been reviewed.
+    // The 3D route is lazy-loaded; the 993 KiB chunk is only fetched when a
+    // reader opens Process Space. Keep a warning on that route-specific budget
+    // without treating the shared chart chunk as the same issue.
     chunkSizeWarningLimit: 900,
   },
 }));

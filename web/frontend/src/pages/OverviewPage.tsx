@@ -179,7 +179,7 @@ export default function OverviewPage() {
   return (
     <div className="mx-auto max-w-6xl space-y-6 px-6 py-6">
       {/* Operational hero — the actual story of the product, not a banner */}
-      <section className="overflow-hidden rounded-[var(--r-lg)] border border-[var(--line-1)] bg-[var(--bg-1)]">
+      <section className="caps-card-surface caps-workspace-hero overflow-hidden rounded-[var(--r-lg)] border border-[var(--line-1)]">
         <div className="border-b border-[var(--line-0)] px-6 py-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>

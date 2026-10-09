@@ -1,6 +1,18 @@
 ﻿# Screenshots
 
-Current product screenshots. See docs/demo/FACULTY_DEMO_RUNBOOK.md for when to use them.
+Current product screenshots. The current set was recaptured on 2026-10-09 from
+the production frontend build against the real Linux gateway and first-party
+bounded workloads. See [the capture script](../../web/frontend/scripts/capture-screenshots.mjs)
+for the procedure and [the design system](../design-system.md) for the
+light-preference acceptance check.
+
+The overview and Execute page before the visual correction are preserved in
+[`baseline-2026-10-09`](baseline-2026-10-09/). The baseline and desktop captures
+use the same 1440x1000 viewport. The baseline is retained for visual comparison
+and is not presented as the current design. The responsive shot uses 390x844
+with reduced motion enabled.
+
+See docs/demo/FACULTY_DEMO_RUNBOOK.md for when to use the screenshots.
 01-overview.png — 01 overview
 02-terminal.png — 02 terminal
 03-execute.png — 03 execute

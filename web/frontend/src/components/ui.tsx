@@ -14,14 +14,14 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const btnBase =
-  "inline-flex items-center justify-center gap-1.5 font-medium rounded-[var(--r-sm)] transition-colors duration-[var(--dur-fast)] cursor-pointer select-none disabled:opacity-50 disabled:cursor-not-allowed";
+  "inline-flex items-center justify-center gap-1.5 font-medium rounded-[var(--r-sm)] transition-[color,background-color,border-color,box-shadow,transform] duration-[var(--motion-instant)] cursor-pointer select-none active:translate-y-px active:scale-[0.985] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:translate-y-0 disabled:active:scale-100";
 const btnVariants: Record<ButtonVariant, string> = {
   primary:
-    "bg-[var(--accent)] text-[var(--fg-inverse)] hover:brightness-110 active:brightness-95 focus-visible:outline-[var(--accent)]",
-  secondary: "bg-[var(--bg-3)] text-[var(--fg-0)] border border-[var(--line-1)] hover:bg-[var(--bg-4)]",
+    "bg-[var(--accent)] text-[var(--fg-inverse)] shadow-[0_2px_12px_-5px_var(--accent)] hover:-translate-y-px hover:brightness-110 hover:shadow-[0_5px_18px_-6px_var(--accent)] active:brightness-95 focus-visible:outline-[var(--accent)]",
+  secondary: "border border-[var(--line-1)] bg-[var(--bg-3)] text-[var(--fg-0)] hover:-translate-y-px hover:border-[var(--line-2)] hover:bg-[var(--bg-4)] hover:shadow-[var(--shadow-raised)]",
   ghost: "bg-transparent text-[var(--fg-1)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]",
-  danger: "bg-[var(--red)] text-[var(--fg-inverse)] hover:brightness-110 active:brightness-95",
-  outline: "bg-transparent border border-[var(--line-2)] text-[var(--fg-1)] hover:border-[var(--accent)] hover:text-[var(--fg-0)]",
+  danger: "bg-[var(--red)] text-[var(--fg-inverse)] hover:-translate-y-px hover:brightness-110 active:brightness-95",
+  outline: "border border-[var(--line-2)] bg-transparent text-[var(--fg-1)] hover:-translate-y-px hover:border-[var(--accent)] hover:bg-[var(--accent-soft)] hover:text-[var(--fg-0)]",
 };
 
 export function Button({ variant = "secondary", size = "md", className, ...rest }: ButtonProps) {
@@ -34,7 +34,7 @@ export function Button({ variant = "secondary", size = "md", className, ...rest 
 /* ------------------------------------------------------------------ */
 
 export const inputCls =
-  "h-9 w-full rounded-[var(--r-sm)] border border-[var(--line-1)] bg-[var(--bg-2)] px-3 text-sm text-[var(--fg-0)] placeholder:text-[var(--fg-3)] transition-colors focus:border-[var(--accent)] focus:outline-none";
+  "h-9 w-full rounded-[var(--r-sm)] border border-[var(--line-1)] bg-[var(--bg-2)] px-3 text-sm text-[var(--fg-0)] placeholder:text-[var(--fg-3)] transition-[border-color,box-shadow,background-color] duration-[var(--motion-instant)] focus:border-[var(--accent)] focus:bg-[var(--bg-3)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20";
 
 /**
  * The visible caption above a form control group.
@@ -112,7 +112,7 @@ export function Card({ title, subtitle, actions, children, className, pad = true
   pad?: boolean;
 }) {
   return (
-    <section className={clsx("rounded-[var(--r-lg)] border border-[var(--line-0)] bg-[var(--bg-1)] shadow-[var(--shadow-panel)]", className)}>
+    <section className={clsx("caps-card-surface rounded-[var(--r-lg)] border border-[var(--line-0)]", className)}>
       {title ? (
         <header className="flex items-start justify-between gap-3 border-b border-[var(--line-0)] px-4 py-3">
           <div>

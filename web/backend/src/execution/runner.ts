@@ -922,7 +922,7 @@ private failBeforeStart(
       return { status: "COMPLETED", isSuccess: true, error: null };
     }
     if (active.engineOutcome === "EXITED") {
-      return { status: "COMPLETED", isSuccess: false, error: `exited with code ${active.exitCode ?? exitCode ?? "?"}` };
+      return { status: "FAILED", isSuccess: false, error: `exited with code ${active.exitCode ?? exitCode ?? "?"}` };
     }
     // No lifecycle verdict at all: the engine produced no process event, so
     // the outcome is genuinely unknown.  "FAILED" with an explicit reason is
