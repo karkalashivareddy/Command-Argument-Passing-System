@@ -51,17 +51,18 @@ interface SessionSampling {
 }
 
 /**
- * Per-execution telemetry sampler.
+ * Per-process telemetry samplers grouped by execution.
  *
  * The runner owns process lifecycle; this class owns cadence. Each active
- * execution gets exactly one loop, the first sample is taken immediately so
- * even a very short process is observed once, and every tick reads all
- * supported metrics in a single pass. Sampling stops the moment the process
- * vanishes, its identity stops matching, or the execution is finalized, so a
- * process.snapshot can never appear after the session's terminal event.
+ * CAPS-reported process gets one loop, and the first sample is attempted
+ * immediately. If a short-lived process has already exited, that PID's loop
+ * stops without inventing a sample. Every tick reads all supported metrics in
+ * a single pass. Sampling stops when the process vanishes, its identity stops
+ * matching, or the execution is finalized, so a process.snapshot can never
+ * appear after the session's terminal event.
  */
 export class TelemetrySampler {
-  private readonly sessions = new Map<string, SessionSampling>();
+  private readonly sessions = new Map<string, Map<number, SessionSampling>>();
   private readonly intervalMs: number;
   private readonly monotonicNow: () => number;
   private readonly wallNow: () => number;
@@ -78,13 +79,19 @@ export class TelemetrySampler {
     return [...this.sessions.keys()];
   }
 
-  isSampling(sessionId: string): boolean {
-    return this.sessions.has(sessionId);
+  isSampling(sessionId: string, pid?: number): boolean {
+    const processes = this.sessions.get(sessionId);
+    return pid === undefined ? processes !== undefined : processes?.has(pid) ?? false;
   }
 
-  /** Begin sampling one execution: one immediate sample, then one loop. */
+  /** Begin sampling one CAPS-reported process: one immediate sample, then one loop. */
   start(target: TelemetryTarget): void {
-    if (this.sessions.has(target.sessionId)) return;
+    let processes = this.sessions.get(target.sessionId);
+    if (processes?.has(target.pid)) return;
+    if (!processes) {
+      processes = new Map();
+      this.sessions.set(target.sessionId, processes);
+    }
     const state: SessionSampling = {
       timer: null,
       identityStartTicks: undefined,
@@ -92,7 +99,7 @@ export class TelemetrySampler {
       lastSampleMonotonicMs: null,
       stopped: false,
     };
-    this.sessions.set(target.sessionId, state);
+    processes.set(target.pid, state);
     this.sample(target, state);
     // A rejected first sample (vanished process, foreign PID) ends sampling.
     if (state.stopped) return;
@@ -101,21 +108,27 @@ export class TelemetrySampler {
     state.timer = timer;
   }
 
-  /** Stop sampling one execution. Idempotent. */
-  stop(sessionId: string): void {
-    const state = this.sessions.get(sessionId);
-    if (state) this.halt(sessionId, state);
+  /** Stop one process loop, or every loop for the execution when pid is omitted. */
+  stop(sessionId: string, pid?: number): void {
+    const processes = this.sessions.get(sessionId);
+    if (!processes) return;
+    if (pid !== undefined) {
+      const state = processes.get(pid);
+      if (state) this.halt(sessionId, pid, state);
+      return;
+    }
+    for (const [processPid, state] of [...processes]) this.halt(sessionId, processPid, state);
   }
 
   /** Stop every loop, e.g. on gateway shutdown. */
   close(): void {
-    for (const [sessionId, state] of [...this.sessions]) this.halt(sessionId, state);
+    for (const sessionId of [...this.sessions.keys()]) this.stop(sessionId);
   }
 
   private sample(target: TelemetryTarget, state: SessionSampling): void {
     if (state.stopped) return;
     if (target.isFinalized()) {
-      this.halt(target.sessionId, state);
+      this.halt(target.sessionId, target.pid, state);
       return;
     }
 
@@ -137,18 +150,20 @@ export class TelemetrySampler {
     this.options.emit({ sessionId: target.sessionId, pid: target.pid, snapshot: final });
 
     if (rejection !== null || final.identityStartTicks === null) {
-      this.halt(target.sessionId, state);
+      this.halt(target.sessionId, target.pid, state);
       return;
     }
     state.lastSnapshot = final;
     state.lastSampleMonotonicMs = monotonicMs;
   }
 
-  private halt(sessionId: string, state: SessionSampling): void {
+  private halt(sessionId: string, pid: number, state: SessionSampling): void {
     if (state.timer) clearInterval(state.timer);
     state.timer = null;
     state.stopped = true;
-    this.sessions.delete(sessionId);
+    const processes = this.sessions.get(sessionId);
+    processes?.delete(pid);
+    if (processes?.size === 0) this.sessions.delete(sessionId);
   }
 }
 

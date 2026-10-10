@@ -21,7 +21,11 @@ make            # builds the engine, the pidfd helper, and the workloads
 node --version  # 22 or newer
 ```
 
-Chromium is needed only for the documentation screenshots and the browser suite:
+`scripts/verify-linux.sh` runs the complete local Linux verification, including
+both compiler and sanitizer matrices, production builds, dependency audits, and
+the browser checks. It requires GCC, Clang, Node 22.5+, npm, Chromium runtime
+dependencies, and standard Linux tools. Chromium is needed for the documentation
+screenshots and the production browser suite:
 
 ```bash
 cd web/frontend && npm ci && npx playwright install chromium
@@ -75,7 +79,7 @@ Clang check. This is stated rather than implied.
 | `test_errors.sh` | launch and exec failures are distinguished |
 | `test_exit_status.sh` | 126 and 127 stay distinct |
 | `test_signals.sh` | signal delivery and the 128+n convention |
-| `test_redirection.sh` | `O_NOFOLLOW` and descriptor wiring |
+| `test_redirection.sh` | parent/final symlink refusal, FIFO and character-device refusal, and descriptor wiring |
 | `test_exit_parse.sh` | `waitpid` status decoding |
 | `test_fd_edge.sh` | descriptor lifetime at the edges |
 | `test_monitor.sh` | the monitor protocol, one flush per event, parseable JSON |
@@ -189,14 +193,19 @@ to. The glob is asserted by the configuration itself.
 
 ## 6. Browser and end-to-end
 
+From the repository root, run the complete locally reproducible Linux path:
+
 ```bash
-make caps
-make test-helpers
-cd web/backend && npm ci && npm run build
-cd ../frontend && npm ci && npm run build
-# start the gateway, then serve the production build
-sh scripts/browser-smoke.sh
+bash scripts/verify-linux.sh
 ```
+
+It requires Linux (WSL2 is supported), GCC, Clang, Make, Node.js 22.5 or newer,
+curl, `seq`, `timeout`, npm registry access, and the Linux libraries required
+by Playwright Chromium. It performs lockfile installs, builds, tests, and dependency audits,
+then selects an unused loopback port pair for its gateway and production
+preview and cleans up both processes. The browser install downloads the pinned
+Playwright Chromium revision.
+CodeQL remains a GitHub Actions check.
 
 The suite asserts behaviour, not pixels: the app loads and routes render, a real
 execution runs through the real engine, its events arrive over SSE with a
@@ -204,6 +213,13 @@ contiguous sequence and an explicit `stream.end`, replay is contiguous with
 exactly one terminal event and a passing integrity verdict, a second replay is
 byte-identical, the production bundle is hashed and code-split, and the monitor
 protocol never leaks into a program's `stderr`.
+
+`browser-smoke.mjs` opens the production build in Chromium. It checks visible
+keyboard focus, reduced-motion preference, mobile navigation focus trapping and
+restoration, mobile horizontal overflow, route history, a real gateway
+execution, and the 2D process graph fallback when WebGL contexts cannot be
+created. It is a behavioral smoke test, not a full accessibility audit or a
+visual-diff suite.
 
 There is **no visual-regression suite**, and this is a deliberate scope decision
 rather than a gap: the repository has no screenshot-diff infrastructure, and adding
@@ -283,12 +299,14 @@ Nothing is painted, mocked, or cropped to hide a state.
 | `backend` | typecheck, build, tests |
 | `frontend` | typecheck, production build, tests |
 | `integration` | the real engine through the real gateway |
-| `browser-smoke` | the production build against the real gateway |
+| `browser-smoke` | HTTP/SSE/replay checks and Chromium behavior against the production build and real gateway |
 | `repository-hygiene` | artifacts and full-history attribution |
 | `dependency-audit` | high and critical advisories fail the build |
 | `codeql` | C/C++ and JavaScript/TypeScript |
 
-CI is the authoritative Clang check. A green local run does not substitute for it.
+CI remains the authoritative result for a commit; `scripts/verify-linux.sh` also
+runs the Clang build, tests, and sanitizer suites when the required toolchain is
+available locally.
 
 ---
 
@@ -310,15 +328,16 @@ CI is the authoritative Clang check. A green local run does not substitute for i
 | Ownership attribution | `ownership.test.ts`, `processAttribution.test.ts` | yes |
 | Telemetry vs raw Linux | `groundtruth.test.ts` | yes |
 | Frontend behaviour | `vitest` | yes |
-| Browser flows | `browser-smoke.sh` | needs Chromium |
+| Production HTTP/SSE/replay | `browser-smoke.sh` | yes |
+| Production browser flows | `web/frontend/scripts/browser-smoke.mjs` | needs Chromium |
 | Screenshots | `capture-screenshots.mjs` | needs Chromium |
-| **Clang** | CI | **no — environmental limitation** |
+| **Clang build, tests, and sanitizers** | `scripts/verify-linux.sh` | **yes — requires Clang** |
 | **Real thermal hardware** | the host it runs on | **no — not present here** |
 | **Bare-metal cpufreq** | bare metal | **no — WSL2 does not expose it** |
 
-The last three are environment limitations, stated rather than worked around, and
-none of them invalidates a release: the code reports all three as `UNAVAILABLE`
-with a reason when the host cannot supply them.
+The real thermal hardware and bare-metal cpufreq entries are environment
+limitations, stated rather than worked around. The code reports those metrics
+as `UNAVAILABLE` with a reason when the host cannot supply them.
 
 ---
 

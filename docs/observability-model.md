@@ -16,17 +16,18 @@ it; where another document disagrees, this one is correct.
 * the exit code, the terminating signal, or — when `execvp()` never succeeded —
   the errno, the 126/127 status, and a machine-readable reason;
 * the target's own stdout, verbatim, and its stderr, line-classified;
-* per-sample `/proc/<pid>/{stat,status,io}` telemetry for **one** PID: the one
-  CAPS reported in `PROCESS_STARTED`.
+* per-sample `/proc/<pid>/{stat,status,io}` telemetry for each PID CAPS reports
+  in `process.started`: one process for a command, and one per stage for a
+  pipeline. Each PID has its own sample cadence and rate baseline.
 
 ### Not observed
 
-* **Descendants of the tracked process.** The sampler follows a single PID and
-  discovers nothing else. There is no process tree, no sibling discovery, and
-  no per-descendant metric. `caps_fork_tree` therefore demonstrates fork
-  *activity of one tracked process*; the descendant topology exists at the
-  kernel level and is asserted by that workload's own C test, but the gateway
-  never sees it.
+* **Processes forked by a command.** The gateway does not discover descendants
+  through `/proc`. A pipeline's direct stages are reported by CAPS and sampled
+  independently, but a stage's own children are not. `caps_fork_tree`
+  demonstrates fork *activity of one tracked process*; the descendant topology
+  exists at the kernel level and is asserted by that workload's own C test, but
+  the gateway does not record it.
 * **Syscall traces, eBPF probes, and cgroup accounting.** Only kernel-exposed
   procfs counters are read.
 * **Network I/O.** `/proc/<pid>/io` is not per-device, and no socket counter is
@@ -60,7 +61,7 @@ than implying a clean split.
 | Duration | `CLOCK_MONOTONIC` in CAPS | Milliseconds measured from process launch through reap. |
 | Event timestamp | Gateway receive time | Wall clock when the gateway reads the monitor event; not a kernel timestamp. |
 | Event sequence | Gateway per-session counter | Contiguous from 0, one terminal event, terminal last. Used by SQLite and by SSE resume. |
-| Linux PID | `process.started` from CAPS | Actual child PID; procfs snapshots are restricted to this PID while the execution remains tracked. |
+| Linux PID | `process.started` from CAPS | Actual direct child PID for a command or pipeline stage; procfs snapshots are restricted to reported PIDs while each remains tracked. |
 | CAPS engine PID | Node `child_process.spawn` result | Gateway-observed Linux PID of the CAPS monitor. A process-tree edge is shown only when the observed PPID matches it. |
 | PPID, process group, SID, command name, state | `/proc/<pid>/stat` and `/proc/<pid>/status` | Kernel-exposed attributes read for the tracked PID; start ticks are checked to reject PID reuse. |
 | RSS, virtual size, threads, context switches | `/proc/<pid>/status` | **OBSERVED.** Missing entries, fields, or permissions yield `UNAVAILABLE` with a reason, never zero. |
@@ -99,12 +100,17 @@ persisted event because it connected at the wrong moment. See
 No syscall tracer and no independent successful-`execvp()` acknowledgement
 event; exec success is reported through the `outcome` field of the exit event.
 The `/proc` sampler is scoped to registry-owned CAPS children, reads
-immediately after `process.started`, then every 500 ms, and stops on the
-observed child's exit, exec error, or the execution's finalization. Each
+immediately after each `process.started`, then every 500 ms independently per
+PID, and stops on that process's exit, exec error, identity loss, or the
+execution's finalization. Pipeline stages therefore keep sampling when another
+stage exits. Each
 `process.snapshot` is persisted before SSE publication; replay reads the stored
 snapshot events with no re-execution and no live procfs access. Before
 sampling, the gateway verifies that the child's observed PPID matches the CAPS
 PID returned by its own spawn call and that its start ticks stay constant.
+
+Process discovery alternatives and the selected coverage boundary are recorded
+in [the process coverage decision](process-coverage-decision.md).
 
 ## References
 

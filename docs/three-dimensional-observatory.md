@@ -29,10 +29,10 @@ Consequences that the code is written to enforce:
 
 ## What the scene contains, and what it deliberately does not
 
-The gateway observes exactly two PIDs per execution: the CAPS engine it spawns,
-and the one direct child that `caps_fork_tree` creates. `execvp()` replaces that
-child's image in place, so the PID never changes and there is no second process
-node for an exec.
+The gateway observes the CAPS engine it spawns and each direct process CAPS
+reports. A single command has one reported process; a pipeline has one per
+stage. Each reported PID is sampled independently. `execvp()` replaces a stage's
+image in place, so that stage keeps its PID and does not create a second node.
 
 | Evidence | 3D representation |
 | --- | --- |
@@ -44,11 +44,12 @@ node for an exec.
 | `process.snapshot` CPU | A ring around the node while running. |
 | Lifecycle events | Discrete markers on the time axis. |
 
-Because descendants are not sampled, the scene shows one child. It does not
-synthesize a fan-out, and the limits of the record are printed under the legend,
-so a reader who runs `caps_fork_tree` can see exactly why there are two nodes
-rather than a tree. See [process telemetry](telemetry.md) for why the sample set
-is what it is.
+Descendants forked by a command are not sampled. A pipeline's reported stages
+remain distinct nodes, while unreported descendants are never synthesized. The
+limits of the record are printed under the legend, so a reader who runs
+`caps_fork_tree` can see why the view does not show its full process tree. See
+[process telemetry](telemetry.md) and the
+[process coverage decision](process-coverage-decision.md) for the sample set.
 
 ## What is derived, and what is only presentation
 
@@ -351,8 +352,8 @@ Motion and Zustand are unchanged; the 2D views still own 2D rendering.
 - The CAPS engine itself has no procfs sample and no derived start time, so the
   engine node carries no resource values and its identity matches on session and
   PID only. It is shown as a structural node, not a measured one.
-- Descendants of the observed child are not sampled, so the topology is a chain,
-  not a tree.
+- Descendants forked by reported processes are not sampled. Pipeline stages are
+  individually represented, but no unreported process-tree edges are inferred.
 - `CANCELLED` is a session status in this system, not a canonical event type, so
   no event can produce it and the scene never invents one.
 - The Z axis is normalized, not linear in wall-clock seconds. The ruler states the

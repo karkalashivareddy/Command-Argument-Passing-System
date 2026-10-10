@@ -23,6 +23,7 @@ import type { FastifyInstance } from "fastify";
 
 import type { CanonicalEvent } from "../../src/types/observability.js";
 import { validateEventStream } from "../../src/events/invariants.js";
+import { recalledIdentity } from "../../src/execution/terminator.js";
 import { engineAvailable, startTestServer, stopTestServer, TERMINAL } from "./harness.js";
 
 const describeFx = engineAvailable ? describe : describe.skip;
@@ -126,6 +127,58 @@ describeFx("a pipeline is recorded as real processes", () => {
     for (const pid of pids) expect(typeof pid).toBe("number");
     expect(new Set(pids).size, "each stage must be a distinct process").toBe(4);
   });
+
+  it("keeps sampling live pipeline stages after an earlier stage exits", async () => {
+    const run = await runPipeline("true | sleep 1 | sleep 1");
+    expect(run.status).toBe("COMPLETED");
+
+    const stagePids = starts(run.events).map((event) => event.pid);
+    const sampledPids = [...new Set(run.events.filter((event) => event.type === "process.snapshot").map((event) => event.pid))];
+    expect(stagePids).toHaveLength(3);
+    expect(sampledPids.every((pid) => stagePids.includes(pid))).toBe(true);
+    const firstStagePid = stageEvents(run.events, "process.started", 0)[0]!.pid;
+    for (const pid of stagePids.filter((candidate) => candidate !== firstStagePid)) {
+      const snapshots = run.events.filter((event) => event.type === "process.snapshot" && event.pid === pid);
+      expect(snapshots.length).toBeGreaterThan(1);
+    }
+    for (const pid of stagePids) {
+      const exited = run.events.find((event) => event.type === "process.exited" && event.pid === pid)!;
+      const snapshots = run.events.filter((event) => event.type === "process.snapshot" && event.pid === pid);
+      expect(snapshots.every((event) => event.sequence < exited.sequence), `no stale samples after stage ${pid} exits`).toBe(true);
+      expect(recalledIdentity(pid), `identity cache entry for completed stage ${pid}`).toBeNull();
+    }
+  });
+
+  it("times out the remaining pipeline after its first stage has exited", async () => {
+    const beganAt = Date.now();
+    const posted = await app.inject({
+      method: "POST",
+      url: TERMINAL.execute,
+      payload: { commandLine: "true | sleep 8 | sleep 8", timeoutMs: 1000 },
+    });
+    expect(posted.statusCode, posted.body).toBe(202);
+    const sessionId = posted.json().sessionId as string;
+
+    let status = "PENDING";
+    for (let i = 0; i < 120; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const current = await app.inject({ method: "GET", url: `/api/sessions/${sessionId}` });
+      status = current.json().status as string;
+      if ((TERMINAL_STATUSES as readonly string[]).includes(status)) break;
+    }
+
+    const elapsedMs = Date.now() - beganAt;
+    const replay = await app.inject({ method: "GET", url: `/api/sessions/${sessionId}/replay` });
+    const events = replay.json().events as CanonicalEvent[];
+    const stagePids = starts(events).map((event) => event.pid);
+    const exitPids = events.filter((event) => event.type === "process.exited").map((event) => event.pid);
+
+    expect(status).toBe("TIMED_OUT");
+    expect(elapsedMs, "timeout must not wait for the full sleep after the pipeline leader exits").toBeLessThan(6000);
+    expect(stagePids).toHaveLength(3);
+    expect(new Set(exitPids)).toEqual(new Set(stagePids));
+    expect(events.filter((event) => ["execution.completed", "execution.failed", "execution.timeout", "execution.cancelled"].includes(event.type))).toHaveLength(1);
+  }, 15_000);
 
   it("puts every stage in one process group", async () => {
     const run = await runPipeline("seq 1 5 | cat | cat");

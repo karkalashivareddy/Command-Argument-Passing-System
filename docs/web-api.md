@@ -125,14 +125,14 @@ repository-relative.
     "loopbackOnly": true,
     "authentication": "none (loopback only)",
     "executableResolution": "absolute verified path; PATH is never consulted for an allowlisted command",
-    "redirectionHardening": "O_NOFOLLOW plus a regular-file check at open time"
+    "redirectionHardening": "descriptor-relative openat with O_NOFOLLOW on each component, O_NONBLOCK on open, and a regular-file check"
   },
   "redirection": {
     "supported": true,
     "modes": ["in","out","append"],
     "stderr": true,
     "stderrByRoute": { "/api/sessions": false, "/api/terminal/execute": true },
-    "stderrNote": "stderr redirection is a terminal-route feature. POST /api/sessions accepts only in/out/append and rejects a stderr slot with 400. Both routes validate the target against the workspace policy and the engine opens it with O_NOFOLLOW."
+    "stderrNote": "stderr redirection is a terminal-route feature. POST /api/sessions accepts only in/out/append and rejects a stderr slot with 400. Both routes validate the target against the workspace policy; the engine opens each path component descriptor-relatively with O_NOFOLLOW."
   },
   "signals": {
     "supported": ["SIGINT","SIGTERM","SIGKILL","SIGQUIT","SIGTSTP"],

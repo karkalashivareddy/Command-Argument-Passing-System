@@ -126,9 +126,10 @@ export class RedirectionPolicyError extends Error {
 /**
  * Safety link: verify the workspace exists and that a redirection target
  * would land inside it (defense in depth; the chdir approach is the primary
- * control).  This is a pre-flight check, not a lock: the engine re-verifies
- * with O_NOFOLLOW at the moment of open(), so a symlink planted between this
- * check and the open is refused rather than followed.
+ * control). This is a pre-flight check, not a lock: the engine opens each
+ * component relative to its already-open parent with openat() and O_NOFOLLOW,
+ * so a symlink planted between this check and the open is refused rather than
+ * followed.
  */
 export function assertTargetInWorkspace(config: CapsConfig, target: string): void {
   if (!isSafeRedirTarget(target)) {

@@ -60,7 +60,7 @@ describe("workload catalog shape", () => {
   it("states what is sampled and what is not for every workload", () => {
     // A workload may only advertise a signal the gateway really observes. The
     // fork-tree workload is the case that matters: it forks children, but the
-    // sampler follows a single PID, so "descendants" would be a false claim.
+    // sampler follows CAPS-reported direct PIDs, so "descendants" would be a false claim.
     for (const profile of WORKLOAD_PROFILES) {
       expect(profile.observationScope.sampled).toBeTruthy();
       expect(profile.observationScope.notSampled).toBeTruthy();

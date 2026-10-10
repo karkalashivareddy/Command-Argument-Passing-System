@@ -121,9 +121,9 @@ process identity. That transition **is** observable: the record shows the
 command image before and after it, on the same node.
 
 `fork()` gives each new process a new PID, and the gateway **does not
-discover it**. The telemetry sampler follows exactly one PID — the one CAPS
-reported in `PROCESS_STARTED` — and nothing walks `/proc` looking for
-descendants. So:
+discover it**. The telemetry sampler follows each direct PID CAPS reports in
+`PROCESS_STARTED` (one for a command, one per pipeline stage); nothing walks
+`/proc` looking for unreported descendants. So:
 
 * `caps_fork_tree` demonstrates **fork activity of one tracked process**: the
   parent performs a bounded, deterministic number of forks and reaps them, and

@@ -23,9 +23,9 @@ export interface ActiveSession {
   process: ChildProcess | null;
   childPid: number | null;
   /**
-   * Kernel identity (pid + start ticks) captured when the child was first
-   * signalled.  Every delayed or escalating signal is checked against it, so a
-   * recycled PID is never killed.
+   * Kernel identity (pid + start ticks) captured when CAPS reports the stage.
+   * It is retained as the latest stage's identity for single-process fallback;
+   * group termination uses the full `ownedIdentities` list.
    */
   childIdentity: ProcessIdentity | null;
   /**
@@ -35,17 +35,15 @@ export interface ActiveSession {
    * This is an ADDRESS, not a record: it is what makes a timeout or a terminate
    * reach every stage of a pipeline rather than only the last one, which
    * `childPid` names. It is used only through `signalProcessGroup`, which first
-   * verifies the group leader's identity and its pgrp field, because
+   * verifies a live CAPS-reported stage identity and its pgrp field, because
    * `kill(-pgid)` has no identity check of its own.
    */
   childPgid: number | null;
   /**
    * The group leader's verified identity, captured at the moment the engine
-   * reported the fork.
-   *
-   * Paired with `childPgid` and required by it: a group id with no recorded
-   * leader cannot be proven to belong to this session, so the group path refuses
-   * and the single-PID path is used instead.
+   * reported the fork. Retained for process ownership and diagnostics; group
+   * signaling verifies any still-live identity in `ownedIdentities`, since the
+   * leader may have exited.
    */
   childGroupLeader: ProcessIdentity | null;
   /**
@@ -63,9 +61,9 @@ export interface ActiveSession {
    * session, because every entry was verified at the moment the engine reported
    * the fork and a process that has exited cannot become un-owned.
    *
-   * `childPid`/`childIdentity` remain the TERMINATION handle and are deliberately
-   * singular: a signal is delivered to one process, and the escalation path
-   * validates it against that one identity.
+   * Group termination and escalation use this list to reach every reported
+   * pipeline stage; if no verified group member remains, fallback signaling is
+   * tied to the captured identity for `childPid`.
    */
   ownedIdentities: ProcessIdentity[];
   processStartedAt: string | null;

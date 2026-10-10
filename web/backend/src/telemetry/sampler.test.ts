@@ -14,7 +14,12 @@ import { SNAPSHOT_METRIC_KEYS, type ProcessSnapshot } from "./types.js";
  */
 class FakeProcess {
   readonly root: string;
-  readonly pid = 41;
+  constructor(readonly pid = 41) {
+    this.root = mkdtempSync(join(tmpdir(), "caps-sampler-"));
+    this.dir = join(this.root, String(this.pid));
+    mkdirSync(this.dir);
+    writeFileSync(join(this.root, "uptime"), "10.00 2.00\n");
+  }
   readonly capsEnginePid = 900;
   utime = 10;
   stime = 5;
@@ -27,13 +32,6 @@ class FakeProcess {
   startTicks = 500;
   present = true;
   private readonly dir: string;
-
-  constructor() {
-    this.root = mkdtempSync(join(tmpdir(), "caps-sampler-"));
-    this.dir = join(this.root, String(this.pid));
-    mkdirSync(this.dir);
-    writeFileSync(join(this.root, "uptime"), "10.00 2.00\n");
-  }
 
   /** The snapshot timestamp the fake procfs implies: 5s after process start. */
   get startTimeIso(): string {
@@ -93,6 +91,7 @@ function harness(): Harness {
   const proc = new FakeProcess();
   fixtures.push(proc);
   const emitted: TelemetrySample[] = [];
+  const processes = new Map<number, FakeProcess>([[proc.pid, proc]]);
   let wall = 1_000_000;
   let monotonic = 10_000;
   const sampler = new TelemetrySampler({
@@ -101,8 +100,13 @@ function harness(): Harness {
     wallNow: () => wall,
     monotonicNow: () => monotonic,
     readSnapshot: (pid, nowMs) => {
-      if (pid !== proc.pid) throw new Error(`sampler must only read the tracked PID, saw ${pid}`);
-      return proc.read(nowMs);
+      let process = processes.get(pid);
+      if (!process) {
+        process = new FakeProcess(pid);
+        processes.set(pid, process);
+        fixtures.push(process);
+      }
+      return process.read(nowMs);
     },
   });
   const built: Harness = {
@@ -198,6 +202,31 @@ describe("TelemetrySampler cadence", () => {
     expect(h.emitted.filter((s) => s.sessionId === "exec_a")).toHaveLength(2);
     expect(h.emitted.filter((s) => s.sessionId === "exec_b")).toHaveLength(3);
     expect(h.sampler.activeSessionIds).toEqual(["exec_b"]);
+  });
+
+  it("keeps independent loops for every process in one pipeline execution", () => {
+    const h = harness();
+    h.sampler.start(h.target());
+    h.sampler.start(h.target({ pid: 42 }));
+
+    expect(h.emitted.map((sample) => sample.pid)).toEqual([41, 42]);
+    expect(h.sampler.isSampling("exec_test", 41)).toBe(true);
+    expect(h.sampler.isSampling("exec_test", 42)).toBe(true);
+    expect(h.sampler.activeSessionIds).toEqual(["exec_test"]);
+
+    h.advanceMs(500);
+    vi.advanceTimersByTime(500);
+    h.sampler.stop("exec_test", 41);
+    h.advanceMs(500);
+    vi.advanceTimersByTime(500);
+
+    expect(h.emitted.filter((sample) => sample.pid === 41)).toHaveLength(2);
+    expect(h.emitted.filter((sample) => sample.pid === 42)).toHaveLength(3);
+    expect(h.sampler.isSampling("exec_test", 41)).toBe(false);
+    expect(h.sampler.isSampling("exec_test", 42)).toBe(true);
+
+    h.sampler.stop("exec_test");
+    expect(h.sampler.activeSessionIds).toEqual([]);
   });
 
   it("ignores a repeated start for the same session", () => {

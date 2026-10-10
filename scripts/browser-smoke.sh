@@ -1,14 +1,13 @@
 #!/bin/sh
-# Browser smoke suite against the production build.
+# HTTP production-stack smoke suite. The Playwright browser check is separate.
 #
 # Scope is deliberately behavioural, not visual. This asserts the claims the
 # observatory makes about itself, end to end, in a real browser:
 #
-#   1. the app loads and routes render against a real gateway;
+#   1. the built app is served;
 #   2. a real execution runs through the real C engine;
-#   3. its event stream arrives over SSE and the UI shows it;
-#   4. replay reproduces the same evidence;
-#   5. the WebGL-less fallback path still renders the process list.
+#   3. its event stream arrives over SSE;
+#   4. replay reproduces the same evidence.
 #
 # It does not assert pixels, fonts, or layout. A visual-regression suite would
 # be a large addition that tests screenshots rather than the system's claims,
@@ -26,7 +25,7 @@ pass() { printf 'PASS  %s\n' "$1"; }
 bad() { printf 'FAIL  %s\n' "$1"; fail=1; }
 
 # ---------------------------------------------------------------- preflight
-printf 'Browser smoke suite\n'
+printf 'HTTP production-stack smoke suite\n'
 if ! curl -fsS "$GATEWAY/api/ready" > "$WORK/ready.json"; then
   echo "gateway is not reachable at $GATEWAY"
   exit 1
@@ -149,7 +148,7 @@ fi
 
 printf '\n'
 if [ "$fail" -ne 0 ]; then
-  echo "BROWSER SMOKE SUITE FAILED"
+  echo "HTTP PRODUCTION-STACK SMOKE SUITE FAILED"
   exit 1
 fi
-echo "BROWSER SMOKE SUITE PASSED"
+echo "HTTP PRODUCTION-STACK SMOKE SUITE PASSED"

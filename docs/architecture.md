@@ -277,10 +277,11 @@ canonical terminal event rather than only a database row.
 Stated once, and repeated verbatim in
 [docs/observability-model.md](observability-model.md):
 
-* **Only one PID is sampled.** The single CAPS-reported child. Descendants it
-  forks are not discovered, not sampled, and not drawn. The `caps_fork_tree`
-  workload therefore demonstrates *fork activity of one tracked process*, not a
-  process tree.
+* **CAPS-reported direct children are sampled.** A pipeline's stages are each
+  reported and sampled; descendants they fork are not discovered, sampled, or
+  drawn. The `caps_fork_tree` workload therefore demonstrates *fork activity of
+  one tracked process*, not a process tree. See the
+  [process coverage decision](process-coverage-decision.md).
 * **No syscall tracing, eBPF, or cgroup accounting.**
 * **No network I/O**, and `/proc/<pid>/io` is not per-device.
 * **No file-descriptor census.**
@@ -289,7 +290,8 @@ Stated once, and repeated verbatim in
   pipeline); what is not modelled is the descriptor-level syscall trail behind
   it. The engine reports `REDIRECTION_OPENED` and `REDIRECTION_FAILED` and then
   performs the `open`/`dup2`, and nothing below that is observed.
-* **No descendant or sibling processes** beyond the sampled child.
+* **No descendants forked by a reported process.** Pipeline stages are each
+  reported as direct children of CAPS, not inferred as siblings from telemetry.
 * **CAPS diagnostics and the target's stderr share one descriptor** and are
   separated line-wise, not at descriptor level. The classification is exact
   for CAPS's own lines and a best effort for the target's.

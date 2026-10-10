@@ -361,17 +361,87 @@ static void emit_failure_event(caps_monitor_t *mon, caps_event_type_t type,
  * change between the check and the open().  These helpers close that gap
  * without pretending to be a sandbox:
  *
- *   - O_NOFOLLOW on the final component refuses to follow a symlink, so a
- *     name that became a symlink after validation is an error, not a write to
- *     an arbitrary target;
+ *   - each directory component is opened relative to the already-open parent
+ *     with O_DIRECTORY | O_NOFOLLOW, then the final component is opened with
+ *     openat() | O_NOFOLLOW. A symlink swapped in at any component is refused;
  *   - for "<" the file must already exist, be a regular file, and be opened
  *     read-only, so a "readable file" race cannot turn into a create;
- *   - an existing redirection target for ">" / ">>" must be a regular file, so
- *     a freshly planted FIFO or device node is refused rather than written to.
+ *   - O_NONBLOCK ensures a FIFO cannot hang the engine before fstat() rejects
+ *     it, and an existing target for ">" / ">>" must be a regular file.
  *
  * Anything rejected here is reported through the monitor as
  * REDIRECTION_FAILED, so the failure is observed rather than silent.
  */
+/*
+ * Open a path without following symlinks in any component. The gateway rejects
+ * absolute and traversal paths with its workspace policy; direct local engine
+ * use is not a confinement boundary. The gateway's preflight is not a lock:
+ * only descriptor-relative opens can close the symlink check/open window.
+ * CAPS is already chdir'd to the workspace before it reaches this function.
+ */
+static int open_redirection_path(const char *path, int flags, mode_t mode)
+{
+    char *copy;
+    char *component;
+    char *slash;
+    int absolute;
+    int dirfd;
+    int nextfd;
+
+    if (path == NULL || path[0] == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+    absolute = path[0] == '/';
+    copy = strdup(path);
+    if (copy == NULL)
+        return -1;
+
+    dirfd = open(absolute ? "/" : ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dirfd < 0) {
+        int saved = errno;
+        free(copy);
+        errno = saved;
+        return -1;
+    }
+
+    component = copy + (absolute ? 1 : 0);
+    while ((slash = strchr(component, '/')) != NULL) {
+        *slash = '\0';
+        if (component[0] == '\0' || strcmp(component, ".") == 0 || strcmp(component, "..") == 0) {
+            close(dirfd);
+            free(copy);
+            errno = EINVAL;
+            return -1;
+        }
+        nextfd = openat(dirfd, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (nextfd < 0) {
+            int saved = errno;
+            close(dirfd);
+            free(copy);
+            errno = saved;
+            return -1;
+        }
+        close(dirfd);
+        dirfd = nextfd;
+        component = slash + 1;
+    }
+
+    if (component[0] == '\0' || strcmp(component, ".") == 0 || strcmp(component, "..") == 0) {
+        close(dirfd);
+        free(copy);
+        errno = EINVAL;
+        return -1;
+    }
+
+    int fd = openat(dirfd, component, flags | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, mode);
+    int saved = errno;
+    close(dirfd);
+    free(copy);
+    errno = saved;
+    return fd;
+}
+
 static int open_redirection(const redirection_t *r)
 {
     int flags;
@@ -386,22 +456,22 @@ static int open_redirection(const redirection_t *r)
      */
     switch (r->type) {
     case CAPS_REDIR_IN:
-        flags = O_RDONLY | O_NOFOLLOW;
+        flags = O_RDONLY;
         break;
     case CAPS_REDIR_APPEND:
     case CAPS_REDIR_ERR_APPEND:
-        flags = O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW;
+        flags = O_WRONLY | O_CREAT | O_APPEND;
         break;
     case CAPS_REDIR_OUT:
     case CAPS_REDIR_ERR_OUT:
-        flags = O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW;
+        flags = O_WRONLY | O_CREAT | O_TRUNC;
         break;
     default:
         /* Unreachable: every enumeration value is handled above. */
         return -1;
     }
 
-    fd = open(r->path, flags, 0644);
+    fd = open_redirection_path(r->path, flags, 0644);
     if (fd < 0)
         return -1;
 
@@ -488,8 +558,20 @@ static void apply_redirections(redirection_t *redirs, int nredirs)
         int fd = redirs[i].fd;
         int target = redirs[i].target_fd;
 
-        if (fd == target)
+        if (fd == target) {
+            /*
+             * openat() sets O_CLOEXEC on every descriptor. dup2() normally
+             * clears it when fd != target, but is a no-op for fd == target.
+             * Clear it explicitly so exec preserves the redirection in this
+             * descriptor-allocation edge case.
+             */
+            int descriptor_flags = fcntl(fd, F_GETFD);
+            if (descriptor_flags < 0 || fcntl(fd, F_SETFD, descriptor_flags & ~FD_CLOEXEC) < 0) {
+                child_fatal_printf("caps: cannot preserve redirection fd %d: %s\n", target, strerror(errno));
+                _exit(1);
+            }
             continue; /* keep the descriptor; it already is the target */
+        }
 
         if (dup2(fd, target) < 0) {
             child_fatal_printf("caps: dup2(%d): %s\n", target, strerror(errno));

@@ -9,6 +9,13 @@ set -eu
 
 cd "$(dirname "$0")/.." || exit 1
 
+umask 077
+md_files=$(mktemp "${TMPDIR:-/tmp}/caps-md-files.XXXXXX") || {
+  echo "could not create temporary markdown inventory" >&2
+  exit 1
+}
+trap 'rm -f -- "$md_files"' 0
+
 rc=0
 checked=0
 broken=0
@@ -16,10 +23,10 @@ broken=0
 # Every markdown file in the repository, documentation or not.
 find . -name '*.md' -not -path './node_modules/*' -not -path '*/node_modules/*' \
   -not -path './.git/*' -not -path './web/frontend/dist/*' -not -path './web/backend/dist/*' \
-  -print | sort > /tmp/caps-md-files.txt
+  -print | sort > "$md_files"
 
 printf 'Documentation link check\n'
-printf 'markdown files: %s\n' "$(wc -l < /tmp/caps-md-files.txt | tr -d ' ')"
+printf 'markdown files: %s\n' "$(wc -l < "$md_files" | tr -d ' ')"
 printf '\n'
 
 while IFS= read -r md; do
@@ -42,7 +49,7 @@ while IFS= read -r md; do
       rc=1
     fi
   done
-done < /tmp/caps-md-files.txt
+done < "$md_files"
 
 # Bare file references inside code spans, e.g. `src/process.c`. Only check the
 # ones that look like repository paths, and only for directories that exist.
@@ -78,7 +85,7 @@ while IFS= read -r md; do
       rc=1
     fi
   done
-done < /tmp/caps-md-files.txt
+done < "$md_files"
 if [ "$missing" -eq 0 ]; then
   printf '  every referenced path resolves\n'
 fi

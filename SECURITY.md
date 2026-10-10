@@ -54,15 +54,23 @@ outside it.
    Redirection targets must be plain relative names inside the workspace, with
    no `..`, no absolute path, no symlink component, and no empty or
    whitespace-only value. The engine re-verifies at the moment of open with
-   `O_NOFOLLOW` plus a regular-file check on the descriptor it holds, so a
-   symlink planted between the gateway's check and the engine's `open()` is
-   refused rather than followed.
+   descriptor-relative `openat()` calls with `O_NOFOLLOW` for every path
+   component, then verifies the opened descriptor is a regular file. A symlink
+   planted between the gateway's check and the engine's open is refused rather
+   than followed, and nonblocking open prevents a FIFO target from hanging the
+   engine before its type check. This workspace policy applies to gateway
+   requests; invoking the local C engine directly uses the caller's OS
+   permissions and is not a confinement boundary. The engine's descriptor
+   traversal refuses symlink and `..` components, but direct local invocation
+   can still use an absolute redirection path.
 
 4. **Killing an unrelated process.**
-   Termination captures the target's kernel identity — PID plus the start-time
-   field of `/proc/<pid>/stat` — when the first signal is sent, and re-verifies
-   it before every delayed escalation. If the PID was recycled, the escalation
-   is refused and the reason is logged. Refusing is always the safe direction:
+   Termination records each reported stage's kernel identity — PID plus the
+   start-time field of `/proc/<pid>/stat`. Before signaling a pipeline group it
+   verifies a still-live reported member and its process-group ID; delayed
+   escalation repeats that check and otherwise falls back to identity-checked
+   signals. Where pidfds are unavailable, a procfs check followed by `kill(2)`
+   is not atomic. Refusing is always the safe direction:
    an un-killed workload leaks a process, a wrong kill destroys an unrelated
    one.
 
@@ -100,10 +108,11 @@ These are deliberate, documented limits, not oversights.
 5. **Kernel or container vulnerabilities.** CAPS reads `/proc` and calls
    `kill()`. It does not attempt to harden the kernel.
 
-6. **Anything past the single sampled PID.** Only the CAPS-reported child is
-   observed. Descendants it forks are not discovered, not sampled, and not
-   drawn. See the limitations section of
-   [docs/observability-model.md](docs/observability-model.md).
+6. **Processes CAPS does not report.** The gateway samples each direct process
+   reported by CAPS, including every pipeline stage. Descendants those programs
+   fork are not discovered, sampled, or drawn. See the limitations section of
+   [docs/observability-model.md](docs/observability-model.md) and the
+   [process coverage decision](docs/process-coverage-decision.md).
 
 ## Hardening in this repository
 
@@ -116,7 +125,7 @@ documentation:
 | Bearer token required in remote mode | `web/backend/src/config/env.ts`, `web/backend/src/server.ts` | `web/backend/tests/unit/config.test.ts` |
 | Verified absolute executable resolution | `web/backend/src/security/policy.ts` | `web/backend/tests/unit/policy.test.ts` |
 | Redirect path policy | `web/backend/src/security/policy.ts`, `src/process.c` | `policy.test.ts`, `tests/test_redirection.sh` |
-| `O_NOFOLLOW` at open time | `src/process.c` | `tests/test_lifecycle.sh` |
+| Descriptor-relative `openat()` and `O_NOFOLLOW` for every redirection path component | `src/process.c` | `tests/test_redirection.sh` (parent/final symlink, FIFO, and character-device regressions) |
 | PID-reuse-safe termination | `web/backend/src/execution/terminator.ts` | `web/backend/tests/unit/infrastructure.test.ts` |
 | Fail-closed signal model | `src/main.c`, `src/process.c` | `tests/test_lifecycle.sh` |
 | No secrets in child env or logs | `web/backend/src/execution/runner.ts`, `web/backend/src/utils/logger.ts` | `scripts/check-repository-hygiene.sh` |

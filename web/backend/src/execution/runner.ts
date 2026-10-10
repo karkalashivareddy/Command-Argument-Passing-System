@@ -22,6 +22,14 @@ import {
   type ThermalDecisionRecord,
 } from "./thermalGuard.js";
 
+function forgetActiveIdentities(active: ActiveSession): void {
+  const identities = new Map<number, ProcessIdentity>();
+  for (const identity of active.ownedIdentities) identities.set(identity.pid, identity);
+  if (active.childIdentity !== null) identities.set(active.childIdentity.pid, active.childIdentity);
+  if (active.childGroupLeader !== null) identities.set(active.childGroupLeader.pid, active.childGroupLeader);
+  for (const identity of identities.values()) forgetIdentity(identity);
+}
+
 /** Displayed/recorded flag names for each redirection, matching open()/dup2(). */
 const REDIR_FLAGS: Record<keyof RedirectionSpec, string> = {
   in: "O_RDONLY",
@@ -443,7 +451,7 @@ export class ExecutionRunner {
       childIdentity: null,
       // The pipeline's process group and its leader's identity, both taken from
       // the engine's observed records. Null until a `process.started` carries
-      // them; the single-PID path remains available until then.
+      // them; per-stage identities are retained separately for safe signaling.
       childPgid: null,
       childGroupLeader: null,
       ownedIdentities: [],
@@ -636,7 +644,7 @@ private failBeforeStart(
   private terminateActive(active: ActiveSession, signal: NodeJS.Signals): ReturnType<typeof terminateGracefully> {
     return terminateGracefully(active.childPid, this.config.terminateGraceMs, {
       signal,
-      group: { pgid: active.childPgid, leader: active.childGroupLeader },
+      group: { pgid: active.childPgid, members: active.ownedIdentities },
     });
   }
 
@@ -737,6 +745,19 @@ private failBeforeStart(
         active.childPid = ev.pid;
         active.processStartedAt = ev.timestamp;
         active.processReaped = false;
+        if (ev.pid !== null) {
+          this.sessions.setPid(sessionId, ev.pid);
+          /*
+           * Read the kernel identity once. A fast stage can exit between
+           * separate reads of /proc/<pid>/stat, which would otherwise leave a
+           * cached process-group-leader identity outside ownedIdentities.
+           */
+          active.childIdentity = rememberIdentity(ev.pid);
+          const identity = active.childIdentity;
+          if (identity !== null && !active.ownedIdentities.some((i) => i.pid === identity.pid)) {
+            active.ownedIdentities.push(identity);
+          }
+        }
         /*
          * The pipeline's process group, taken from the engine's own record of
          * it rather than assumed. Stage 0 is the group leader, so the first
@@ -754,28 +775,10 @@ private failBeforeStart(
           // The leader's identity is captured here for the same reason the PID's
           // is: it must be recorded while the process provably cannot be recycled.
           if (active.childGroupLeader === null && ev.pid === observedPgid) {
-            active.childGroupLeader = rememberIdentity(ev.pid);
+            active.childGroupLeader = active.childIdentity;
           }
         }
-        if (ev.pid !== null) this.sessions.setPid(sessionId, ev.pid);
         if (typeof ev.pid === "number") {
-          /*
-           * Capture the kernel identity NOW, at the moment the engine reports the
-           * fork, rather than lazily when a signal is first sent.
-           *
-           * This is the safest instant to do it: the child was just created by
-           * this gateway and has not been reaped, so an unreaped child keeps its
-           * PID reserved and the value cannot already belong to something else.
-           *
-           * It also has to happen here. The identity is what makes a process
-           * attributable (`capsOwned` in the host inventory) and what a delayed
-           * SIGKILL is validated against. Capturing it only on the first signal
-           * meant a process that was never signalled had no identity at all --
-           * which is every process that simply ran to completion -- so ownership
-           * was structurally unreachable and the Process Explorer could never
-           * show a single CAPS-owned row.
-           */
-          active.childIdentity = rememberIdentity(ev.pid);
           /*
            * Ownership is per PROCESS, not per session. A pipeline reports one
            * `process.started` per stage, and `childIdentity` above is
@@ -783,12 +786,8 @@ private failBeforeStart(
            * last would be reported as host work by the Process Explorer while
            * CAPS held a verified identity for it.
            */
-          const identity = active.childIdentity;
-          if (identity !== null && !active.ownedIdentities.some((i) => i.pid === identity.pid)) {
-            active.ownedIdentities.push(identity);
-          }
-          // One sampler loop for this execution, started with an immediate
-          // first sample so even a very short process is observed once.
+          // One sampler loop for this PID, started promptly so a live short
+          // process has a chance to produce an initial sample.
           this.telemetry.start({
             sessionId,
             pid: ev.pid,
@@ -806,19 +805,20 @@ private failBeforeStart(
         if (typeof ev.payload.exitCode === "number") active.exitCode = ev.payload.exitCode;
         if (typeof ev.payload.outcome === "string") active.engineOutcome = ev.payload.outcome as EngineOutcome;
         active.processReaped = true;
-        this.telemetry.stop(sessionId);
+        this.telemetry.stop(sessionId, ev.pid ?? undefined);
         break;
       }
       case "process.exec_error":
       case "process.wait_failed":
       case "process.launch_failed":
+        if (ev.pid !== null) this.telemetry.stop(sessionId, ev.pid);
         if (typeof ev.payload.outcome === "string") active.engineOutcome = ev.payload.outcome as EngineOutcome;
         active.engineReason = typeof ev.payload.reason === "string" ? ev.payload.reason : null;
         if (ev.type === "process.exec_error") active.sawExecError = true;
         if (ev.type === "process.wait_failed") active.sawWaitFailure = true;
         if (ev.type === "process.launch_failed") active.sawLaunchFailure = true;
         active.processReaped = true;
-        this.telemetry.stop(sessionId);
+        if (ev.pid === null) this.telemetry.stop(sessionId);
         break;
       case "session.summary":
         // Recorded, but deliberately NOT treated as evidence of success: the
@@ -954,7 +954,7 @@ private failBeforeStart(
     // Sampling stops before the terminal event, so a snapshot can never follow
     // the end of the stream (invariant I7).
     this.telemetry.stop(sessionId);
-    forgetIdentity(active.childPid);
+    forgetActiveIdentities(active);
 
     // One terminal event type per terminal session status, so the row and the
     // stream can never describe the same ending differently. A cancelled
@@ -1029,7 +1029,7 @@ private failBeforeStart(
     if (active.finalized) return;
     active.finalized = true;
     this.telemetry.stop(sessionId);
-    forgetIdentity(active.childPid);
+    forgetActiveIdentities(active);
     this.sessions.finalize(sessionId, {
       status: "FAILED", exitCode: null, signal: null, isSuccess: false,
       durationMs: Math.max(0, Date.now() - active.monotonicStartMs), pid: active.childPid, error: reason,

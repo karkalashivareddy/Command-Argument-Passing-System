@@ -85,6 +85,22 @@ run_with_closed_fd 2 "$tmp/script"
 [ "$(cat "$tmp/status")" = "0" ] || failmsg "closed-stderr status=$(cat "$tmp/status")"
 echo "PASS: > works with stderr closed"
 
+echo "FD edge: a redirection descriptor equal to its target survives exec"
+cloexec_out="$tmp/cloexec_out"
+cloexec_err="$tmp/cloexec_err"
+(
+    exec 0<&-
+    exec 1>&-
+    "$bin" --run-line "echo preserved > $cloexec_out" 2> "$cloexec_err"
+)
+status=$?
+cloexec_contents=$(cat "$cloexec_out" 2>/dev/null)
+if [ "$status" = "0" ] && [ "$cloexec_contents" = "preserved" ]; then
+    echo "PASS: fd == target clears close-on-exec before exec"
+else
+    failmsg "fd == target redirection failed (status=$status, output='$cloexec_contents')"
+fi
+
 echo "FD edge: ordinary redirection is unchanged"
 printf 'echo hello > %s/out_f\n' "$tmp" > "$tmp/script_f"
 printf 'cat < %s/out_f\n' "$tmp" >> "$tmp/script_f"

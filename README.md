@@ -138,8 +138,9 @@ Read the diagram as five separately-owned concerns:
 
 * **EXECUTION** — only `./caps` calls `fork()` and `execvp()`. The gateway never
   does; it spawns the engine with an explicit argv array and `shell: false`.
-* **OBSERVATION** — telemetry comes from `/proc` for one PID. Nothing is
-  simulated, and nothing is inferred about other processes.
+* **OBSERVATION** — telemetry comes from `/proc` for each direct PID reported
+  by CAPS: one for a command or one per pipeline stage. Nothing is simulated,
+  and arbitrary descendants are not discovered.
 * **PERSISTENCE** — SQLite holds the canonical history. A second process table
   was removed precisely so there is only one source of truth.
 * **TRANSPORT** — SSE carries canonical events and a distinct end-of-stream
@@ -327,7 +328,7 @@ scope**, is in [SECURITY.md](SECURITY.md).
 | Arbitrary executable | Server-side allowlist resolved to a verified absolute path; `PATH` is never consulted for an allowlisted command |
 | Symlinked or swapped binary | `realpath` canonicalisation, `lstat` regular-file check, symlinked binary refused |
 | Path traversal | Workspace-relative names only; `..`, `~`, absolute paths, symlink components, and empty values rejected |
-| Symlink race at open time | Engine re-checks with `O_NOFOLLOW` plus a regular-file `fstat` on the descriptor it holds |
+| Symlink race at open time | Engine opens each parent with `openat(O_DIRECTORY|O_NOFOLLOW)`, opens the final component with `O_NOFOLLOW`, and verifies a regular file before use |
 | PID reuse | PID + kernel start time verified before every delayed escalation |
 | Runaway process | Timeout → `SIGTERM` → identity-verified `SIGKILL` |
 | Excess output | Configurable output cap per session, per channel |
@@ -425,13 +426,14 @@ bug in any one layer still cannot run an unbounded workload.
 | `caps_mixed_burn` | CPU + memory + I/O interleaved on one PID | seconds, MiB, MiB | `cpuPercent`, `rssBytes`, I/O counters |
 | `caps_fork_tree` | Bounded parent → children → grandchild topology, all reaped | seconds, children (1–4) | fork activity of the tracked process |
 
-**`caps_fork_tree` observes the direct child only.** The gateway samples
-exactly one PID — the one CAPS reported — and discovers nothing else. The
-descendant topology genuinely exists at the kernel level and the workload's
-own C test asserts it by reading `/proc` directly, but **the gateway never sees
-the descendants**: no node, no edge, no per-descendant metric. The profile
-publishes this as an explicit `observationScope` in `/api/capabilities` so the
-UI cannot imply coverage the sampler does not provide.
+**`caps_fork_tree` observes the direct process only.** For a pipeline CAPS
+reports each direct stage and the gateway samples each stage independently.
+The gateway does not discover processes those commands fork. The descendant
+topology genuinely exists at the kernel level and the workload's own C test
+asserts it by reading `/proc` directly, but **the gateway never sees those
+descendants**: no node, no edge, no per-descendant metric. The profile publishes
+this as an explicit `observationScope` in `/api/capabilities` so the UI cannot
+imply coverage the sampler does not provide.
 
 ## Quick start
 
@@ -747,9 +749,10 @@ Full detail, with the reason for each, in
 * **No per-process network I/O.** Linux publishes no per-process byte counters in
   procfs. Host interface counters are reported; per-process attribution is not
   attempted, because any figure would be a model rather than a measurement.
-* **Execution-scoped telemetry follows one PID.** The sampler follows the single
-  PID CAPS reported, so a program's own descendants are not discovered. The
-  **host** inventory is separate and does build a parent/child tree.
+* **Execution-scoped telemetry follows CAPS-reported processes.** A command has
+  one direct child; a pipeline has one direct child per stage. Each is sampled
+  independently. A program's own descendants are not discovered. The **host**
+  inventory is separate and builds a best-effort parent/child tree.
 * **Linux only.** The engine is POSIX; the telemetry is `/proc` and `/sys`. On any
   other platform the gateway reports telemetry as unavailable rather than
   inventing values.

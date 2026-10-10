@@ -7,7 +7,7 @@ import { openDatabase } from "../../src/db/database.js";
 import { EventRepository } from "../../src/db/repositories/events.js";
 import { SessionRepository } from "../../src/db/repositories/sessions.js";
 import { classifyLine, splitLines } from "../../src/execution/output.js";
-import { parseStartTicks, readProcessIdentity, resetIdentityCache, escalateTo } from "../../src/execution/terminator.js";
+import { parseStartTicks, readProcessIdentity, resetIdentityCache, escalateTo, forgetIdentity, recalledIdentity, rememberIdentity } from "../../src/execution/terminator.js";
 
 describe("output channel classification", () => {
   it("routes monitor protocol lines away from user output", () => {
@@ -79,6 +79,19 @@ describe("process identity (PID-reuse safety)", () => {
     expect(readProcessIdentity(0)).toBeNull();
     expect(readProcessIdentity(-1)).toBeNull();
     expect(readProcessIdentity(null)).toBeNull();
+  });
+
+  it("does not let stale finalization clear a newer identity for a reused PID", () => {
+    resetIdentityCache();
+    const current = rememberIdentity(process.pid);
+    expect(current).not.toBeNull();
+
+    forgetIdentity({ pid: process.pid, startTicks: current!.startTicks + 1 });
+    expect(recalledIdentity(process.pid)).toEqual(current);
+
+    forgetIdentity(current);
+    expect(recalledIdentity(process.pid)).toBeNull();
+    resetIdentityCache();
   });
 
   it("refuses to escalate without a recorded identity", async () => {

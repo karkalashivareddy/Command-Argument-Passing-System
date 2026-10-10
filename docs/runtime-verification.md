@@ -58,7 +58,7 @@ This record describes the Linux runtime and browser checks run on 2026-09-24. Li
 
 ## Runtime telemetry extension (2026-09-24)
 
-The Linux backend now samples only the child PID reported by CAPS, at a controlled 500 ms interval. Procfs data is persisted as `process.snapshot` events through the existing sequence, SQLite, SSE, and replay path. No user-supplied PID inspection endpoint was added.
+The Linux backend samples each direct PID reported by CAPS at a controlled 500 ms interval: one PID for a command, and one per pipeline stage. Procfs data is persisted as `process.snapshot` events through the existing sequence, SQLite, SSE, and replay path. No user-supplied PID inspection endpoint was added, and arbitrary descendants are not discovered.
 
 - Browser `sleep 10` run: execution `exec_mufq91cn579c96c172`; gateway/CAPS engine PID 563; CAPS-reported child PID 564; `/proc` PPID 563. The UI showed RUNNING while the process was active.
 - The event stream displayed 29 ordered events: 4 startup/lifecycle events, 21 `process.snapshot` events, `process.exited` with exit code 0 and duration 10006 ms, `session.summary`, and `execution.completed`.

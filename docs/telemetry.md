@@ -9,20 +9,22 @@ deliberately does not collect.
 src/telemetry/types.ts        snapshot contract, metric keys, categories
 src/telemetry/collector.ts    reads /proc/<pid>/{stat,status,io} + /proc/uptime
 src/telemetry/derive.ts       cpuPercent, I/O rates, fault rates
-src/telemetry/sampler.ts      one loop per execution, identity checks, lifecycle
+src/telemetry/sampler.ts      one loop per reported PID, identity checks, lifecycle
 src/telemetry/capabilities.ts /api/capabilities metadata, derived from the collector
 src/execution/runner.ts       launch, events, persistence — never parses procfs
 ```
 
-The runner owns orchestration. The sampler owns cadence and identity. The
+The runner owns orchestration. The sampler owns cadence and identity per
+CAPS-reported process. The
 collector owns parsing. The derive module owns arithmetic. A metric is read in
 exactly one place, so a value shown in the UI, in an export, and in a report
 comes from the same line of code.
 
 ## The sample
 
-One `process.snapshot` event per tick, 500 ms, containing **every** metric key the
-collector knows about. Each value carries its own provenance:
+One `process.snapshot` event per tracked PID per tick, 500 ms, containing
+**every** metric key the collector knows about. Each PID has an independent rate
+baseline. Each value carries its own provenance:
 
 ```json
 {
@@ -72,9 +74,10 @@ owner of the PID.
 
 ## Lifecycle
 
-The sampler starts on `process.started` and takes an immediate first sample, so
-a short process still gets real telemetry. It stops on `process.exited`,
-`process.exec_error`, session finalization, identity loss, or gateway shutdown.
+The sampler starts on each `process.started` and takes an immediate first
+sample, so a short command or pipeline stage still gets real telemetry. It
+stops for that PID on `process.exited`, `process.exec_error`, identity loss, or
+session finalization; gateway shutdown stops all samplers.
 The runner stops the sampler **before** emitting the terminal event, so nothing
 can be appended after the end of an execution. `publishSnapshot()` additionally
 refuses to emit for a finalized or unknown session and strips the internal
@@ -96,8 +99,10 @@ are assigned once, by the event repository.
 | file descriptors | not read from `/proc/<pid>/fd` |
 | request latency | needs block-layer tracing |
 
-Arbitrary descendants are not discovered: only the CAPS-owned child PID is
-sampled.
+Each command or pipeline stage directly reported by CAPS is sampled. Arbitrary
+descendants forked by those programs are not discovered. See the
+[process coverage decision](process-coverage-decision.md) for the contract and
+tradeoffs.
 
 ## Replay
 
@@ -117,18 +122,18 @@ into a number:
 | `thinIndices` | display-only thinning that keeps the first, last, and every peak |
 | `buildInspector` | one real sample, grouped, with the backend's own reasons |
 | `deriveRuntimePeaks` | mirrors the gateway's `computeRuntimePeaks` exactly |
-| `buildVisualStates` | the future 3D contract, see below |
+| `buildVisualStates` | the Process Space view-model contract, see below |
 
 Gaps in a track are drawn as gaps (`connectNulls={false}`), so an unavailable
 rate is visible instead of being smoothed away.
 
-## Future 3D contract
+## Process Space view
 
-`ProcessVisualState` is already produced and tested, but no 3D scene exists yet.
-It is a plain serializable object per sample, so a renderer can consume it
-without re-parsing telemetry:
+The 3D Process Space is implemented. It uses the same recorded samples and
+shared selection model as the 2D views; it does not collect telemetry of its
+own. Its visual state is derived from persisted samples:
 
-| Field | Source | Intended 3D use |
+| Field | Source | 3D use |
 | --- | --- | --- |
 | `cpu` | `cpuPercent` / session peak | emission rate and core glow |
 | `memory` | `rssBytes` / session peak | body volume and pressure colour |
@@ -139,7 +144,7 @@ without re-parsing telemetry:
 | `raw` | observed values | labels and tooltips |
 | `unavailable` | backend reasons | render "no data", never a zero |
 
-Normalized values are `0..1` against the **observed session peak**, so a
-30-second run and a 30-second sleep are both legible. A `null` in any field
-means the kernel did not report it, and the 3D scene must show that as missing
-data rather than a flat value.
+Normalized values are `0..1` against the **observed session peak**. A `null` in
+any field means the kernel did not report it and remains missing data in the 3D
+view. See [the 3D Process Space design](three-dimensional-observatory.md) for
+rendering, accessibility, and fallback behavior.

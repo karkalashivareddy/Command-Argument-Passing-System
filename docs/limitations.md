@@ -16,7 +16,7 @@ item. Things that are merely "not built yet" live in
 | **No shell.** There is no `sh -c`, no glob expansion, no `$VAR`, no command substitution, no `&&`/`\|\|`/`;` chaining, no heredocs, no brace expansion, no tilde expansion. | A shell is a second language with its own quoting rules, and two lexers eventually disagree about one quoting case — always in the unsafe direction. | The **execution path** uses exactly **one** lexer, `parser_tokenize()` in the C engine, which honours quoting and backslash escapes. The browser and the gateway both call it (`--inspect`, `--run-line`) rather than re-implementing it. The legacy whitespace-only `parser_parse()` survives only behind `caps --parse`, which is a debug view and is never what runs. |
 | **Not every Linux command.** Only an explicit allowlist, and per-command argument schemas. | An allowlist that grows without review is not an allowlist. | `GET /api/catalog` lists every command with its live argument schema. Unknown commands are **refused with a reason**, not attempted. |
 | **Pipelines are `|`-only.** No `&&`, no `\|\|`, no redirection chaining across a pipeline. | Each of those needs its own execution semantics. | Pipes, redirections, and per-stage timeouts are supported; the connectives are not. |
-| **`stderr` redirection is a terminal-route feature only.** `POST /api/sessions` accepts only `in`, `out`, and `append`, and rejects a `stderr` slot with 400. | The monitor protocol shares the child's `stderr` descriptor, so a redirected `stderr` is a redirection of the same stream CAPS diagnostics travel on. | `2>` and `2>>` are implemented and exercised on `POST /api/terminal/execute`. Both routes validate the target against the workspace policy, and the engine opens it `O_WRONLY|O_CREAT` with `O_NOFOLLOW`. |
+| **`stderr` redirection is a terminal-route feature only.** `POST /api/sessions` accepts only `in`, `out`, and `append`, and rejects a `stderr` slot with 400. | The monitor protocol shares the child's `stderr` descriptor, so a redirected `stderr` is a redirection of the same stream CAPS diagnostics travel on. | `2>` and `2>>` are implemented and exercised on `POST /api/terminal/execute`. Both routes validate the target against the workspace policy; the engine opens each component descriptor-relatively with `openat()` and `O_NOFOLLOW`, uses `O_NONBLOCK`, and checks the opened file type. |
 | **One command per execution request**, or one pipeline. | — | A pipeline is a single execution with N stages, not N executions. |
 
 ### `du` takes files, not directories
@@ -44,10 +44,11 @@ reads, which is a security change, not a documentation change. The catalog's
 | **Replay is not live telemetry.** | Replay reconstructs from persisted events. It executes nothing and inspects no live PID. The UI labels the mode and the SSE attachment is disabled while replaying. |
 | **Demo and Playground pages are not host telemetry.** | They create real CAPS executions and show real CAPS telemetry. They are not a source of host figures. |
 | **One host.** | No aggregation across machines, no remote agent, no clustering. |
+| **No complete process-tree telemetry.** | The gateway samples every direct PID reported by CAPS, including each pipeline stage. It does not discover arbitrary descendants forked by those processes. |
 | **Thermal and cpufreq are frequently unavailable.** | A host with no thermal zone, or a container without `/sys` mounted, reports `UNAVAILABLE` with a reason. Nothing is modelled or estimated. |
 | **PSS is usually absent.** | `smaps_rollup` makes the kernel walk page tables. It is read on a slow cadence for a bounded number of processes. Absent on most rows at any instant, which is stated rather than filled in. |
 | **Load average is not CPU utilisation.** | Load is a queue-depth count including uninterruptible sleep. This project never converts it to a percentage. |
-| **No eBPF, no tracing, no `perf`. | |
+| **No eBPF, no tracing, no `perf`.** | |
 | **No packet capture.** | Would require privileges CAPS does not assume. |
 
 ---
@@ -59,7 +60,7 @@ reads, which is a security change, not a documentation change. The catalog's
 | **Linux only.** | The engine is POSIX C using `fork`/`execvp`/`waitpid`/`pipe`/`setpgid`/`setrlimit`. The gateway's telemetry is `/proc` and `/sys`. A non-Linux host reports telemetry and pidfd as unavailable rather than pretending. |
 | **WSL2 is not bare metal.** | Verified on WSL2 (`6.18.33.2-microsoft-standard-WSL2`). Two consequences, both reported honestly rather than worked around: `/sys/devices/system/cpu/cpufreq` is typically absent, so CPU frequency is `UNAVAILABLE`; and thermal discovery depends on what the guest exposes. |
 | **Virtual-machine metrics are host metrics.** | On WSL2, `/proc/stat` and `/proc/meminfo` describe the guest. They are real readings of the guest kernel, and are labelled by source, but they are not physical-host figures. |
-| **The workspace is a confinement boundary, not a jail.** | Paths are resolved and confined, the allowlist is enforced, and redirections use `O_NOFOLLOW` plus a regular-file check. This is **not** a security sandbox: it does not use namespaces, seccomp, or cgroups. |
+| **The workspace is a confinement boundary, not a jail.** | The gateway confines accepted paths, and the engine opens redirection components with `openat()` / `O_NOFOLLOW` and checks the final descriptor type. This is **not** a security sandbox: it does not use namespaces, seccomp, or cgroups. |
 
 ---
 
@@ -112,8 +113,8 @@ Stated so the guarantee is not over-read. Full model in
 
 | Limitation | Detail |
 | --- | --- |
-| **The browser suite is behavioural, not visual.** | It asserts routing, real executions, SSE, replay integrity, and that a served surface is not blank. It does **not** diff pixels: there is no visual-regression infrastructure here, and inventing one would test screenshots rather than the system's claims. |
-| **No Clang run in the development environment.** | The verification host has no Clang and no package installation rights. Clang is therefore verified in **CI**, which is the authoritative check for it. The local run is GCC with `-Werror` plus ASan/UBSan. This is stated rather than implied. |
+| **The browser suite is behavioural, not visual.** | `scripts/browser-smoke.sh` checks the production HTTP/SSE/replay path, and `web/frontend/scripts/browser-smoke.mjs` checks Chromium keyboard, reduced-motion, mobile navigation, route history, a real execution, and the WebGL fallback. It does **not** diff pixels: there is no visual-regression infrastructure here. |
+| **Clang and sanitizer availability depend on the verification host.** | `scripts/verify-linux.sh` requires GCC, Clang, Node 22.5+, npm, Chromium dependencies, and the listed POSIX tools. CI and the documented WSL2 verification environment run both GCC and Clang suites with ASan/UBSan. |
 | **Sanitizer runs need bounded allocators under memory pressure.** | `allocator_may_return_null=1` and `hard_rss_limit_mb` are set for the workload suites so an exhausted environment becomes an ordinary test failure instead of losing the VM. |
 | **Real zombies need a helper.** | A shell cannot produce one; the pidfd suite drives `tests/helpers/zombie_maker.c`. |
 

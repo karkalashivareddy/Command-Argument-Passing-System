@@ -262,6 +262,10 @@ jobs:
           npm ci
           npm run build
 
+      - name: Install Chromium for the production browser checks
+        working-directory: web/frontend
+        run: npx playwright install --with-deps chromium
+
       - name: Install the gateway
         working-directory: web/backend
         run: npm ci
@@ -289,7 +293,7 @@ jobs:
       - name: Serve the production build
         working-directory: web/frontend
         run: |
-          nohup npx vite preview --host 127.0.0.1 --port 4173 \
+          nohup npx vite preview --host 127.0.0.1 --port 4173 --strictPort \
             > "$RUNNER_TEMP/preview.log" 2>&1 &
           for i in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:4173/ > /dev/null; then
@@ -302,8 +306,14 @@ jobs:
           cat "$RUNNER_TEMP/preview.log"
           exit 1
 
-      - name: Browser smoke suite
+      - name: Production stack smoke (HTTP, SSE, and replay)
         run: sh scripts/browser-smoke.sh
+
+      - name: Production browser behavior (Chromium)
+        env:
+          CAPS_BROWSER_FRONTEND: http://127.0.0.1:4173
+          CAPS_BROWSER_GATEWAY: http://127.0.0.1:3000
+        run: node web/frontend/scripts/browser-smoke.mjs
 
       - name: Gateway log on failure
         if: failure()

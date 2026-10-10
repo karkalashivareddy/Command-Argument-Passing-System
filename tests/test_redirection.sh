@@ -5,6 +5,7 @@
 set -u
 
 bin=${1:?usage: test_redirection.sh <binary>}
+bin_path=$(cd "$(dirname "$bin")" && pwd)/$(basename "$bin")
 fail=0
 
 failmsg() {
@@ -68,6 +69,38 @@ case "$err" in
     *"caps:"*) echo "PASS: unwritable target reported" ;;
     *) failmsg "unwritable target message: '$err'" ;;
 esac
+
+echo "Redir: a symlinked parent component cannot redirect outside the workspace"
+mkdir -p "$tmp/root" "$tmp/outside"
+printf 'protected\n' > "$tmp/outside/file"
+ln -s ../outside "$tmp/root/link"
+out=$(cd "$tmp/root" && printf '%s\n' 'echo escaped > link/file' 'echo alive' | "$bin_path" 2>/dev/null)
+[ "$out" = "alive" ] || failmsg "symlinked parent redirection was not rejected: '$out'"
+[ "$(cat "$tmp/outside/file")" = "protected" ] || failmsg "symlinked parent changed the outside file"
+echo "PASS: symlinked parent is refused without touching the outside file"
+
+echo "Redir: a symlinked final component cannot redirect outside the workspace"
+ln -s ../outside/file "$tmp/root/final-link"
+out=$(cd "$tmp/root" && printf '%s\n' 'echo escaped > final-link' 'echo alive' | timeout 2 "$bin_path" 2>/dev/null)
+status=$?
+[ "$status" -eq 0 ] && [ "$out" = "alive" ] || failmsg "final-component symlink was not rejected promptly (status=$status, output='$out')"
+[ "$(cat "$tmp/outside/file")" = "protected" ] || failmsg "final-component symlink changed the outside file"
+echo "PASS: final-component symlink is refused without touching the outside file"
+
+echo "Redir: a FIFO target is rejected without blocking"
+mkfifo "$tmp/root/pipe"
+out=$(cd "$tmp/root" && printf '%s\n' 'echo blocked > pipe' 'echo alive' | timeout 2 "$bin_path" 2>/dev/null)
+status=$?
+[ "$status" -eq 0 ] && [ "$out" = "alive" ] || failmsg "FIFO redirection blocked or failed to recover the REPL (status=$status, output='$out')"
+echo "PASS: FIFO redirection fails promptly and the REPL remains usable"
+
+if [ -c /dev/null ]; then
+    echo "Redir: a character-device target is rejected without running the command"
+    out=$(printf '%s\n' 'echo blocked > /dev/null' 'echo alive' | timeout 2 "$bin_path" 2>/dev/null)
+    status=$?
+    [ "$status" -eq 0 ] && [ "$out" = "alive" ] || failmsg "character-device redirection was not rejected promptly (status=$status, output='$out')"
+    echo "PASS: character-device redirection is rejected and the REPL remains usable"
+fi
 
 echo "Redir: operator without a command is a syntax error"
 out=$(printf '%s\n' "> $tmp/o" | "$bin" 2>&1 >/dev/null)

@@ -1,10 +1,10 @@
 # Process microscope
 
-CAPS exposes one execution-scoped Linux child, not an operating-system-wide process table. Procfs reads are tied to the child PID from CAPS `PROCESS_STARTED`; the gateway has no arbitrary-PID inspection API. A sample is accepted only when the child PPID matches the gateway-spawned CAPS process and the PID start ticks remain stable.
+CAPS exposes each direct Linux process it reports, not an operating-system-wide process table. A command reports one PID; a pipeline reports one PID per stage. Procfs reads are tied to those PIDs from CAPS `PROCESS_STARTED`; the gateway has no arbitrary-PID inspection API. A sample is accepted only when that PID's PPID matches the gateway-spawned CAPS process and its start ticks remain stable.
 
 | Field | Availability |
 | --- | --- |
-| Child PID | Available after `PROCESS_STARTED` |
+| CAPS-reported process PIDs | Available after `PROCESS_STARTED`, one for a command or each pipeline stage |
 | CAPS engine PID | Observed from the gateway's `child_process.spawn` result |
 | Parent PID / PPID | Observed from `/proc/<pid>/status`; graph edge appears only when it matches the CAPS engine PID |
 | Linux session ID / SID | Observed from `/proc/<pid>/stat` |
@@ -68,10 +68,10 @@ cannot disagree.
 
 ## Scope of what is observed
 
-The microscope observes the **one execution-scoped Linux child** CAPS creates, plus
-the gateway-spawned CAPS process itself. It is not an operating-system-wide process
-table, and this project does not implement eBPF, cgroup, syscall-level, network or
-host-wide observability. Descendants created by that child are not sampled, so the
-topology is a chain and the limits are stated on screen. `execvp()` replaces the
-child image without changing its PID, so it is a transition on the same identity
-and is never rendered as a second process.
+The microscope observes the direct Linux process IDs CAPS reports, plus the
+gateway-spawned CAPS process itself. A pipeline reports each stage separately.
+It is not an operating-system-wide process table, and this project does not
+implement eBPF, cgroups, syscall-level, network, or host-wide observability.
+Descendants created by a reported process are not sampled. `execvp()` replaces
+the process image without changing its PID, so it is a transition on the same
+identity and is never rendered as a second process.

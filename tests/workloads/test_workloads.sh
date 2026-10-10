@@ -172,22 +172,24 @@ echo "PASS: caps_io_burn removed its private workspace"
 # 5. caps_mixed_burn correlates CPU + RSS + I/O for one PID.
 # ---------------------------------------------------------------------------
 echo "== caps_mixed_burn =="
-"$dir/caps_mixed_burn" 3 32 4 >"$tmp/mixed.out" 2>"$tmp/mixed.err" &
+"$dir/caps_mixed_burn" 5 32 4 >"$tmp/mixed.out" 2>"$tmp/mixed.err" &
 mixed_pid=$!
-sleep 1
-mixed_rss=$(awk '/^VmRSS:/ {print $2}' "/proc/$mixed_pid/status" 2>/dev/null || echo 0)
-# CPU time is read as a DELTA over a second, not as one sample after a fixed
-# sleep. The workload sleeps 25 ms per iteration, so on a loaded runner a single
-# sample can land before the process has been charged a whole CLK_TCK tick and
-# read 0 ms even though it is genuinely CPU-bound. That made this assertion
-# depend on host load rather than on the workload: it failed in CI on a busy
-# 2-core runner while passing on an idle machine. Measuring growth across an
-# interval tests the claim actually being made -- that the kernel charges this
-# PID for CPU while it runs -- and cannot be satisfied by a lucky sample.
 mixed_cpu_before=$(cpuprobe "$mixed_pid")
-sleep 1
-mixed_cpu_after=$(cpuprobe "$mixed_pid")
-mixed_cpu=$((mixed_cpu_after - mixed_cpu_before))
+sleep 0.1
+mixed_rss=$(awk '/^VmRSS:/ {print $2}' "/proc/$mixed_pid/status" 2>/dev/null || echo 0)
+# Setup (mapping/touching memory and creating the private I/O file) happens
+# before the workload's timed loop. On a loaded host, a single fixed one-second
+# sample can therefore cover setup or a scheduler gap and observe no whole
+# CLK_TCK tick, even though the process later consumes CPU. Poll a bounded
+# window for the kernel counter to advance while keeping the assertion tied to
+# this PID's real /proc accounting.
+mixed_cpu=0
+for _ in $(seq 1 120); do
+    mixed_cpu_after=$(cpuprobe "$mixed_pid")
+    mixed_cpu=$((mixed_cpu_after - mixed_cpu_before))
+    [ "$mixed_cpu" -gt 0 ] && break
+    sleep 0.05
+done
 wait "$mixed_pid"
 mixed_status=$?
 [ "$mixed_status" -eq 0 ] ||

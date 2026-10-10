@@ -50,9 +50,10 @@ Notes:
 - `<` must exist; `open()` fails with `ENOENT` otherwise.
 - `>` and `>>` create the file if absent (mode 0644).
 - `>` truncates; `>>` preserves prior content and writes at the end.
-- `2>` and `2>>` are the same pair aimed at fd 2. Every target is opened
-  `O_NOFOLLOW` with a regular-file check, so `2>` is held to the same
-  workspace policy as `>`.
+- `2>` and `2>>` are the same pair aimed at fd 2. Each parent directory is
+  opened descriptor-relatively with `O_DIRECTORY | O_NOFOLLOW`; the final file
+  uses `O_NOFOLLOW | O_NONBLOCK` and a regular-file check. This rejects symlink
+  components and avoids blocking on a FIFO before it can be rejected.
 
 `O_TRUNC` vs `O_APPEND` is checkable: create a file, then run the same
 command twice with both spellings and inspect the contents.
@@ -108,19 +109,23 @@ close(1);     /* BUG: closes the file we just installed */
 ```
 
 The program that runs next writes to a closed stdout; the file ends up
-empty and the write fails. `caps` avoids this by skipping any
-descriptor whose value already equals its destination:
+empty and the write fails. Because CAPS opens redirections with
+`O_CLOEXEC`, simply skipping `dup2(1, 1)` would also leave stdout closed at
+`exec`. CAPS clears `FD_CLOEXEC` explicitly when the opened descriptor is
+already the destination:
 
 ```c
-if (fd == target)
-    continue;             /* already the target; keep it open */
+if (fd == target) {
+    fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC);
+    continue;             /* already the target; preserve it across exec */
+}
 dup2(fd, target);
 close(fd);
 ```
 
 `tests/test_fd_edge.sh` reproduces this by running a command with fd 0
 or fd 1 closed and checking that the redirected file receives the
-output.
+output, including when the open descriptor is exactly fd 0 or fd 1.
 
 ### `close()` policy
 
@@ -249,6 +254,8 @@ caller. Each is a clean teaching boundary, not an accident.
 - operators before the command (`> f echo hi`);
 - missing input file (command aborted, error reported, REPL alive);
 - unwritable target (command aborted, error reported, REPL alive);
+- symlinked parent and final components (no outside file modified);
+- FIFO and character-device targets (rejected without blocking);
 - syntax errors (`>`, `echo >`, and a redirection with no command);
 - built-in + redirection rejection.
 

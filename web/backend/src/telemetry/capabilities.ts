@@ -168,7 +168,7 @@ export async function telemetryCapabilities(options: { enabled: boolean; source:
     perMetricProvenance: "Every metric in a process.snapshot payload carries its own provenance: OBSERVED (read from procfs), DERIVED (computed from observations), or UNAVAILABLE (not produced, with a reason).",
     firstSampleRule: "The first sample of a process reports every rate as UNAVAILABLE; a rate is never invented or zero-filled.",
     counterResetRule: "A cumulative counter that decreases between two samples is reported as UNAVAILABLE, never as zero, because a decrease means the identity changed rather than that nothing was measured.",
-    identityVerification: "A sampled PID is accepted only while its procfs PPID matches the gateway-spawned CAPS process and its start ticks stay constant; otherwise sampling stops for that execution.",
+    identityVerification: "Each CAPS-reported PID is accepted only while its procfs PPID matches the gateway-spawned CAPS process and its start ticks stay constant; otherwise sampling stops for that PID.",
     notCollected: UNSUPPORTED_TELEMETRY_CATEGORIES.map((category) => category.label),
     processIdentity: await processIdentityCapability(),
   };

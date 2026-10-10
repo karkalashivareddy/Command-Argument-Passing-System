@@ -146,13 +146,13 @@ export const WORKLOAD_PROFILES: readonly WorkloadProfile[] = [
     id: "caps_fork_tree",
     label: "Process tree (fork activity of one tracked process)",
     description:
-      "Forks a bounded, deterministic parent -> children -> grandchild topology and reaps every child before exiting. The observatory samples the CAPS-reported child PID only, so this workload demonstrates that a single tracked process performs a number of forks and reaps them; it does NOT make descendants observable in the gateway telemetry.",
+      "Forks a bounded, deterministic parent -> children -> grandchild topology and reaps every child before exiting. The observatory samples the direct process CAPS reports (and every reported stage when used in a pipeline), so this workload demonstrates fork activity without making its descendants observable in gateway telemetry.",
     // Stated as fork *activity* rather than descendant observation, because
-    // the sampler follows one PID. Claiming "descendants" here would be a
-    // capability the gateway does not have.
+    // the sampler follows CAPS-reported direct PIDs. Claiming "descendants"
+    // here would be a capability the gateway does not have.
     observes: ["forkActivity", "processGroupId", "elapsedMs"],
     observationScope: {
-      sampled: "the single CAPS-reported child PID",
+      sampled: "the direct process reported by CAPS",
       notSampled: "descendants created by that child; the gateway discovers no process tree",
     },
     args: [duration(8), children()],

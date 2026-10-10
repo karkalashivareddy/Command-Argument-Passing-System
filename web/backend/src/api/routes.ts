@@ -312,7 +312,7 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
         loopbackOnly: config.bindMode === "local",
         authentication: config.authToken === null ? "none (loopback only)" : "bearer token required",
         executableResolution: "absolute verified path; PATH is never consulted for an allowlisted command",
-        redirectionHardening: "O_NOFOLLOW plus a regular-file check at open time",
+        redirectionHardening: "descriptor-relative openat with O_NOFOLLOW on each component, O_NONBLOCK on open, and a regular-file check",
       },
       /*
        * Stderr redirection is reported per route, not as one global flag.
@@ -334,13 +334,13 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
           "/api/terminal/execute": true,
         },
         stderrNote:
-          "stderr redirection is a terminal-route feature. POST /api/sessions accepts only in/out/append and rejects a stderr slot with 400. Both routes validate the target against the workspace policy and the engine opens it with O_NOFOLLOW.",
+          "stderr redirection is a terminal-route feature. POST /api/sessions accepts only in/out/append and rejects a stderr slot with 400. Both routes validate the target against the workspace policy; the engine opens each path component descriptor-relatively with O_NOFOLLOW.",
       },
       signals: {
         supported: ["SIGINT", "SIGTERM", "SIGKILL", "SIGQUIT", "SIGTSTP"],
         identityVerified: true,
         identityVerificationScope:
-          "verified before every DELAYED escalation, and for every signal delivered through pidfd. The first signal of a terminate or a timeout is delivered by kill(2) to the PID the gateway spawned, without a re-read of /proc first; that PID is the gateway's own unreaped child at that moment, so it cannot have been recycled. This distinction is published rather than blurred because SECURITY.md documents it and a reviewer will compare the two.",
+          "pipeline signals use kill(-pgid) only after a live CAPS-reported stage matches its captured start ticks and process-group ID; delayed escalation repeats this check. If no group member verifies, direct-stage fallbacks use captured identities and delayed per-PID escalation uses pidfd where available or start-ticks validation. Process-group validation and kill(2) cannot be atomic, and this local single-user tool is not a sandbox.",
       },
       workloads: {
         count: workloadCapabilities().length,
@@ -368,7 +368,7 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
         kernel: identity.kernel,
         terminationMechanism: identity.available ? "pidfd" : identity.confidence === "UNVERIFIED" ? "start-ticks" : "unavailable",
         invariant:
-          "CAPS signals only processes it started. Every DELAYED escalation, and every pidfd signal, checks that the kernel still reports the identity it recorded before delivering. A PID on its own is never sufficient, because PIDs are reused. The first signal of a terminate is the one exception, and it is described under signals.identityVerificationScope.",
+          "CAPS signals only reported direct stages or their observed process group. Process-group signals verify a live reported member before kill(-pgid); per-PID delayed escalation uses pidfd when available or start-ticks validation. The procfs-to-kill fallback and process-group validation are not atomic.",
       },
       observability: {
         timeline: { enabled: true, axis: "seconds-relative-to-first-event" },
@@ -1009,7 +1009,7 @@ export function registerRoutes(app: FastifyInstance, deps: ApiDeps): void {
       "",
       "## Limits of this report",
       "- Stderr redirection (`2>`, `2>>`) is supported and implemented; the low-level per-syscall `open()`/`dup2()`/`close()` events behind every redirection are not observed. The engine reports REDIRECTION_OPENED / REDIRECTION_FAILED and then performs the syscalls, and nothing below that is traced.",
-      "- Only the CAPS-owned child PID is sampled; descendants it forks are NOT discovered, so a fork-heavy workload shows fork activity of one process, not a process tree.",
+      "- Each direct process reported by CAPS is sampled, including every pipeline stage. Descendants forked by those processes are NOT discovered, so a fork-heavy workload does not produce complete process-tree telemetry.",
       "- CAPS diagnostics and the target's stderr share one descriptor and are separated line-wise, not at descriptor level.",
       "- Syscall tracing, eBPF, cgroup accounting, network I/O, and file-descriptor counts are not collected.",
       "- This is a summary of the persisted event store; it does not re-execute the command.",

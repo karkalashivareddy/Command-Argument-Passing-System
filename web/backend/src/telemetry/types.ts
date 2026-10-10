@@ -209,7 +209,7 @@ export const TELEMETRY_CATEGORIES: readonly TelemetryCategory[] = [
     id: "identity",
     label: "Process identity",
     metrics: ["pid", "capsEnginePid", "ppid", "processGroupId", "sessionId", "state", "command", "startTime", "elapsedMs"],
-    detail: "Identity and lifecycle attributes used to prove that a sampled PID is the CAPS-owned child: PPID, start ticks, and the process state letter from procfs. capsEnginePid is the gateway's own child-process PID, not a procfs read.",
+    detail: "Identity and lifecycle attributes used to prove that a sampled PID is a CAPS-reported direct child: PPID, start ticks, and the process state letter from procfs. capsEnginePid is the gateway's own child-process PID, not a procfs read.",
   },
 ];
 
